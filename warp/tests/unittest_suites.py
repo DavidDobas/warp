@@ -177,6 +177,8 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_context import TestContext
     from warp.tests.test_copy import TestCopy
     from warp.tests.test_core_library_binary import TestCoreLibraryBinary
+    from warp.tests.test_cpu_block_codegen import TestCpuBlockCodegen
+    from warp.tests.test_cpu_block_dim import TestCpuBlockDim
     from warp.tests.test_cpu_precompiled_headers import TestCpuPrecompiledHeaders
     from warp.tests.test_ctypes import TestCTypes
     from warp.tests.test_cuda_profiler import TestCudaProfiler
@@ -258,6 +260,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_version import TestVersion
     from warp.tests.tile.test_tile import TestTile
     from warp.tests.tile.test_tile_atomic_bitwise import TestTileAtomicBitwise
+    from warp.tests.tile.test_tile_block_dim_mismatch import TestTileBlockDimMismatch
     from warp.tests.tile.test_tile_cholesky import TestTileCholesky
     from warp.tests.tile.test_tile_cholesky_no_mathdx import TestTileCholeskyNoMathDx
     from warp.tests.tile.test_tile_composite_row import TestTileCompositeRow
@@ -278,6 +281,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.tile.test_tile_matmul_no_mathdx import TestTileMatmulNoMathDx
     from warp.tests.tile.test_tile_matmul_strides import TestTileMatmulStrides
     from warp.tests.tile.test_tile_oob import TestTileOOB
+    from warp.tests.tile.test_tile_print import TestTilePrint
     from warp.tests.tile.test_tile_reduce import TestTileReduce
     from warp.tests.tile.test_tile_shared_memory import (
         TestTileSharedMemory,
@@ -326,6 +330,8 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestContext,
         TestCopy,
         TestCoreLibraryBinary,
+        TestCpuBlockCodegen,
+        TestCpuBlockDim,
         TestCpuPrecompiledHeaders,
         TestCTypes,
         TestCudaArchSuffix,
@@ -435,6 +441,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTexture,
         TestTile,
         TestTileAtomicBitwise,
+        TestTileBlockDimMismatch,
         TestTileCholesky,
         TestTileCholeskyNoMathDx,
         TestTileCompositeRow,
@@ -455,6 +462,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTileMatmulNoMathDx,
         TestTileMatmulStrides,
         TestTileOOB,
+        TestTilePrint,
         TestTileReduce,
         TestTileSharedMemory,
         TestTileSharedMemoryMessages,
@@ -593,6 +601,8 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_conditional import TestConditional
     from warp.tests.test_constant_precision import TestConstantPrecision
     from warp.tests.test_context import TestContext
+    from warp.tests.test_cpu_block_codegen import TestCpuBlockCodegen
+    from warp.tests.test_cpu_block_dim import TestCpuBlockDim
     from warp.tests.test_cpu_precompiled_headers import TestCpuPrecompiledHeaders
     from warp.tests.test_ctypes import TestCTypes
     from warp.tests.test_cuda_profiler import TestCudaProfiler
@@ -695,6 +705,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_version import TestVerifyLibraryVersion, TestVersion
     from warp.tests.tile.test_tile import TestTile
     from warp.tests.tile.test_tile_atomic_bitwise import TestTileAtomicBitwise
+    from warp.tests.tile.test_tile_block_dim_mismatch import TestTileBlockDimMismatch
     from warp.tests.tile.test_tile_cholesky import TestTileCholesky
     from warp.tests.tile.test_tile_cholesky_no_mathdx import TestTileCholeskyNoMathDx
     from warp.tests.tile.test_tile_composite_row import TestTileCompositeRow
@@ -715,6 +726,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.tile.test_tile_matmul_no_mathdx import TestTileMatmulNoMathDx
     from warp.tests.tile.test_tile_matmul_strides import TestTileMatmulStrides
     from warp.tests.tile.test_tile_oob import TestTileOOB
+    from warp.tests.tile.test_tile_print import TestTilePrint
     from warp.tests.tile.test_tile_reduce import TestTileReduce
     from warp.tests.tile.test_tile_shared_memory import TestTileSharedMemory, TestTileSharedMemoryMessages
     from warp.tests.tile.test_tile_solve import TestTileSolve
@@ -732,6 +744,8 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestConditional,
         TestConstants,
         TestConstantPrecision,
+        TestCpuBlockCodegen,
+        TestCpuBlockDim,
         TestEnum,
         TestFastMath,
         TestFunc,
@@ -765,6 +779,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         # Tile (debug-safe)
         TestTile,
         TestTileAtomicBitwise,
+        TestTileBlockDimMismatch,
         TestTileCompositeRow,
         TestTileFFT,
         TestTileFFTNoMathDx,
@@ -777,6 +792,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestTileMatmulNoMathDx,
         TestTileMatmulStrides,
         TestTileOOB,
+        TestTilePrint,
         TestTileReduce,
         TestTileSharedMemory,
         TestTileSharedMemoryMessages,
