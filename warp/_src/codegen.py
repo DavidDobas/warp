@@ -8225,7 +8225,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu", grid_stride=Fals
                 ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
             elif var.type.storage == "shared":
                 lines += [
-                    f"{var.type.ctype()}& {name} = {var.emit()};\n"
+                    f"{var.type.ctype()} WP_THREAD& {name} = {var.emit()};\n"
                 ]  # reverse mode tiles alias the forward vars since shared tiles store both primal/dual vars together
         elif is_tile_stack(var.type):
             # Adjoint pointers are intentionally uninitialized -- all adj_tile_stack_* stubs are empty no-ops.
@@ -8673,7 +8673,8 @@ def codegen_kernel(kernel, device, options):
         template_backward = cpu_kernel_template_backward
     elif device == "metal":
         template_forward = cpu_kernel_template_forward
-        template_backward = cpu_kernel_template_backward  # the Metal backward entry passes the shared arena
+        # tile adjoints cannot run on Metal yet (null shared arena); codegen_module marks the kernel
+        template_backward = "" if any(is_tile(v.type) for v in adj.variables) else cpu_kernel_template_backward
     elif is_external_constant_params_entry:
         template_forward = cuda_external_constant_params_kernel_template_forward
         template_backward = ""
@@ -8828,7 +8829,8 @@ def codegen_module(kernel, device, options):
     }
     if device == "metal":
         source = metal_module_template_forward.format(**template_fmt_args)
-        if (options | kernel.options)["enable_backward"]:
+        # a Metal forward-only rebuild (see Module.load) drops every adjoint, including per-kernel opt-ins
+        if (options | kernel.options)["enable_backward"] and not options.get("metal_forward_only"):
             if any(is_tile(v.type) for v in kernel.adj.variables):
                 # tile adjoints still run with a null shared arena; Module.load turns this into a launch error
                 source += f"// wp_metal_backward_unsupported {template_fmt_args['name']}\n"

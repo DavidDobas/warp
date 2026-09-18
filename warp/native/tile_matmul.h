@@ -28,7 +28,8 @@ namespace wp {
 
 namespace partitioned_gemm {
 
-template <typename T> inline CUDA_CALLABLE const T WP_THREAD& index(const T WP_THREAD* __restrict__ p, int i, int j, int stride)
+template <typename T>
+inline CUDA_CALLABLE const T WP_THREAD& index(const T WP_THREAD* __restrict__ p, int i, int j, int stride)
 {
     return p[i * stride + j];
 }
@@ -61,10 +62,14 @@ template <int PartitionM, int PartitionN, typename Tile> struct partition_t {
     int shape[2];
 };
 
-template <typename Partition> inline int partition_size(const Partition WP_THREAD& part) { return part.shape[0] * part.shape[1]; }
+template <typename Partition> inline int partition_size(const Partition WP_THREAD& part)
+{
+    return part.shape[0] * part.shape[1];
+}
 
 // returns the x, y coordinates of a tile given a linear index
-template <typename Partition> inline void partition_coord(const Partition WP_THREAD& part, const int t, int WP_THREAD& i, int WP_THREAD& j)
+template <typename Partition>
+inline void partition_coord(const Partition WP_THREAD& part, const int t, int WP_THREAD& i, int WP_THREAD& j)
 {
     i = t / part.shape[1];
     j = t % part.shape[1];
@@ -161,7 +166,13 @@ template <
     typename StorageB,
     typename StorageC,
     typename T>
-inline CUDA_CALLABLE void scalar_matmul(const StorageA WP_THREAD& A, const StorageB WP_THREAD& B, StorageC WP_THREAD& C, T WP_THREAD& alpha, T WP_THREAD& beta)
+inline CUDA_CALLABLE void scalar_matmul(
+    const StorageA WP_THREAD& A,
+    const StorageB WP_THREAD& B,
+    StorageC WP_THREAD& C,
+    T WP_THREAD& alpha,
+    T WP_THREAD& beta
+)
 {
     constexpr int M = LayoutC::Shape::dim(0);
     constexpr int N = LayoutC::Shape::dim(1);
@@ -183,9 +194,10 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA WP_THREAD& A, const Stora
     using ElemC = typename remove_reference<decltype(C.ptr[0])>::type;
 
     // Direct pointer access with __restrict__ to enable compiler optimizations
-    const ElemA WP_THREAD* __restrict__ a_ptr = A.ptr;
-    const ElemB WP_THREAD* __restrict__ b_ptr = B.ptr;
-    ElemC WP_THREAD* __restrict__ c_ptr = C.ptr;
+    // shared tile storage: threadgroup memory on Metal (the macro is empty elsewhere)
+    const ElemA WP_TILE_SHARED* __restrict__ a_ptr = A.ptr;
+    const ElemB WP_TILE_SHARED* __restrict__ b_ptr = B.ptr;
+    ElemC WP_TILE_SHARED* __restrict__ c_ptr = C.ptr;
 
     // Choose register sub-tile size to maximize effective throughput, balancing
     // arithmetic intensity (FMAs per shared-memory load) against thread
@@ -347,7 +359,14 @@ template <
     typename Alpha,
     typename Beta>
 TileC WP_THREAD& tile_matmul(
-    Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA WP_THREAD& A, TileB WP_THREAD& B, TileC WP_THREAD& C, Alpha WP_THREAD& alpha, Beta WP_THREAD& beta
+    Fwd fun_forward,
+    AdjA fun_backward_A,
+    AdjB fun_backward_B,
+    TileA WP_THREAD& A,
+    TileB WP_THREAD& B,
+    TileC WP_THREAD& C,
+    Alpha WP_THREAD& alpha,
+    Beta WP_THREAD& beta
 )
 {
     using ShapeA = typename TileA::Layout::Shape;
@@ -397,7 +416,14 @@ template <
     typename Alpha,
     typename Beta>
 TileC WP_THREAD& tile_matmul_acc(
-    Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA WP_THREAD& A, TileB WP_THREAD& B, TileC WP_THREAD& C, Alpha WP_THREAD& alpha, Beta WP_THREAD& beta
+    Fwd fun_forward,
+    AdjA fun_backward_A,
+    AdjB fun_backward_B,
+    TileA WP_THREAD& A,
+    TileB WP_THREAD& B,
+    TileC WP_THREAD& C,
+    Alpha WP_THREAD& alpha,
+    Beta WP_THREAD& beta
 )
 {
     using ShapeA = typename TileA::Layout::Shape;

@@ -5017,7 +5017,11 @@ class Module:
                     # codegen names the source after the module, so replace the cached file in place
                     os.remove(binary_path)
                     self._compile(
-                        device, module_dir, output_name, output_arch, options=options | {"enable_backward": False}
+                        device,
+                        module_dir,
+                        output_name,
+                        output_arch,
+                        options=options | {"enable_backward": False, "metal_forward_only": True},
                     )
                     with open(binary_path, encoding="utf-8") as source_file:
                         source = source_file.read()
@@ -5036,7 +5040,9 @@ class Module:
                         f"Backward kernels of module '{self.name}' are not available on Metal (forward-only build used):\n"
                         f"{backward_error[:2000]}"
                     )
-                    metal_backward_unsupported = {k.get_mangled_name() for k in self.kernels.values()}
+                    metal_backward_unsupported = {
+                        k.get_mangled_name() for k in self.kernels.values() if k.hash is not None
+                    }
                 module_exec = ModuleExec(
                     handle,
                     module_hash,
@@ -6644,7 +6650,9 @@ class Runtime:
             # the LLVM helper library then comes from the ``warp`` package it overlays.
             import warp as _warp_pkg  # noqa: PLC0415
 
-            candidate = os.path.join(os.path.dirname(os.path.abspath(_warp_pkg.__file__)), "bin", os.path.basename(llvm_lib))
+            candidate = os.path.join(
+                os.path.dirname(os.path.abspath(_warp_pkg.__file__)), "bin", os.path.basename(llvm_lib)
+            )
             if os.path.exists(candidate):
                 llvm_lib = candidate
         if os.path.exists(llvm_lib):
@@ -6835,7 +6843,12 @@ class Runtime:
             self.core.wp_free_metal.restype = None
             self.core.wp_metal_gpu_address.argtypes = [ctypes.c_int, ctypes.c_void_p]
             self.core.wp_metal_gpu_address.restype = ctypes.c_uint64
-            self.core.wp_metal_capture_host_call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_int]
+            self.core.wp_metal_capture_host_call.argtypes = [
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.c_int,
+            ]
             self.core.wp_metal_capture_host_call.restype = ctypes.c_int
             self.core.wp_metal_owns_pointer.argtypes = [ctypes.c_int, ctypes.c_void_p]
             self.core.wp_metal_owns_pointer.restype = ctypes.c_int
