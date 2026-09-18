@@ -46,14 +46,19 @@ def quat_between_vectors(a: wp.vec3, b: wp.vec3) -> wp.quat:
     return wp.normalize(q)
 
 
-def _runs_on_host(device) -> bool:
+def _runs_on_host(device, unrecorded: str | None = None) -> bool:
     """Whether an array on ``device`` is processed by the host implementation of a utility.
 
     Metal arrays live in unified memory, so they use the host code paths once outstanding
-    GPU work has completed.
+    GPU work has completed. Callers whose host call cannot be recorded into a Metal graph (see
+    ``_host_call``) name the operation in ``unrecorded`` so that using it inside a capture raises.
     """
-    if device.is_metal and not device.is_capturing:
-        device.metal_synchronize()
+    if device.is_metal:
+        if not device.is_capturing:
+            device.metal_synchronize()
+        elif unrecorded:
+            # the host call would run once at capture time, on inputs whose kernels were only recorded
+            raise RuntimeError(f"{unrecorded} are not supported on Metal inside a graph capture")
     return not device.is_cuda
 
 
@@ -162,7 +167,17 @@ def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) 
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
 
-    status = _host_call(in_array.device, native_func, in_array.ptr, out_array.ptr, in_array.size, in_stride, out_stride, type_length, inclusive)
+    status = _host_call(
+        in_array.device,
+        native_func,
+        in_array.ptr,
+        out_array.ptr,
+        in_array.size,
+        in_stride,
+        out_stride,
+        type_length,
+        inclusive,
+    )
 
     # Only the CUDA implementations return a status.
     if in_array.device.is_cuda and not status:
@@ -248,17 +263,71 @@ def radix_sort_pairs(
 
     if _runs_on_host(keys.device):
         if keys.dtype == wp.int32:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_int_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_int_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.uint32:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_uint_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_uint_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.float32:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_float_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_float_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.float64:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_double_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_double_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.int64:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_int64_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_int64_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.uint64:
-            _host_call(keys.device, runtime.core.wp_radix_sort_pairs_uint64_host, keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_uint64_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         else:
             raise RuntimeError(
                 f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
@@ -447,7 +516,9 @@ def segmented_sort_pairs(
                 segment_start_indices_ptr, segment_end_indices_ptr = starts.ctypes.data, ends.ctypes.data
                 num_segments = int(valid.sum())
         if keys.dtype == wp.int32 and values.dtype == wp.int32:
-            success = _host_call(keys.device, runtime.core.wp_segmented_sort_pairs_int_host, 
+            success = _host_call(
+                keys.device,
+                runtime.core.wp_segmented_sort_pairs_int_host,
                 keys.ptr,
                 values.ptr,
                 count,
@@ -456,7 +527,9 @@ def segmented_sort_pairs(
                 num_segments,
             )
         elif keys.dtype == wp.float32 and values.dtype == wp.int32:
-            success = _host_call(keys.device, runtime.core.wp_segmented_sort_pairs_float_host, 
+            success = _host_call(
+                keys.device,
+                runtime.core.wp_segmented_sort_pairs_float_host,
                 keys.ptr,
                 values.ptr,
                 count,
@@ -585,8 +658,14 @@ def runlength_encode(
 
     if _runs_on_host(values.device):
         if values.dtype == wp.int32:
-            _host_call(values.device, runtime.core.wp_runlength_encode_int_host, 
-                values.ptr, run_values.ptr, run_lengths.ptr, run_count.ptr, value_count
+            _host_call(
+                values.device,
+                runtime.core.wp_runlength_encode_int_host,
+                values.ptr,
+                run_values.ptr,
+                run_lengths.ptr,
+                run_count.ptr,
+                value_count,
             )
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")

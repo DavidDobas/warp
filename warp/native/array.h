@@ -790,6 +790,8 @@ template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T> WP_THREAD&
     a.strides[0] = src.strides[1];
     a.strides[1] = src.strides[2];
     a.strides[2] = src.strides[3];
+    a.shape[3] = 0;  // unused dimensions read as zero (not left to the default constructor)
+    a.strides[3] = 0;
     a.ndim = src.ndim - 1;
 
     return a;
@@ -817,6 +819,8 @@ template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T> WP_THREAD&
     a.shape[1] = src.shape[3];
     a.strides[0] = src.strides[2];
     a.strides[1] = src.strides[3];
+    a.shape[2] = a.shape[3] = 0;  // unused dimensions read as zero
+    a.strides[2] = a.strides[3] = 0;
     a.ndim = src.ndim - 2;
 
     return a;
@@ -846,6 +850,8 @@ template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T> WP_THREAD&
         a.grad = grad_at_byte_offset(src, offset);
     a.shape[0] = src.shape[3];
     a.strides[0] = src.strides[3];
+    a.shape[1] = a.shape[2] = a.shape[3] = 0;  // unused dimensions read as zero
+    a.strides[1] = a.strides[2] = a.strides[3] = 0;
     a.ndim = src.ndim - 3;
 
     return a;

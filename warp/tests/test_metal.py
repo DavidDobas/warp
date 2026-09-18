@@ -3,11 +3,13 @@
 
 """Behavior specific to the Metal backend, exercised through the public API."""
 
+import gc
 import unittest
 
 import numpy as np
 
 import warp as wp
+import warp.sparse
 from warp.tests.unittest_utils import StdOutCapture
 
 
@@ -72,6 +74,42 @@ class TestMetal(unittest.TestCase):
         expected = np.ones(n, dtype=np.float32)
         expected[:4] = 2.0
         np.testing.assert_array_equal(data, expected)
+
+        # releasing the prefix must not take the mapping of the whole array with it
+        del prefix
+        gc.collect()
+        wp.launch(increment_kernel, dim=n, inputs=[a], device=self.device)
+        np.testing.assert_array_equal(data, expected + 1.0)
+
+    def test_host_memory_inner_page_then_whole(self):
+        """An import in the middle of a larger host array does not shadow the rest of that array."""
+        page = 16384
+        n = (4 * page) // 4
+        data = np.zeros(n, dtype=np.float32)
+        a = wp.array(data, dtype=float, device="cpu", copy=False)
+        first = page // 4 + 8
+        inner = a[first : first + 4]  # lies in the second page only
+        wp.launch(increment_kernel, dim=4, inputs=[inner], device=self.device)
+        wp.launch(increment_kernel, dim=n, inputs=[a], device=self.device)
+        del inner
+        gc.collect()
+        wp.launch(increment_kernel, dim=n, inputs=[a], device=self.device)
+        expected = np.full(n, 2.0, dtype=np.float32)
+        expected[first : first + 4] = 3.0
+        np.testing.assert_array_equal(data, expected)
+
+    def test_bsr_topology_inside_capture_raises(self):
+        """Host-side BSR operations cannot be replayed by a Metal graph, so they refuse to run in a capture."""
+        rows = wp.array([0, 1], dtype=int, device=self.device)
+        cols = wp.array([0, 1], dtype=int, device=self.device)
+        vals = wp.array([1.0, 2.0], dtype=float, device=self.device)
+        m = wp.sparse.bsr_zeros(2, 2, block_type=float, device=self.device)
+        with self.assertRaisesRegex(RuntimeError, "inside a graph capture"):
+            with wp.ScopedCapture(device=self.device):
+                wp.sparse.bsr_set_from_triplets(m, rows, cols, vals)
+        self.assertFalse(wp.get_device(self.device).is_capturing)
+        wp.sparse.bsr_set_from_triplets(m, rows, cols, vals)  # fine outside a capture
+        self.assertEqual(m.nnz_sync(), 2)
 
     def test_scalar_arguments_are_not_imported(self):
         """NumPy scalars passed by value are not treated as host arrays."""

@@ -961,8 +961,10 @@ static void metal_bvh_apply(uint64_t id, std::function<void(const MetalMirror<BV
     };
     if (wp_metal_capture_host_op(ordinal, apply))
         return;
-    wp_metal_synchronize(ordinal);  // the bounds may still be written by GPU kernels
-    apply();
+    // the bounds may still be written by GPU kernels; this entry point returns void, so a failure is
+    // handed to the next synchronize
+    if (wp_metal_synchronize(ordinal) != 0 || !apply())
+        wp_metal_defer_error(ordinal);
 }
 
 void wp_bvh_refit_device(uint64_t id)

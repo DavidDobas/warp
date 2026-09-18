@@ -3,12 +3,12 @@
 
 #pragma once
 
-#include <stddef.h>
-#include <stdint.h>
-
 #include "api.h"
 
 #include <cstddef>
+
+#include <stddef.h>
+#include <stdint.h>
 
 // Native Metal runtime (Apple GPUs). Implemented in metal.mm on Apple platforms and stubbed out in
 // metal_stub.cpp elsewhere. Device ordinals index the list of Metal devices with unified memory.
@@ -83,7 +83,9 @@ WP_API void* wp_metal_capture_end(int ordinal);  // NULL with an error set on fa
 WP_API int wp_metal_graph_launch(int ordinal, void* graph);
 WP_API int wp_metal_capture_push(int ordinal);
 WP_API void* wp_metal_capture_pop(int ordinal);
-WP_API int wp_metal_capture_conditional(int ordinal, int is_loop, const int* condition, void* on_true, void* on_false, int own_true, int own_false);
+WP_API int wp_metal_capture_conditional(
+    int ordinal, int is_loop, const int* condition, void* on_true, void* on_false, int own_true, int own_false
+);
 // Records a host function call (up to 8 integer/pointer args) to replay with the graph; 0 when not capturing.
 WP_API int wp_metal_capture_host_call(int ordinal, void* fn, const unsigned long long* args, int nargs);
 WP_API void wp_metal_graph_destroy(int ordinal, void* graph);
@@ -93,9 +95,21 @@ WP_API int wp_metal_flush(int ordinal);
 WP_API const char* wp_metal_profile_report();
 
 // Textures sampled by Metal kernels through the software path in texture.h (see texture.cpp).
-WP_API uint64_t wp_texture_create_metal(int ordinal, int ndim, int num_mip_levels, int* mip_widths, int* mip_heights,
-    int* mip_depths, int num_channels, int dtype, int filter_mode, int mip_filter_mode, int* address_modes,
-    bool use_normalized_coords, void** mip_data_ptrs_out);
+WP_API uint64_t wp_texture_create_metal(
+    int ordinal,
+    int ndim,
+    int num_mip_levels,
+    int* mip_widths,
+    int* mip_heights,
+    int* mip_depths,
+    int num_channels,
+    int dtype,
+    int filter_mode,
+    int mip_filter_mode,
+    int* address_modes,
+    bool use_normalized_coords,
+    void** mip_data_ptrs_out
+);
 WP_API void wp_texture_destroy_metal(uint64_t id);
 }
 
@@ -104,4 +118,6 @@ WP_API void wp_texture_destroy_metal(uint64_t id);
 // Records a host-side operation into the graph being captured (run in order at graph launch, after the
 // GPU work recorded before it). Returns false when no capture is active, so the caller runs it now.
 bool wp_metal_capture_host_op(int ordinal, std::function<bool()> op);
+// Keeps the current error string for the next wp_metal_synchronize(); for entry points that return void.
+void wp_metal_defer_error(int ordinal);
 #endif

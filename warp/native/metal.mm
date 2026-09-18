@@ -99,9 +99,14 @@ struct Device {
 
     // Foreign host memory (NumPy, Torch) wrapped page-aligned with newBufferWithBytesNoCopy so kernels can
     // address it in place; keyed by page base, released when the last importing array is freed.
+    // Imports are kept DISJOINT so every lookup by address (here, find_gpu_address and the GPU-side table) is
+    // unambiguous: a new range that overlaps existing imports is merged with them into one import over the
+    // union, which carries the summed references and keeps the absorbed buffers alive, since their GPU
+    // addresses may be baked into recorded graphs or in-flight argument blocks.
     struct Import {
         id<MTLBuffer> buffer;
         int refs = 0;
+        std::vector<id<MTLBuffer>> absorbed;
     };
     std::map<uintptr_t, Import> imports;
 
@@ -840,6 +845,8 @@ void wp_free_metal(int ordinal, void* ptr)
             // later): the graph keeps it alive, like CUDA graph allocations
             Graph* owner = owned != dev->capture_owned.end() ? owned->second : dev->capture;
             owner->retained.push_back(it->second);
+            if (dev->capture && dev->capture != owner)
+                dev->capture->retained.push_back(it->second);  // the open recording may reference it as well
             if (owned != dev->capture_owned.end())
                 dev->capture_owned.erase(owned);
             dev->allocations.erase(it);
@@ -852,6 +859,13 @@ void wp_free_metal(int ordinal, void* ptr)
         if (!has_pending_work(*dev))
             release_buffers(*dev, dev->deferred_frees);
     }
+}
+
+void wp_metal_defer_error(int ordinal)
+{
+    WP_METAL_LOCK();
+    if (Device* dev = get_device(ordinal))
+        dev->deferred_error = wp::get_error_string();
 }
 
 int wp_metal_owns_pointer(int ordinal, const void* ptr)
@@ -878,8 +892,20 @@ int wp_metal_import_host_memory(int ordinal, const void* ptr, size_t size)
         if (owns_range(*dev, uintptr_t(ptr), std::max(size, size_t(1))))
             return 1;  // the whole range already is Metal memory of this device: nothing to release later
         const uintptr_t page = uintptr_t(getpagesize());
-        const uintptr_t base = uintptr_t(ptr) & ~(page - 1);
-        const size_t length = size_t(((uintptr_t(ptr) + std::max(size, size_t(1)) - base) + page - 1) & ~(page - 1));
+        uintptr_t base = uintptr_t(ptr) & ~(page - 1);
+        uintptr_t end = (uintptr_t(ptr) + std::max(size, size_t(1)) + page - 1) & ~(page - 1);
+        // grow to the union with every import the page range overlaps (pages of those imports are valid too)
+        std::vector<std::map<uintptr_t, Device::Import>::iterator> overlapping;
+        for (auto o = dev->imports.begin(); o != dev->imports.end(); ++o) {
+            const uintptr_t o_end = o->first + o->second.buffer.length;
+            if (o->first < end && base < o_end)
+                overlapping.push_back(o);
+        }
+        for (auto o : overlapping) {
+            base = std::min(base, o->first);
+            end = std::max(end, uintptr_t(o->first + o->second.buffer.length));
+        }
+        const size_t length = size_t(end - base);
         MTLResourceOptions options = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;
         id<MTLBuffer> buffer = [dev->device newBufferWithBytesNoCopy:(void*)base
                                                               length:length
@@ -891,7 +917,14 @@ int wp_metal_import_host_memory(int ordinal, const void* ptr, size_t size)
             );
             return 0;
         }
-        dev->imports[base] = Device::Import { buffer, 1 };
+        Device::Import merged { buffer, 1, {} };
+        for (auto o : overlapping) {
+            merged.refs += o->second.refs;
+            merged.absorbed.push_back(o->second.buffer);  // stays resident until the union is released
+            merged.absorbed.insert(merged.absorbed.end(), o->second.absorbed.begin(), o->second.absorbed.end());
+            dev->imports.erase(o);
+        }
+        dev->imports[base] = std::move(merged);
         [dev->residency_set addAllocation:buffer];
         dev->residency_dirty = true;
         dev->table_dirty = true;
@@ -910,13 +943,13 @@ void wp_metal_release_host_memory(int ordinal, const void* ptr, size_t size)
         if (it == dev->imports.end() || --it->second.refs > 0)
             return;
         dev->table_dirty = true;
-        if (dev->capture) {
-            dev->capture->retained.push_back(it->second.buffer);
-            dev->imports.erase(it);
-            return;
-        }
-        dev->deferred_frees.push_back(it->second.buffer);
+        std::vector<id<MTLBuffer>> buffers = it->second.absorbed;
+        buffers.push_back(it->second.buffer);
         dev->imports.erase(it);
+        std::vector<id<MTLBuffer>>& keep = dev->capture ? dev->capture->retained : dev->deferred_frees;
+        keep.insert(keep.end(), buffers.begin(), buffers.end());
+        if (dev->capture)
+            return;  // the recording may reference this memory: the graph keeps it alive
         if (!retire_completed(*dev))
             dev->deferred_error = wp::get_error_string();  // cannot be returned from a release
         if (!has_pending_work(*dev))

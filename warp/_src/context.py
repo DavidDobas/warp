@@ -3514,7 +3514,7 @@ class ModuleBuilder:
 
     def _metal_unsupported_reason(self, source: str) -> str | None:
         """Why a generated function or kernel cannot be compiled for Metal, or None."""
-        code = re.sub(r"//[^\n]*", "", source)  # comments echo the Python source
+        code = re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.S)  # comments echo the Python source
         if re.search(r"\bfloat64\b|\bdouble\b", code):  # whole tokens: not names that merely contain them
             return "float64"
         for name in self.metal_skipped:
