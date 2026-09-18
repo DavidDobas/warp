@@ -1765,9 +1765,9 @@ inline CUDA_CALLABLE void adj_atomic_add(
 )
 {
     if (adj_buf.data)
-        adj_value += index(adj_buf, i, j);
+        adj_value += T(index(adj_buf, i, j));
     else if (buf.grad)
-        adj_value += index_grad(buf, i, j);
+        adj_value += T(index_grad(buf, i, j));
 
     FP_VERIFY_ADJ_2(value, adj_value)
 }
@@ -1787,9 +1787,9 @@ inline CUDA_CALLABLE void adj_atomic_add(
 )
 {
     if (adj_buf.data)
-        adj_value += index(adj_buf, i, j, k);
+        adj_value += T(index(adj_buf, i, j, k));
     else if (buf.grad)
-        adj_value += index_grad(buf, i, j, k);
+        adj_value += T(index_grad(buf, i, j, k));
 
     FP_VERIFY_ADJ_3(value, adj_value)
 }
@@ -1811,9 +1811,9 @@ inline CUDA_CALLABLE void adj_atomic_add(
 )
 {
     if (adj_buf.data)
-        adj_value += index(adj_buf, i, j, k, l);
+        adj_value += T(index(adj_buf, i, j, k, l));
     else if (buf.grad)
-        adj_value += index_grad(buf, i, j, k, l);
+        adj_value += T(index_grad(buf, i, j, k, l));
 
     FP_VERIFY_ADJ_4(value, adj_value)
 }
@@ -1830,9 +1830,9 @@ inline CUDA_CALLABLE void adj_atomic_sub(
 )
 {
     if (adj_buf.data)
-        adj_value -= index(adj_buf, i);
+        adj_value -= T(index(adj_buf, i));
     else if (buf.grad)
-        adj_value -= index_grad(buf, i);
+        adj_value -= T(index_grad(buf, i));
 
     FP_VERIFY_ADJ_1(value, adj_value)
 }
@@ -1850,9 +1850,9 @@ inline CUDA_CALLABLE void adj_atomic_sub(
 )
 {
     if (adj_buf.data)
-        adj_value -= index(adj_buf, i, j);
+        adj_value -= T(index(adj_buf, i, j));
     else if (buf.grad)
-        adj_value -= index_grad(buf, i, j);
+        adj_value -= T(index_grad(buf, i, j));
 
     FP_VERIFY_ADJ_2(value, adj_value)
 }
@@ -1872,9 +1872,9 @@ inline CUDA_CALLABLE void adj_atomic_sub(
 )
 {
     if (adj_buf.data)
-        adj_value -= index(adj_buf, i, j, k);
+        adj_value -= T(index(adj_buf, i, j, k));
     else if (buf.grad)
-        adj_value -= index_grad(buf, i, j, k);
+        adj_value -= T(index_grad(buf, i, j, k));
 
     FP_VERIFY_ADJ_3(value, adj_value)
 }
@@ -1896,9 +1896,9 @@ inline CUDA_CALLABLE void adj_atomic_sub(
 )
 {
     if (adj_buf.data)
-        adj_value -= index(adj_buf, i, j, k, l);
+        adj_value -= T(index(adj_buf, i, j, k, l));
     else if (buf.grad)
-        adj_value -= index_grad(buf, i, j, k, l);
+        adj_value -= T(index_grad(buf, i, j, k, l));
 
     FP_VERIFY_ADJ_4(value, adj_value)
 }
