@@ -82,8 +82,9 @@ Limitations
   * ``wp.atomic_min()`` and ``wp.atomic_max()`` on ``wp.uint64`` are atomic on Apple9 and later, where the returned
     previous value can be stale under contention. On older GPUs they are plain read-modify-write.
   * Plain read-modify-write, correct only without concurrent writers to the same element: every atomic operation
-    on 8-bit integers; minimum, maximum, exchange and compare-and-swap on 16-bit types; minimum and maximum on
-    ``wp.int64``; exchange and compare-and-swap on 64-bit integers.
+    on 8-bit integers; minimum, maximum, exchange, compare-and-swap and the bitwise operations (``&=``, ``|=``,
+    ``^=``) on 16-bit types; minimum and maximum on ``wp.int64``; exchange, compare-and-swap and the bitwise
+    operations on 64-bit integers.
 * Spinlocks built from ``wp.atomic_cas()`` can hang: Apple GPUs do not guarantee forward progress between
   SIMD lanes.
 * ``wp.fixedarray``, fabric arrays, deterministic mode (``wp.config.deterministic``), saveable (APIC) captures and

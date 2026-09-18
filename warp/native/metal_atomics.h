@@ -5,7 +5,8 @@
 
 // Device-memory atomics for the Metal backend, used by the wp::atomic_* builtins.
 // Metal has native atomics for 32-bit integers, floats (add/exchange/CAS only) and,
-// on Apple9 GPUs and later, 64-bit integers; everything else is emulated.
+// on Apple9 GPUs and later, unsigned 64-bit minimum and maximum. 16-bit and 64-bit adds are
+// built from those; everything else is a plain read-modify-write (see docs/user_guide/metal.rst).
 
 #include <metal_stdlib>
 
