@@ -44,6 +44,23 @@ int wp_metal_capture_begin(int) { return unavailable(); }
 
 void* wp_metal_capture_end(int) { return unavailable(), nullptr; }
 
+int wp_metal_capture_push(int) { return unavailable(); }
+
+void* wp_metal_capture_pop(int) { return unavailable(), nullptr; }
+
+int wp_metal_capture_conditional(int, int, const int*, void*, void*, int, int) { return unavailable(); }
+
+bool wp_metal_capture_host_op(int, std::function<bool()>) { return false; }
+
+void wp_metal_defer_error(int) { }
+
+uint64_t wp_texture_create_metal(int, int, int, int*, int*, int*, int, int, int, int, int*, bool, void**)
+{
+    return unavailable(), 0;
+}
+
+void wp_texture_destroy_metal(uint64_t) { }
+
 int wp_metal_graph_launch(int, void*) { return unavailable(); }
 
 void wp_metal_graph_destroy(int, void*) { }
