@@ -6018,6 +6018,10 @@ class Adjoint:
             reverse_operation = f"atomic_{operation}"
 
         adj.add_forward(forward_statement, replay=f"// {forward_statement}")
+        if adj.metal and is_reference(array_root.type):
+            # the descriptor lives in device memory: the adjoint takes a thread copy (wp::load() also
+            # translates its pointers), the element it returns still refers to the array's memory
+            array_expression = f"wp::load({array_root.emit()})"
         adj.add_reverse(
             f"wp::adj_array_{reverse_operation}_slot({array_expression}, {adj.array_slot_adjoint(array_root)}, "
             f"{rhs.emit_adj()}, {slot_accessor}, {index_expressions});"
