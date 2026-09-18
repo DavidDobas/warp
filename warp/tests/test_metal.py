@@ -58,6 +58,36 @@ def print_second_kernel():
     print("metal second string")
 
 
+@wp.kernel
+def mat44_products_twice(a: wp.array[wp.mat44], b: wp.array[wp.mat44], out: wp.array[float]):
+    c = a[0] * b[0]
+    d = a[0] * b[0]
+    for i in range(4):
+        for j in range(4):
+            out[i * 4 + j] = 2.0 * c[i, j]
+            out[16 + i * 4 + j] = 3.0 * d[i, j]
+
+
+@wp.kernel
+def mat44_products_chain(a: wp.array[wp.mat44], b: wp.array[wp.mat44], out: wp.array[float]):
+    c = a[0] * b[0]
+    d = (c * b[0]) * (a[0] * c)
+    for i in range(4):
+        for j in range(4):
+            out[i * 4 + j] = 2.0 * c[i, j]
+            out[16 + i * 4 + j] = 3.0 * d[i, j]
+
+
+@wp.kernel
+def mat44_products_inverse(a: wp.array[wp.mat44], b: wp.array[wp.mat44], out: wp.array[float]):
+    c = wp.inverse(a[0])
+    d = (c * a[0]) * b[0]
+    for i in range(4):
+        for j in range(4):
+            out[i * 4 + j] = 2.0 * c[i, j]
+            out[16 + i * 4 + j] = 3.0 * d[i, j]
+
+
 @unittest.skipUnless(metal_available(), "Requires an Apple GPU")
 class TestMetal(unittest.TestCase):
     device = "metal:0"
@@ -196,6 +226,30 @@ class TestMetal(unittest.TestCase):
         self.assertIsNotNone(t.grad)
         self.assertEqual(t.grad.data_ptr(), a.grad.ptr)
         np.testing.assert_array_equal(t.grad.numpy(), np.full(4, 2.0, dtype=np.float32))
+
+    def test_mat44_product_gradients_match_cpu(self):
+        """Several 4x4 products in one kernel used to lose the gradient of one operand on Metal."""
+        rng = np.random.default_rng(7)
+        a_np = (rng.standard_normal((1, 4, 4)) + 3.0 * np.eye(4)).astype(np.float32)
+        b_np = rng.standard_normal((1, 4, 4)).astype(np.float32)
+        for kernel in (mat44_products_twice, mat44_products_chain, mat44_products_inverse):
+            for selected in (0, 17, 31):
+                gradients = {}
+                for device in ("cpu", self.device):
+                    a = wp.array(a_np, dtype=wp.mat44, requires_grad=True, device=device)
+                    b = wp.array(b_np, dtype=wp.mat44, requires_grad=True, device=device)
+                    out = wp.zeros(32, dtype=float, requires_grad=True, device=device)
+                    tape = wp.Tape()
+                    with tape:
+                        wp.launch(kernel, dim=1, inputs=[a, b], outputs=[out], device=device)
+                    seed = np.zeros(32, dtype=np.float32)
+                    seed[selected] = 1.0
+                    tape.backward(grads={out: wp.array(seed, dtype=float, device=device)})
+                    gradients[device] = (tape.gradients[a].numpy(), tape.gradients[b].numpy())
+                for on_cpu, on_metal in zip(gradients["cpu"], gradients[self.device], strict=True):
+                    np.testing.assert_allclose(
+                        on_metal, on_cpu, rtol=1e-3, atol=1e-4, err_msg=f"{kernel.key}[{selected}]"
+                    )
 
 
 class TestMetalInlineBudget(unittest.TestCase):

@@ -67,10 +67,6 @@ Limitations
 
 * **No** ``float64``. Apple GPUs have no double-precision type. A kernel that uses ``wp.float64``, or a vector,
   matrix or struct built on it, raises when it is launched on Metal. The rest of its module still loads.
-* **Known issue: gradients of 4x4 matrix products.** When a kernel contains more than one product of two 4x4
-  matrices (``wp.mat44``), the gradient of one operand can come out as zero. The forward result is correct, and
-  2x2 and 3x3 matrices are not affected. This is a miscompilation by the Metal compiler that has no workaround yet;
-  check such gradients against the CPU device.
 * **Tile kernels are forward only.** Kernels that use tile operations have no adjoint on Metal.
 * If the adjoint of a module fails to compile on Metal, Warp warns and rebuilds the module forward-only, so the
   forward pass keeps working. Launching one of its backward kernels raises.
