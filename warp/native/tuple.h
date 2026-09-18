@@ -12,7 +12,7 @@ template <> struct tuple_t<> {
     static constexpr int size() { return 0; }
 
     // Base case: empty tuple.
-    template <typename Callable> void apply(Callable&&) const { }
+    template <typename Callable> void apply(Callable WP_THREAD&&) const { }
 };
 
 template <typename Head, typename... Tail> struct tuple_t<Head, Tail...> {
@@ -29,7 +29,7 @@ template <typename Head, typename... Tail> struct tuple_t<Head, Tail...> {
     static constexpr int size() { return 1 + tuple_t<Tail...>::size(); }
 
     // Applies a callable to each element.
-    template <typename Callable> void apply(Callable&& func) const
+    template <typename Callable> void apply(Callable WP_THREAD&& func) const
     {
         func(head);  // Apply the callable to the current element.
         tail.apply(func);  // Recursively process the rest of the tuple.
@@ -46,7 +46,7 @@ template <typename... Args> CUDA_CALLABLE inline tuple_t<Args...> tuple(Args... 
 // Can be replaced with simpler member function version when our CPU compiler
 // backend supports constexpr if statements.
 template <int N, typename Head, typename... Tail> struct tuple_get {
-    static CUDA_CALLABLE inline const auto& value(const tuple_t<Head, Tail...>& t)
+    static CUDA_CALLABLE inline const auto WP_THREAD& value(const tuple_t<Head, Tail...> WP_THREAD& t)
     {
         return tuple_get<N - 1, Tail...>::value(t.tail);
     }
@@ -54,30 +54,30 @@ template <int N, typename Head, typename... Tail> struct tuple_get {
 
 // Specialization for the base case N == 0. Simply return the head of the tuple.
 template <typename Head, typename... Tail> struct tuple_get<0, Head, Tail...> {
-    static CUDA_CALLABLE inline const auto& value(const tuple_t<Head, Tail...>& t) { return t.head; }
+    static CUDA_CALLABLE inline const auto WP_THREAD& value(const tuple_t<Head, Tail...> WP_THREAD& t) { return t.head; }
 };
 
-template <int Index, typename... Args> CUDA_CALLABLE inline auto extract(const tuple_t<Args...>& t)
+template <int Index, typename... Args> CUDA_CALLABLE inline auto extract(const tuple_t<Args...> WP_THREAD& t)
 {
     return tuple_get<Index, Args...>::value(t);
 }
 
-template <typename... Args> CUDA_CALLABLE inline int len(const tuple_t<Args...>& t) { return t.size(); }
+template <typename... Args> CUDA_CALLABLE inline int len(const tuple_t<Args...> WP_THREAD& t) { return t.size(); }
 
-template <typename... Args> CUDA_CALLABLE inline void print(const tuple_t<Args...>& t)
+template <typename... Args> CUDA_CALLABLE inline void print(const tuple_t<Args...> WP_THREAD& t)
 {
     t.apply([&](auto a) { print(a); });
 }
 
-template <typename... Args> CUDA_CALLABLE inline void adj_print(const tuple_t<Args...>& t, tuple_t<Args...>& adj_t)
+template <typename... Args> CUDA_CALLABLE inline void adj_print(const tuple_t<Args...> WP_THREAD& t, tuple_t<Args...> WP_THREAD& adj_t)
 {
     adj_t.apply([&](auto a) { print(a); });
 }
 
-CUDA_CALLABLE inline tuple_t<> add(const tuple_t<>& a, const tuple_t<>& b) { return tuple_t<>(); }
+CUDA_CALLABLE inline tuple_t<> add(const tuple_t<> WP_THREAD& a, const tuple_t<> WP_THREAD& b) { return tuple_t<>(); }
 
 template <typename Head, typename... Tail>
-CUDA_CALLABLE inline tuple_t<Head, Tail...> add(const tuple_t<Head, Tail...>& a, const tuple_t<Head, Tail...>& b)
+CUDA_CALLABLE inline tuple_t<Head, Tail...> add(const tuple_t<Head, Tail...> WP_THREAD& a, const tuple_t<Head, Tail...> WP_THREAD& b)
 {
     tuple_t<Head, Tail...> out;
     out.head = add(a.head, b.head);
@@ -86,18 +86,18 @@ CUDA_CALLABLE inline tuple_t<Head, Tail...> add(const tuple_t<Head, Tail...>& a,
 }
 
 CUDA_CALLABLE inline void
-adj_add(const tuple_t<>& a, const tuple_t<>& b, tuple_t<>& adj_a, tuple_t<>& adj_b, const tuple_t<>& adj_ret)
+adj_add(const tuple_t<> WP_THREAD& a, const tuple_t<> WP_THREAD& b, tuple_t<> WP_THREAD& adj_a, tuple_t<> WP_THREAD& adj_b, const tuple_t<> WP_THREAD& adj_ret)
 {
     // nop: base case for empty tuple recursion
 }
 
 template <typename Head, typename... Tail>
 CUDA_CALLABLE inline void adj_add(
-    const tuple_t<Head, Tail...>& a,
-    const tuple_t<Head, Tail...>& b,
-    tuple_t<Head, Tail...>& adj_a,
-    tuple_t<Head, Tail...>& adj_b,
-    const tuple_t<Head, Tail...>& adj_ret
+    const tuple_t<Head, Tail...> WP_THREAD& a,
+    const tuple_t<Head, Tail...> WP_THREAD& b,
+    tuple_t<Head, Tail...> WP_THREAD& adj_a,
+    tuple_t<Head, Tail...> WP_THREAD& adj_b,
+    const tuple_t<Head, Tail...> WP_THREAD& adj_ret
 )
 {
     adj_add(a.head, b.head, adj_a.head, adj_b.head, adj_ret.head);

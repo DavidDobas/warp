@@ -8,6 +8,7 @@ import hashlib
 import json
 import ntpath
 import os
+import re
 import shutil
 import threading
 import time
@@ -198,6 +199,87 @@ def build_cpu(
     )
     if err != 0:
         raise Exception(f"CPU kernel build failed with error code {err}")
+
+
+_QUOTED_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"[ \t]*$', re.MULTILINE)
+_METAL_IF = re.compile(r"^\s*#\s*if\s+(!?)defined\(__METAL_VERSION__\)\s*(//.*)?$")
+_PP_IF = re.compile(r"^\s*#\s*if(n?def)?\b")
+_PP_ELIF = re.compile(r"^\s*#\s*elif\b(.*)$")
+_PP_ELSE = re.compile(r"^\s*#\s*else\b")
+_PP_ENDIF = re.compile(r"^\s*#\s*endif\b")
+
+
+def _resolve_metal_conditionals(source: str) -> str:
+    """Resolve ``#if [!]defined(__METAL_VERSION__)`` blocks as the Metal compiler would.
+
+    ``expand_includes`` inlines each header once, so an include that only appears in a
+    branch Metal skips must not count as included. Other conditionals are left untouched;
+    an ``#elif`` following a skipped branch becomes the new ``#if``.
+    """
+    lines = source.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        match = _METAL_IF.match(lines[i])
+        if match is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        metal_branch_first = match.group(1) == ""
+        keeping = metal_branch_first
+        rewritten = False  # an #elif after the skipped branch reopened a plain conditional
+        depth = 1
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            i += 1
+            if _PP_IF.match(line):
+                depth += 1
+            elif _PP_ENDIF.match(line):
+                depth -= 1
+                if depth == 0:
+                    if rewritten:
+                        out.append(line)
+                    break
+            elif depth == 1 and not rewritten:
+                elif_match = _PP_ELIF.match(line)
+                if elif_match or _PP_ELSE.match(line):
+                    if metal_branch_first:
+                        keeping = False  # Metal branch is done; drop the alternatives
+                    else:
+                        keeping = True
+                        if elif_match:
+                            out.append(f"#if{elif_match.group(1)}")
+                            rewritten = True
+                    continue
+            if keeping:
+                out.append(line)
+    return "\n".join(out)
+
+
+def expand_includes(source: str, include_dir: str | None = None, _seen: set | None = None) -> str:
+    """Inline quoted ``#include`` directives so the source is a self-contained Metal translation unit.
+
+    Metal compiles kernel modules from an in-memory string with no include paths, so the
+    module header's includes of Warp's native headers are expanded here. Each header is
+    inlined once (``#pragma once`` semantics); includes that cannot be resolved are kept.
+    """
+    if include_dir is None:
+        include_dir = os.path.join(warp_home, "native")
+    seen = set() if _seen is None else _seen
+
+    def inline(match):
+        path = os.path.normpath(os.path.join(include_dir, match.group(1)))
+        if not os.path.exists(path):
+            return match.group(0)
+        if path in seen:
+            return ""
+        seen.add(path)
+        with open(path, encoding="utf-8") as header:
+            text = header.read().replace("#pragma once", "")  # meaningless (and a warning) once inlined
+        return expand_includes(text, os.path.dirname(path), seen)
+
+    return _QUOTED_INCLUDE.sub(inline, _resolve_metal_conditionals(source))
 
 
 def _add_long_path_prefix(path):
@@ -787,3 +869,105 @@ def build_lto_fft(arch, size, ept, direction, dir, precision, builder):
         builder.shared_memory_bytes[lto_symbol] = shared_memory_bytes
 
     return lto_symbol, lto_code_data, shared_memory_bytes
+
+
+_PRINTF_SPEC = re.compile(r"%[-+ #0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|j|z|t|L)?([diouxXeEfFgGaAcspn%])")
+_STR_CONST = re.compile(r"\b(var_\d+)\s*=\s*\"((?:[^\"\\]|\\.)*)\"")
+
+
+def _split_call_args(text: str) -> list[str]:
+    """Split a call's argument text at top-level commas (strings and nesting respected)."""
+    args, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        c = text[i]
+        if c in "\"'":
+            j = i + 1
+            while j < len(text) and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(text[start:i])
+            start = i + 1
+        i += 1
+    args.append(text[start:])
+    return args
+
+
+def _call_end(source: str, open_paren: int) -> int:
+    """Index of the parenthesis closing the call opened at ``open_paren``."""
+    depth, i = 0, open_paren
+    while i < len(source):
+        c = source[i]
+        if c in "\"'":
+            j = i + 1
+            while j < len(source) and source[j] != c:
+                j += 2 if source[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def metal_rewrite_printf(source: str) -> str:
+    """Make every ``printf`` in a Metal source acceptable to shader logging.
+
+    ``os_log`` needs a literal format and has no ``%s``: string arguments that are literals,
+    ``var_N`` string constants of the kernel, ``__FILE__`` or ``__FUNCTION__`` are spliced into the
+    format and any other string argument is shown as ``<str>``. ``wp::print`` of a string constant
+    becomes a direct ``printf`` of the literal.
+    """
+    consts = {}
+    for m in _STR_CONST.finditer(source):
+        consts[m.group(1)] = m.group(2)  # later declarations shadow earlier ones; per-kernel names rarely collide
+    source = re.sub(
+        r"wp::print\((var_\d+)\)",
+        lambda m: f'printf("{consts[m.group(1)]}\\n")' if m.group(1) in consts else m.group(0),
+        source,
+    )
+    out, pos = [], 0
+    for m in re.finditer(r"(?<![\w.:])printf\s*\(", source):
+        if m.start() < pos:
+            continue
+        close = _call_end(source, m.end() - 1)
+        if close < 0:
+            break
+        args = _split_call_args(source[m.end() : close])
+        fmt = args[0].strip()
+        if not (fmt.startswith('"') and fmt.endswith('"')):
+            continue
+        specs = [sp for sp in _PRINTF_SPEC.finditer(fmt) if sp.group(1) != "%"]
+        if not any(sp.group(1) == "s" for sp in specs):
+            continue
+        removed = set()
+        for k in range(len(specs) - 1, -1, -1):
+            sp = specs[k]
+            if sp.group(1) != "s":
+                continue
+            arg = args[k + 1].strip() if k + 1 < len(args) else ""
+            if arg.startswith('"') and arg.endswith('"'):
+                text = arg[1:-1]
+            elif arg == "__FILE__":
+                text = "<file>"
+            elif arg in ("__FUNCTION__", "__func__", "__PRETTY_FUNCTION__"):
+                text = "<function>"
+            else:
+                text = consts.get(arg, "<str>")
+            removed.add(k + 1)
+            fmt = fmt[: sp.start()] + text.replace("%", "%%") + fmt[sp.end() :]
+        rest = [a.strip() for i, a in enumerate(args) if i > 0 and i not in removed]
+        out.append(source[pos : m.start()])
+        out.append("printf(" + ", ".join([fmt, *rest]) + ")")
+        pos = close + 1
+    out.append(source[pos:])
+    return "".join(out)

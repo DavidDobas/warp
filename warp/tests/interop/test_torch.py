@@ -143,7 +143,12 @@ def test_dtype_to_torch(test, device):
 def test_device_conversion(test, device):
     torch_device = wp.device_to_torch(device)
     warp_device = wp.device_from_torch(torch_device)
-    test.assertEqual(warp_device, device)
+    if device.is_metal:
+        # Metal arrays are exposed to Torch as CPU tensors (unified memory); the mapping is not symmetric
+        test.assertEqual(torch_device, "cpu")
+        test.assertTrue(warp_device.is_cpu)
+    else:
+        test.assertEqual(warp_device, device)
 
 
 def test_torch_zerocopy(test, device):

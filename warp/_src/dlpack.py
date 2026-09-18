@@ -100,7 +100,8 @@ def _dlpack_capsule_deleter(ptr) -> None:
 def _device_to_dlpack(wp_device: warp._src.context.Device) -> DLDevice:
     dl_device = DLDevice()
 
-    if wp_device.is_cpu:
+    if wp_device.is_cpu or getattr(wp_device, "is_metal", False):
+        # Metal arrays live in unified memory and are addressed by their host pointer
         dl_device.device_type = DLDeviceType.kDLCPU
         dl_device.device_id = 0
     elif wp_device.is_cuda:
@@ -356,6 +357,9 @@ def _dtype_name(dl_dtype: DLDataType) -> str:
 
 def _unpack_array(dlt: DLTensor, dtype=None):
     device = device_from_dlpack(dlt.device)
+    if device.is_cpu:
+        # Metal memory is exported as CPU memory (unified); recover the owning device by pointer
+        device = warp._src.context.runtime.device_for_host_pointer(dlt.data)
     pinned = dlt.device.device_type.value == DLDeviceType.kDLCUDAHost
     shape = tuple(dlt.shape[dim] for dim in range(dlt.ndim))
 

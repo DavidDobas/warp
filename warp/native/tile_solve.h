@@ -72,7 +72,7 @@ namespace partitioned_gemm {
 // thread, and WP_TILE_SYNC() is a no-op -- behaviour matches the prior
 // single-threaded scalar fallback.
 template <bool Upper, typename TileA, typename TileX, typename TileY>
-inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA& A, TileX& X, TileY& Y)
+inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA WP_THREAD& A, TileX WP_THREAD& X, TileY WP_THREAD& Y)
 {
     using T = typename TileA::Type;
 
@@ -81,18 +81,24 @@ inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA& A, TileX& 
     if constexpr (TileY::Layout::Shape::N == 1) {
         constexpr int n = TileA::Layout::Shape::dim(1);
 
-        if (WP_TILE_THREAD_IDX == 0) {
-            for (int i = 0; i < n; ++i) {
-                T s = Y.data(tile_coord(i));
-
-                for (int j = 0; j < i; ++j)
-                    s -= A.data(idx(i, j)) * X.data(tile_coord(j));
-
-                T diag = A.data(idx(i, i));
-                X.data(tile_coord(i)) = (diag != T(0.0f)) ? s / diag : s;
-            }
-        }
+        // Column sweep: once x[i] is known every thread eliminates it from its share of the
+        // remaining right-hand side, so the O(n^2) work is split across the block. X doubles as
+        // the working copy of Y (callers may alias them).
+        for (int i = WP_TILE_THREAD_IDX; i < n; i += WP_TILE_BLOCK_DIM)
+            X.data(tile_coord(i)) = Y.data(tile_coord(i));
         WP_TILE_SYNC();
+        for (int i = 0; i < n; ++i) {
+            if (WP_TILE_THREAD_IDX == 0) {
+                T diag = A.data(idx(i, i));
+                if (diag != T(0.0f))
+                    X.data(tile_coord(i)) /= diag;
+            }
+            WP_TILE_SYNC();
+            const T xi = X.data(tile_coord(i));
+            for (int k = i + 1 + WP_TILE_THREAD_IDX; k < n; k += WP_TILE_BLOCK_DIM)
+                X.data(tile_coord(k)) -= A.data(idx(k, i)) * xi;
+            WP_TILE_SYNC();
+        }
     } else if constexpr (TileY::Layout::Shape::N == 2) {
         constexpr int n = TileA::Layout::Shape::dim(1);
         constexpr int m = TileY::Layout::Shape::dim(1);
@@ -119,7 +125,7 @@ inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA& A, TileX& 
 // dot product alone doesn't pay for the reduction overhead at typical n);
 // matrix RHS distributes the outer k loop across threads.
 template <bool Upper, typename TileA, typename TileX>
-inline CUDA_CALLABLE void scalar_cholesky_back_substitution(TileA& A, TileX& X)
+inline CUDA_CALLABLE void scalar_cholesky_back_substitution(TileA WP_THREAD& A, TileX WP_THREAD& X)
 {
     using T = typename TileA::Type;
 
@@ -128,18 +134,19 @@ inline CUDA_CALLABLE void scalar_cholesky_back_substitution(TileA& A, TileX& X)
     if constexpr (TileX::Layout::Shape::N == 1) {
         constexpr int n = TileA::Layout::Shape::dim(1);
 
-        if (WP_TILE_THREAD_IDX == 0) {
-            for (int i = n - 1; i >= 0; --i) {
-                T s = X.data(tile_coord(i));
-
-                for (int j = i + 1; j < n; ++j)
-                    s -= A.data(idx(i, j)) * X.data(tile_coord(j));
-
+        // Column sweep in reverse (see scalar_cholesky_forward_substitution).
+        for (int i = n - 1; i >= 0; --i) {
+            if (WP_TILE_THREAD_IDX == 0) {
                 T diag = A.data(idx(i, i));
-                X.data(tile_coord(i)) = (diag != T(0.0f)) ? s / diag : s;
+                if (diag != T(0.0f))
+                    X.data(tile_coord(i)) /= diag;
             }
+            WP_TILE_SYNC();
+            const T xi = X.data(tile_coord(i));
+            for (int k = WP_TILE_THREAD_IDX; k < i; k += WP_TILE_BLOCK_DIM)
+                X.data(tile_coord(k)) -= A.data(idx(k, i)) * xi;
+            WP_TILE_SYNC();
         }
-        WP_TILE_SYNC();
     } else if constexpr (TileX::Layout::Shape::N == 2) {
         constexpr int n = TileA::Layout::Shape::dim(1);
         constexpr int m = TileX::Layout::Shape::dim(1);
@@ -160,7 +167,7 @@ inline CUDA_CALLABLE void scalar_cholesky_back_substitution(TileA& A, TileX& X)
 }
 
 template <bool Upper, typename TileA, typename TileX, typename TileY>
-inline CUDA_CALLABLE void scalar_cholesky_solve(TileA& A, TileX& X, TileY& Y)
+inline CUDA_CALLABLE void scalar_cholesky_solve(TileA WP_THREAD& A, TileX WP_THREAD& X, TileY WP_THREAD& Y)
 {
     scalar_cholesky_forward_substitution<Upper>(A, X, Y);
     scalar_cholesky_back_substitution<Upper>(A, X);
@@ -171,7 +178,7 @@ inline CUDA_CALLABLE void scalar_cholesky_solve(TileA& A, TileX& X, TileY& Y)
 
 
 template <typename Fwd, typename Bkwd, typename TileL, typename TileY, typename TileZ>
-TileZ& tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL& L, TileY& y, TileZ& z)
+TileZ WP_THREAD& tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL WP_THREAD& L, TileY WP_THREAD& y, TileZ WP_THREAD& z)
 {
     // Copy y to z
     z = y;
@@ -192,7 +199,7 @@ TileZ& tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL& L, TileY& y, Tile
 }
 
 template <typename Fwd, typename TileL, typename TileY>
-void tile_lower_solve_inplace(Fwd fun_forward, TileL& L, TileY& y)
+void tile_lower_solve_inplace(Fwd fun_forward, TileL WP_THREAD& L, TileY WP_THREAD& y)
 {
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_forward_substitution<false>(L, y, y);
@@ -227,17 +234,18 @@ template <
 CUDA_CALLABLE void adj_tile_lower_solve(
     Fwd fun_forward,
     Bkwd fun_bkwd,
-    TileL& L,
-    TileY& y,
-    TileZ& z,
+    TileL WP_THREAD& L,
+    TileY WP_THREAD& y,
+    TileZ WP_THREAD& z,
     AdjFwd adj_fun_forward,
     AdjBkwd adj_fun_bkwd,
-    AdjTileL& adj_L,
-    AdjTileY& adj_y,
-    AdjTileZ& adj_z,
-    AdjRet& adj_ret
+    AdjTileL WP_THREAD& adj_L,
+    AdjTileY WP_THREAD& adj_y,
+    AdjTileZ WP_THREAD& adj_z,
+    AdjRet WP_THREAD& adj_ret
 )
 {
+    WP_TILE_ARENA_NULL
     using T = typename AdjRet::Type;
 
     // n = matrix dimension, nrhs = number of right-hand sides (1 for a vector RHS).
@@ -250,11 +258,11 @@ CUDA_CALLABLE void adj_tile_lower_solve(
     __shared__ T W[n * nrhs];
 #else
     T W_local[WP_TILE_BLOCK_DIM == 1 ? n * nrhs : 1];
-    T* W;
+    T WP_THREAD* W;
     if constexpr (WP_TILE_BLOCK_DIM == 1)
         W = W_local;
     else
-        W = (T*)tile_shared_storage_t::alloc(int(sizeof(T) * n * nrhs));
+        W = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * n * nrhs));
 #endif
 
     // Give the scalar fallback tile indexing without allocating tile storage.
@@ -315,13 +323,13 @@ CUDA_CALLABLE void adj_tile_lower_solve(
 
 #if !defined(__CUDA_ARCH__)
     if constexpr (WP_TILE_BLOCK_DIM > 1)
-        tile_shared_storage_t::alloc(-int(sizeof(T) * n * nrhs));
+        WP_TILE_ALLOC(-int(sizeof(T) * n * nrhs));
 #endif
 }
 
 template <typename Fwd, typename TileL, typename TileY, typename AdjFwd, typename AdjTileL, typename AdjTileY>
 void adj_tile_lower_solve_inplace(
-    Fwd fun_forward, TileL& L, TileY& y, AdjFwd adj_fun_forward, AdjTileL& adj_L, AdjTileY& adj_y
+    Fwd fun_forward, TileL WP_THREAD& L, TileY WP_THREAD& y, AdjFwd adj_fun_forward, AdjTileL WP_THREAD& adj_L, AdjTileY WP_THREAD& adj_y
 )
 {
     // MISSINGADJOINT: same math as adj_tile_lower_solve but operating in place on
@@ -330,7 +338,7 @@ void adj_tile_lower_solve_inplace(
 
 
 template <typename Fwd, typename TileU, typename TileZ, typename TileX>
-TileX& tile_upper_solve(Fwd fun_forward, TileU& U, TileZ& z, TileX& x)
+TileX WP_THREAD& tile_upper_solve(Fwd fun_forward, TileU WP_THREAD& U, TileZ WP_THREAD& z, TileX WP_THREAD& x)
 {
     // Copy z to x
     x = z;
@@ -355,7 +363,7 @@ TileX& tile_upper_solve(Fwd fun_forward, TileU& U, TileZ& z, TileX& x)
 }
 
 template <typename Fwd, typename TileU, typename TileZ>
-void tile_upper_solve_inplace(Fwd fun_forward, TileU& U, TileZ& z)
+void tile_upper_solve_inplace(Fwd fun_forward, TileU WP_THREAD& U, TileZ WP_THREAD& z)
 {
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     {
@@ -386,14 +394,14 @@ template <
     typename AdjRet>
 void adj_tile_upper_solve(
     Fwd fun_forward,
-    TileU& U,
-    TileZ& z,
-    TileX& x,
+    TileU WP_THREAD& U,
+    TileZ WP_THREAD& z,
+    TileX WP_THREAD& x,
     AdjFwd adj_fun_forward,
-    AdjTileU& adj_U,
-    AdjTileZ& adj_z,
-    AdjTileX& adj_x,
-    AdjRet& adj_ret
+    AdjTileU WP_THREAD& adj_U,
+    AdjTileZ WP_THREAD& adj_z,
+    AdjTileX WP_THREAD& adj_x,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: adjoint is the transposed (lower) solve U^T y = adj_ret; then adj_z
@@ -402,7 +410,7 @@ void adj_tile_upper_solve(
 
 template <typename Fwd, typename TileU, typename TileZ, typename AdjFwd, typename AdjTileU, typename AdjTileZ>
 void adj_tile_upper_solve_inplace(
-    Fwd fun_forward, TileU& U, TileZ& z, AdjFwd adj_fun_forward, AdjTileU& adj_U, AdjTileZ& adj_z
+    Fwd fun_forward, TileU WP_THREAD& U, TileZ WP_THREAD& z, AdjFwd adj_fun_forward, AdjTileU WP_THREAD& adj_U, AdjTileZ WP_THREAD& adj_z
 )
 {
     // MISSINGADJOINT: same math as adj_tile_upper_solve but operating in place on
@@ -411,7 +419,7 @@ void adj_tile_upper_solve_inplace(
 
 
 template <bool Upper, typename Fwd, typename TileA, typename TileY, typename TileX>
-TileX& tile_cholesky_solve(Fwd fun_forward, TileA& A, TileY& Y, TileX& X)
+TileX WP_THREAD& tile_cholesky_solve(Fwd fun_forward, TileA WP_THREAD& A, TileY WP_THREAD& Y, TileX WP_THREAD& X)
 {
     // Copy y to x
 
@@ -433,7 +441,7 @@ TileX& tile_cholesky_solve(Fwd fun_forward, TileA& A, TileY& Y, TileX& X)
 }
 
 template <bool Upper, typename Fwd, typename TileA, typename TileY>
-void tile_cholesky_solve_inplace(Fwd fun_forward, TileA& A, TileY& Y)
+void tile_cholesky_solve_inplace(Fwd fun_forward, TileA WP_THREAD& A, TileY WP_THREAD& Y)
 {
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
     partitioned_gemm::scalar_cholesky_solve<Upper>(A, Y, Y);
@@ -461,14 +469,14 @@ template <
     typename AdjRet>
 void adj_tile_cholesky_solve(
     Fwd fun_forward,
-    TileA& A,
-    TileY& Y,
-    TileX& X,
+    TileA WP_THREAD& A,
+    TileY WP_THREAD& Y,
+    TileX WP_THREAD& X,
     AdjFwd adj_fun_forward,
-    AdjTileA& adj_A,
-    AdjTileY& adj_Y,
-    AdjTileX& adj_X,
-    AdjRet& adj_ret
+    AdjTileA WP_THREAD& adj_A,
+    AdjTileY WP_THREAD& adj_Y,
+    AdjTileX WP_THREAD& adj_X,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: implicit differentiation through A X = Y: solve A Z = adj_ret,
@@ -484,7 +492,7 @@ template <
     typename AdjTileA,
     typename AdjTileY>
 void adj_tile_cholesky_solve_inplace(
-    Fwd fun_forward, TileA& A, TileY& Y, AdjFwd adj_fun_forward, AdjTileA& adj_A, AdjTileY& adj_Y
+    Fwd fun_forward, TileA WP_THREAD& A, TileY WP_THREAD& Y, AdjFwd adj_fun_forward, AdjTileA WP_THREAD& adj_A, AdjTileY WP_THREAD& adj_Y
 )
 {
     // MISSINGADJOINT: same math as adj_tile_cholesky_solve operating in place

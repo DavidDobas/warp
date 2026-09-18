@@ -218,6 +218,104 @@ void hash_grid_update_host_impl(
 // Device methods - templated implementation
 // =============================================================================
 
+#if defined(__APPLE__)
+// Metal: the grid is built by the host implementation into Metal memory (wp_alloc_host redirected)
+// and mirrored by a descriptor with GPU addresses whose own GPU address is the id kernels use.
+#include "metal_host.h"
+
+namespace {
+template <typename Type> std::map<uint64_t, wp::MetalMirror<HashGrid_t<Type>>>& metal_grids()
+{
+    static std::map<uint64_t, wp::MetalMirror<HashGrid_t<Type>>> grids;
+    return grids;
+}
+
+template <typename Type> bool metal_grid_update(const wp::MetalMirror<HashGrid_t<Type>>& m)
+{
+    wp::MetalAddressTranslator gpu { m.ordinal };
+    HashGrid_t<Type> d = *reinterpret_cast<HashGrid_t<Type>*>(m.host_id);
+    d.point_cells = gpu(d.point_cells);
+    d.point_ids = gpu(d.point_ids);
+    d.point_keys = gpu(d.point_keys);
+    d.cell_starts = gpu(d.cell_starts);
+    d.cell_ends = gpu(d.cell_ends);
+    *m.descriptor = d;
+    return gpu.ok;
+}
+}  // namespace
+
+template <typename Type> uint64_t hash_grid_create_device_impl(void* context, int dim_x, int dim_y, int dim_z)
+{
+    const int ordinal = wp::metal_context_ordinal(context);
+    wp::ScopedMetalHostAlloc scope(ordinal);
+    wp::MetalMirror<HashGrid_t<Type>> m { ordinal, hash_grid_create_host_impl<Type>(dim_x, dim_y, dim_z), nullptr };
+    if (!m.host_id)
+        return 0;
+    m.descriptor = static_cast<HashGrid_t<Type>*>(wp_alloc_host(sizeof(HashGrid_t<Type>), "(native:hashgrid)"));
+    const uint64_t id = wp_metal_gpu_address(ordinal, m.descriptor);
+    if (!id || !metal_grid_update(m)) {
+        hash_grid_destroy_host_impl<Type>(m.host_id);
+        wp_free_host(m.descriptor);
+        return 0;
+    }
+    metal_grids<Type>()[id] = m;
+    return id;
+}
+
+template <typename Type> void hash_grid_destroy_device_impl(uint64_t id)
+{
+    auto& grids = metal_grids<Type>();
+    auto it = grids.find(id);
+    if (it == grids.end())
+        return;
+    wp_metal_synchronize(it->second.ordinal);
+    wp::ScopedMetalHostAlloc scope(it->second.ordinal);
+    hash_grid_destroy_host_impl<Type>(it->second.host_id);
+    wp_free_host(it->second.descriptor);
+    grids.erase(it);
+}
+
+template <typename Type> void hash_grid_reserve_device_impl(uint64_t id, int num_points, bool with_groups)
+{
+    auto& grids = metal_grids<Type>();
+    auto it = grids.find(id);
+    if (it == grids.end())
+        return;
+    wp_metal_synchronize(it->second.ordinal);  // kernels may still read the grid
+    wp::ScopedMetalHostAlloc scope(it->second.ordinal);
+    hash_grid_reserve_host_impl<Type>(it->second.host_id, num_points, with_groups);
+    metal_grid_update(it->second);
+}
+
+template <typename Type>
+void hash_grid_update_device_impl(
+    uint64_t id, Type cell_width, const wp::array_t<vec_t<3, Type>>* points, const wp::array_t<int>* groups
+)
+{
+    auto& grids = metal_grids<Type>();
+    auto it = grids.find(id);
+    if (it == grids.end())
+        return;
+    const int ordinal = it->second.ordinal;
+    // descriptors are copied: a recorded build runs later, at graph launch
+    const wp::array_t<vec_t<3, Type>> points_copy = *points;
+    const bool has_groups = groups != nullptr;
+    const wp::array_t<int> groups_copy = groups ? *groups : wp::array_t<int>();
+    auto build = [=]() {
+        auto& grids = metal_grids<Type>();
+        auto it = grids.find(id);
+        if (it == grids.end())
+            return false;
+        wp::ScopedMetalHostAlloc scope(ordinal);
+        hash_grid_update_host_impl<Type>(it->second.host_id, cell_width, &points_copy, has_groups ? &groups_copy : nullptr);
+        return metal_grid_update(it->second);
+    };
+    if (wp_metal_capture_host_op(ordinal, build))  // replayed in order by the graph
+        return;
+    wp_metal_synchronize(ordinal);  // the points may still be written by kernels
+    build();
+}
+#else  // CUDA
 template <typename Type> uint64_t hash_grid_create_device_impl(void* context, int dim_x, int dim_y, int dim_z)
 {
     static const char* tag = "(native:hashgrid)";
@@ -355,6 +453,8 @@ void hash_grid_update_device_impl(
 // =============================================================================
 // Exported API
 // =============================================================================
+
+#endif  // __APPLE__ / CUDA
 
 // CPU capture is record-only: returning true makes the caller skip the eager
 // rebuild so replay performs it in operation-stream order.

@@ -3959,6 +3959,10 @@ class array(Array[DType, NDim]):
         self._memory_kind = None
 
     def __del__(self):
+        metal_import = self.__dict__.get("_metal_import")
+        if metal_import:  # host memory this array made addressable to a Metal device (see invoke_metal)
+            device, ptr, size = metal_import
+            device.metal_release_host_memory(ptr, size)
         # Skip deallocation for partially-initialized arrays (e.g. when allocation failed)
         # and for zero-size arrays which were never allocated.
         if not hasattr(self, "device") or self.device is None or self.ptr is None or self.deleter is None:
@@ -3977,8 +3981,10 @@ class array(Array[DType, NDim]):
     @property
     def __array_interface__(self):
         # raising an AttributeError here makes hasattr() return False
-        if self.device is None or not self.device.is_cpu:
+        if self.device is None or not (self.device.is_cpu or self.device.is_metal):
             raise AttributeError(f"__array_interface__ not supported because device is {self.device}")
+        if self.device.is_metal:
+            self.device.metal_synchronize()  # unified memory: finish pending GPU work before the host reads
 
         if self._array_interface is None:
             # get flat shape (including type shape)
@@ -4072,10 +4078,13 @@ class array(Array[DType, NDim]):
                     warp._src.context.runtime.core.wp_cuda_stream_wait_stream(
                         stream, array_stream.cuda_stream, array_stream.cached_event.cuda_event, False
                     )
-            elif self.device.is_cpu:
-                # on CPU, stream must be None or -1
+            else:
+                # on CPU and Metal, stream must be None or -1
                 if stream is not None:
-                    raise TypeError("DLPack stream must be None or -1 for CPU device")
+                    raise TypeError(
+                        "DLPack stream must be None or -1 for CPU device"
+                        + (" (Metal arrays are host memory)" if self.device.is_metal else "")
+                    )
 
         return warp._src.dlpack.to_dlpack(self)
 
@@ -4507,6 +4516,8 @@ class array(Array[DType, NDim]):
                     self.device.context, carr_ptr, ARRAY_TYPE_REGULAR, cvalue_ptr, cvalue_size
                 )
             else:
+                if self.device.is_metal:
+                    self.device.metal_synchronize()
                 warp._src.context.runtime.core.wp_array_fill_host(carr_ptr, ARRAY_TYPE_REGULAR, cvalue_ptr, cvalue_size)
 
         self.mark_init()
@@ -4517,6 +4528,16 @@ class array(Array[DType, NDim]):
             warp.copy(self, src)
         else:
             warp.copy(self, array(data=src, dtype=self.dtype, copy=False, device="cpu"))
+
+    def _metal_host_view(self):
+        """A NumPy view aliasing this Metal array's unified memory, taken after the device is synchronized.
+
+        The view stays valid while the array lives; readers must synchronize before each read that
+        follows GPU work, and writers must not overlap pending GPU work (see wp.to_torch on Metal).
+        """
+        self.device.metal_synchronize()
+        host = array(ptr=self.ptr, shape=self.shape, strides=self.strides, dtype=self.dtype, device="cpu")
+        return np.asarray(host)  # the caller keeps this array alive (the view does not own its memory)
 
     def numpy(self, *, _suppress_bfloat16_warning=False):
         """Convert the array to a :class:`numpy.ndarray` (aliasing memory through the array interface protocol)
@@ -5720,7 +5741,7 @@ class tile(Tile):
         elif self.storage == "shared":
             if self.owner:
                 # allocate new shared memory tile
-                return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},wp::tile_shape_t<{','.join(map(str, self.shape))}>,wp::tile_stride_t<{','.join(map(str, self.strides))}>,{'true' if requires_grad else 'false'}>()"
+                return f"wp::tile_alloc_empty<{Var.type_to_ctype(self.dtype)},wp::tile_shape_t<{','.join(map(str, self.shape))}>,wp::tile_stride_t<{','.join(map(str, self.strides))}>,{'true' if requires_grad else 'false'}>(WP_TILE_ARENA_ARG0)"
             else:
                 # tile will be initialized by another call, e.g.: tile_transpose()
                 return "nullptr"
@@ -5779,7 +5800,7 @@ class tile_stack(TileStack):
     def cinit(self):
         from warp._src.codegen import Var  # noqa: PLC0415
 
-        return f"wp::tile_stack_alloc<{Var.type_to_ctype(self.dtype)}, {self.capacity}>()"
+        return f"wp::tile_stack_alloc<{Var.type_to_ctype(self.dtype)}, {self.capacity}>(WP_TILE_ARENA_ARG0)"
 
     def __repr__(self):
         return f"tile_stack(dtype={self.dtype}, capacity={self.capacity})"
@@ -7371,7 +7392,7 @@ class Volume:
         point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
 
         if bg_value is None:
-            if volume.device.is_cuda:
+            if not volume.device.is_cpu:
                 volume.id = volume.runtime.core.wp_volume_index_from_tiles_device(
                     volume.device.context,
                     ctypes.c_void_p(tile_points.ptr),
@@ -7431,7 +7452,7 @@ class Volume:
             cvalue_size = ctypes.sizeof(cvalue)
             cvalue_type = nvdb_type.encode("ascii")
 
-            if volume.device.is_cuda:
+            if not volume.device.is_cpu:
                 volume.id = volume.runtime.core.wp_volume_from_tiles_device(
                     volume.device.context,
                     ctypes.c_void_p(tile_points.ptr),
@@ -7593,7 +7614,7 @@ class Volume:
         point_mask = _volume_point_mask_array(point_mask, voxel_points.shape[0], device)
         point_mask_ptr = ctypes.c_void_p(0 if point_mask is None else point_mask.ptr)
 
-        if volume.device.is_cuda:
+        if not volume.device.is_cpu:
             volume.id = volume.runtime.core.wp_volume_from_active_voxels_device(
                 volume.device.context,
                 ctypes.c_void_p(voxel_points.ptr),
@@ -7694,7 +7715,7 @@ class Volume:
         transform_buf, translation_buf = self._grid_transform_buffers()
 
         if self.is_index:
-            if self.device.is_cuda:
+            if not self.device.is_cpu:
                 self.runtime.core.wp_volume_index_rebuild_from_tiles_device(
                     self.id,
                     ctypes.c_void_p(tile_points.ptr),
@@ -7719,7 +7740,7 @@ class Volume:
         else:
             cvalue = self._rebuild_bg_value
             cvalue_ptr = ctypes.pointer(cvalue)
-            if self.device.is_cuda:
+            if not self.device.is_cpu:
                 self.runtime.core.wp_volume_rebuild_from_tiles_device(
                     self.id,
                     ctypes.c_void_p(tile_points.ptr),
@@ -7771,7 +7792,7 @@ class Volume:
         in_world_space = type_scalar_type(voxel_points.dtype) is float32
         transform_buf, translation_buf = self._grid_transform_buffers()
 
-        if self.device.is_cuda:
+        if not self.device.is_cpu:
             self.runtime.core.wp_volume_rebuild_from_active_voxels_device(
                 self.id,
                 ctypes.c_void_p(voxel_points.ptr),

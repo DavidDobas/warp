@@ -34,16 +34,18 @@ namespace wp {
 
 
 template <typename Type> struct _svd_config {
-    static constexpr float SVD_EPSILON = 1.e-6f;
-    static constexpr float QR_GIVENS_EPSILON = 1.e-6f;
-    static constexpr int JACOBI_ITERATIONS = 4;
+    static WP_CONSTANT constexpr float SVD_EPSILON = 1.e-6f;
+    static WP_CONSTANT constexpr float QR_GIVENS_EPSILON = 1.e-6f;
+    static WP_CONSTANT constexpr int JACOBI_ITERATIONS = 4;
 };
 
+#if !defined(WP_NO_FLOAT64)
 template <> struct _svd_config<double> {
-    static constexpr double SVD_EPSILON = 1.e-12;
-    static constexpr double QR_GIVENS_EPSILON = 1.e-12;
-    static constexpr int JACOBI_ITERATIONS = 8;
+    static WP_CONSTANT constexpr double SVD_EPSILON = 1.e-12;
+    static WP_CONSTANT constexpr double QR_GIVENS_EPSILON = 1.e-12;
+    static WP_CONSTANT constexpr int JACOBI_ITERATIONS = 8;
 };
+#endif  // !WP_NO_FLOAT64
 
 template <typename Type> inline CUDA_CALLABLE Type recipSqrt(Type x)
 {
@@ -56,7 +58,7 @@ template <typename Type> inline CUDA_CALLABLE Type recipSqrt(Type x)
 
 template <> inline CUDA_CALLABLE wp::half recipSqrt(wp::half x) { return wp::half(1) / sqrt(x); }
 
-template <typename Type> inline CUDA_CALLABLE void condSwap(bool c, Type& X, Type& Y)
+template <typename Type> inline CUDA_CALLABLE void condSwap(bool c, Type WP_THREAD& X, Type WP_THREAD& Y)
 {
     // used in step 2
     Type Z = X;
@@ -64,7 +66,7 @@ template <typename Type> inline CUDA_CALLABLE void condSwap(bool c, Type& X, Typ
     Y = c ? Z : Y;
 }
 
-template <typename Type> inline CUDA_CALLABLE void condNegSwap(bool c, Type& X, Type& Y)
+template <typename Type> inline CUDA_CALLABLE void condNegSwap(bool c, Type WP_THREAD& X, Type WP_THREAD& Y)
 {
     // used in step 2 and 3
     Type Z = -X;
@@ -95,15 +97,15 @@ inline CUDA_CALLABLE void multAB(
     Type b32,
     Type b33,
     //
-    Type& m11,
-    Type& m12,
-    Type& m13,
-    Type& m21,
-    Type& m22,
-    Type& m23,
-    Type& m31,
-    Type& m32,
-    Type& m33
+    Type WP_THREAD& m11,
+    Type WP_THREAD& m12,
+    Type WP_THREAD& m13,
+    Type WP_THREAD& m21,
+    Type WP_THREAD& m22,
+    Type WP_THREAD& m23,
+    Type WP_THREAD& m31,
+    Type WP_THREAD& m32,
+    Type WP_THREAD& m33
 )
 {
 
@@ -141,15 +143,15 @@ inline CUDA_CALLABLE void multAtB(
     Type b32,
     Type b33,
     //
-    Type& m11,
-    Type& m12,
-    Type& m13,
-    Type& m21,
-    Type& m22,
-    Type& m23,
-    Type& m31,
-    Type& m32,
-    Type& m33
+    Type WP_THREAD& m11,
+    Type WP_THREAD& m12,
+    Type WP_THREAD& m13,
+    Type WP_THREAD& m21,
+    Type WP_THREAD& m22,
+    Type WP_THREAD& m23,
+    Type WP_THREAD& m31,
+    Type WP_THREAD& m32,
+    Type WP_THREAD& m33
 )
 {
     m11 = a11 * b11 + a21 * b21 + a31 * b31;
@@ -165,7 +167,7 @@ inline CUDA_CALLABLE void multAtB(
 
 template <typename Type>
 inline CUDA_CALLABLE void quatToMat3(
-    const Type* qV, Type& m11, Type& m12, Type& m13, Type& m21, Type& m22, Type& m23, Type& m31, Type& m32, Type& m33
+    const Type WP_THREAD* qV, Type WP_THREAD& m11, Type WP_THREAD& m12, Type WP_THREAD& m13, Type WP_THREAD& m21, Type WP_THREAD& m22, Type WP_THREAD& m23, Type WP_THREAD& m31, Type WP_THREAD& m32, Type WP_THREAD& m33
 )
 {
     Type w = qV[3];
@@ -195,15 +197,15 @@ inline CUDA_CALLABLE void quatToMat3(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void approximateGivensQuaternion(Type a11, Type a12, Type a22, Type& ch, Type& sh)
+inline CUDA_CALLABLE void approximateGivensQuaternion(Type a11, Type a12, Type a22, Type WP_THREAD& ch, Type WP_THREAD& sh)
 {
     /*
      * Given givens angle computed by approximateGivensAngles,
      * compute the corresponding rotation quaternion.
      */
-    constexpr double _gamma = 5.82842712474619;  // FOUR_GAMMA_SQUARED = sqrt(8)+3;
-    constexpr double _cstar = 0.9238795325112867;  // cos(pi/8)
-    constexpr double _sstar = 0.3826834323650898;  // sin(p/8)
+    constexpr wide_float _gamma = 5.82842712474619;  // FOUR_GAMMA_SQUARED = sqrt(8)+3;
+    constexpr wide_float _cstar = 0.9238795325112867;  // cos(pi/8)
+    constexpr wide_float _sstar = 0.3826834323650898;  // sin(p/8)
 
     ch = Type(2) * (a11 - a22);
     sh = a12;
@@ -215,7 +217,7 @@ inline CUDA_CALLABLE void approximateGivensQuaternion(Type a11, Type a12, Type a
 
 template <typename Type>
 inline CUDA_CALLABLE void jacobiConjugation(
-    const int x, const int y, const int z, Type& s11, Type& s21, Type& s22, Type& s31, Type& s32, Type& s33, Type* qV
+    const int x, const int y, const int z, Type WP_THREAD& s11, Type WP_THREAD& s21, Type WP_THREAD& s22, Type WP_THREAD& s31, Type WP_THREAD& s32, Type WP_THREAD& s33, Type WP_THREAD* qV
 )
 {
     Type ch, sh;
@@ -282,11 +284,11 @@ template <typename Type> inline CUDA_CALLABLE Type dist2(Type x, Type y, Type z)
 template<typename Type>
 inline CUDA_CALLABLE
 void jacobiEigenanlysis( // symmetric matrix
-                                Type &s11,
-                                Type &s21, Type &s22,
-                                Type &s31, Type &s32, Type &s33,
+                                Type WP_THREAD&s11,
+                                Type WP_THREAD&s21, Type WP_THREAD&s22,
+                                Type WP_THREAD&s31, Type WP_THREAD&s32, Type WP_THREAD&s33,
                                 // quaternion representation of V
-                                Type * qV)
+                                Type WP_THREAD* qV)
 {
     qV[3] = 1;
     qV[0] = 0;
@@ -307,13 +309,13 @@ void jacobiEigenanlysis( // symmetric matrix
 template<typename Type>
 inline CUDA_CALLABLE
 void sortSingularValues(// matrix that we want to decompose
-                            Type &b11, Type &b12, Type &b13,
-                            Type &b21, Type &b22, Type &b23,
-                            Type &b31, Type &b32, Type &b33,
+                            Type WP_THREAD&b11, Type WP_THREAD&b12, Type WP_THREAD&b13,
+                            Type WP_THREAD&b21, Type WP_THREAD&b22, Type WP_THREAD&b23,
+                            Type WP_THREAD&b31, Type WP_THREAD&b32, Type WP_THREAD&b33,
                           // sort V simultaneously
-                            Type &v11, Type &v12, Type &v13,
-                            Type &v21, Type &v22, Type &v23,
-                            Type &v31, Type &v32, Type &v33)
+                            Type WP_THREAD&v11, Type WP_THREAD&v12, Type WP_THREAD&v13,
+                            Type WP_THREAD&v21, Type WP_THREAD&v22, Type WP_THREAD&v23,
+                            Type WP_THREAD&v31, Type WP_THREAD&v32, Type WP_THREAD&v33)
 {
     Type rho1 = dist2(b11, b21, b31);
     Type rho2 = dist2(b12, b22, b32);
@@ -344,7 +346,7 @@ void sortSingularValues(// matrix that we want to decompose
     condNegSwap(c, v32, v33);
 }
 
-template <typename Type> inline CUDA_CALLABLE void QRGivensQuaternion(Type a1, Type a2, Type& ch, Type& sh)
+template <typename Type> inline CUDA_CALLABLE void QRGivensQuaternion(Type a1, Type a2, Type WP_THREAD& ch, Type WP_THREAD& sh)
 {
     // a1 = pivot point on diagonal
     // a2 = lower triangular entry we want to annihilate
@@ -367,13 +369,13 @@ void QRDecomposition(// matrix that we want to decompose
                             Type b21, Type b22, Type b23,
                             Type b31, Type b32, Type b33,
                             // output Q
-                            Type &q11, Type &q12, Type &q13,
-                            Type &q21, Type &q22, Type &q23,
-                            Type &q31, Type &q32, Type &q33,
+                            Type WP_THREAD&q11, Type WP_THREAD&q12, Type WP_THREAD&q13,
+                            Type WP_THREAD&q21, Type WP_THREAD&q22, Type WP_THREAD&q23,
+                            Type WP_THREAD&q31, Type WP_THREAD&q32, Type WP_THREAD&q33,
                             // output R
-                            Type &r11, Type &r12, Type &r13,
-                            Type &r21, Type &r22, Type &r23,
-                            Type &r31, Type &r32, Type &r33)
+                            Type WP_THREAD&r11, Type WP_THREAD&r12, Type WP_THREAD&r13,
+                            Type WP_THREAD&r21, Type WP_THREAD&r22, Type WP_THREAD&r23,
+                            Type WP_THREAD&r31, Type WP_THREAD&r32, Type WP_THREAD&r33)
 {
     Type ch1, sh1, ch2, sh2, ch3, sh3;
     Type a, b;
@@ -453,17 +455,17 @@ void _svd(// input A
         Type a21, Type a22, Type a23,
         Type a31, Type a32, Type a33,
         // output U
-        Type &u11, Type &u12, Type &u13,
-        Type &u21, Type &u22, Type &u23,
-        Type &u31, Type &u32, Type &u33,
+        Type WP_THREAD&u11, Type WP_THREAD&u12, Type WP_THREAD&u13,
+        Type WP_THREAD&u21, Type WP_THREAD&u22, Type WP_THREAD&u23,
+        Type WP_THREAD&u31, Type WP_THREAD&u32, Type WP_THREAD&u33,
         // output S
-        Type &s11, Type &s12, Type &s13,
-        Type &s21, Type &s22, Type &s23,
-        Type &s31, Type &s32, Type &s33,
+        Type WP_THREAD&s11, Type WP_THREAD&s12, Type WP_THREAD&s13,
+        Type WP_THREAD&s21, Type WP_THREAD&s22, Type WP_THREAD&s23,
+        Type WP_THREAD&s31, Type WP_THREAD&s32, Type WP_THREAD&s33,
         // output V
-        Type &v11, Type &v12, Type &v13,
-        Type &v21, Type &v22, Type &v23,
-        Type &v31, Type &v32, Type &v33)
+        Type WP_THREAD&v11, Type WP_THREAD&v12, Type WP_THREAD&v13,
+        Type WP_THREAD&v21, Type WP_THREAD&v22, Type WP_THREAD&v23,
+        Type WP_THREAD&v31, Type WP_THREAD&v32, Type WP_THREAD&v33)
 {
     // normal equations matrix
     Type ATA11, ATA12, ATA13;
@@ -502,11 +504,11 @@ template <typename Type>
 inline CUDA_CALLABLE void _svd_2( // input A
     Type a11, Type a12, Type a21, Type a22,
     // output U
-    Type& u11, Type& u12, Type& u21, Type& u22,
+    Type WP_THREAD& u11, Type WP_THREAD& u12, Type WP_THREAD& u21, Type WP_THREAD& u22,
     // output S
-    Type& s1, Type& s2,
+    Type WP_THREAD& s1, Type WP_THREAD& s2,
     // output V
-    Type& v11, Type& v12, Type& v21, Type& v22)
+    Type WP_THREAD& v11, Type WP_THREAD& v12, Type WP_THREAD& v21, Type WP_THREAD& v22)
 {
     // Step 1: Compute ATA
     Type ATA11 = a11 * a11 + a21 * a21;
@@ -566,7 +568,7 @@ inline CUDA_CALLABLE void _svd_2( // input A
 
 template <typename Type>
 inline CUDA_CALLABLE void
-svd3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& U, vec_t<3, Type>& sigma, mat_t<3, 3, Type>& V)
+svd3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& U, vec_t<3, Type> WP_THREAD& sigma, mat_t<3, 3, Type> WP_THREAD& V)
 {
     Type s12, s13, s21, s23, s31, s32;
     _svd(
@@ -585,14 +587,14 @@ svd3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& U, vec_t<3, Type>& sigma, ma
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_svd3(
-    const mat_t<3, 3, Type>& A,
-    const mat_t<3, 3, Type>& U,
-    const vec_t<3, Type>& sigma,
-    const mat_t<3, 3, Type>& V,
-    mat_t<3, 3, Type>& adj_A,
-    const mat_t<3, 3, Type>& adj_U,
-    const vec_t<3, Type>& adj_sigma,
-    const mat_t<3, 3, Type>& adj_V
+    const mat_t<3, 3, Type> WP_THREAD& A,
+    const mat_t<3, 3, Type> WP_THREAD& U,
+    const vec_t<3, Type> WP_THREAD& sigma,
+    const mat_t<3, 3, Type> WP_THREAD& V,
+    mat_t<3, 3, Type> WP_THREAD& adj_A,
+    const mat_t<3, 3, Type> WP_THREAD& adj_U,
+    const vec_t<3, Type> WP_THREAD& adj_sigma,
+    const mat_t<3, 3, Type> WP_THREAD& adj_V
 )
 {
     const Type epsilon = _svd_config<Type>::SVD_EPSILON;
@@ -629,7 +631,7 @@ inline CUDA_CALLABLE void adj_svd3(
 
 template <typename Type>
 inline CUDA_CALLABLE void
-svd2(const mat_t<2, 2, Type>& A, mat_t<2, 2, Type>& U, vec_t<2, Type>& sigma, mat_t<2, 2, Type>& V)
+svd2(const mat_t<2, 2, Type> WP_THREAD& A, mat_t<2, 2, Type> WP_THREAD& U, vec_t<2, Type> WP_THREAD& sigma, mat_t<2, 2, Type> WP_THREAD& V)
 {
     _svd_2(
         A.data[0][0], A.data[0][1], A.data[1][0], A.data[1][1],
@@ -644,14 +646,14 @@ svd2(const mat_t<2, 2, Type>& A, mat_t<2, 2, Type>& U, vec_t<2, Type>& sigma, ma
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_svd2(
-    const mat_t<2, 2, Type>& A,
-    const mat_t<2, 2, Type>& U,
-    const vec_t<2, Type>& sigma,
-    const mat_t<2, 2, Type>& V,
-    mat_t<2, 2, Type>& adj_A,
-    const mat_t<2, 2, Type>& adj_U,
-    const vec_t<2, Type>& adj_sigma,
-    const mat_t<2, 2, Type>& adj_V
+    const mat_t<2, 2, Type> WP_THREAD& A,
+    const mat_t<2, 2, Type> WP_THREAD& U,
+    const vec_t<2, Type> WP_THREAD& sigma,
+    const mat_t<2, 2, Type> WP_THREAD& V,
+    mat_t<2, 2, Type> WP_THREAD& adj_A,
+    const mat_t<2, 2, Type> WP_THREAD& adj_U,
+    const vec_t<2, Type> WP_THREAD& adj_sigma,
+    const mat_t<2, 2, Type> WP_THREAD& adj_V
 )
 {
     const Type epsilon = _svd_config<Type>::SVD_EPSILON;
@@ -694,7 +696,7 @@ inline CUDA_CALLABLE void adj_svd2(
 
 
 template <typename Type>
-inline CUDA_CALLABLE void qr3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& Q, mat_t<3, 3, Type>& R)
+inline CUDA_CALLABLE void qr3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, mat_t<3, 3, Type> WP_THREAD& R)
 {
     QRDecomposition(
         A.data[0][0], A.data[0][1], A.data[0][2], A.data[1][0], A.data[1][1], A.data[1][2], A.data[2][0], A.data[2][1],
@@ -711,12 +713,12 @@ inline CUDA_CALLABLE void qr3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& Q, 
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_qr3(
-    const mat_t<3, 3, Type>& A,
-    const mat_t<3, 3, Type>& Q,
-    const mat_t<3, 3, Type>& R,
-    mat_t<3, 3, Type>& adj_A,
-    const mat_t<3, 3, Type>& adj_Q,
-    const mat_t<3, 3, Type>& adj_R
+    const mat_t<3, 3, Type> WP_THREAD& A,
+    const mat_t<3, 3, Type> WP_THREAD& Q,
+    const mat_t<3, 3, Type> WP_THREAD& R,
+    mat_t<3, 3, Type> WP_THREAD& adj_A,
+    const mat_t<3, 3, Type> WP_THREAD& adj_Q,
+    const mat_t<3, 3, Type> WP_THREAD& adj_R
 )
 {
     // Eq 3 of https://arxiv.org/pdf/2009.10071.pdf
@@ -730,7 +732,7 @@ inline CUDA_CALLABLE void adj_qr3(
 
 
 template <typename Type>
-inline CUDA_CALLABLE void eig3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& Q, vec_t<3, Type>& d)
+inline CUDA_CALLABLE void eig3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, vec_t<3, Type> WP_THREAD& d)
 {
     Type qV[4];
     Type s11 = A.data[0][0];
@@ -765,12 +767,12 @@ inline CUDA_CALLABLE void eig3(const mat_t<3, 3, Type>& A, mat_t<3, 3, Type>& Q,
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_eig3(
-    const mat_t<3, 3, Type>& A,
-    const mat_t<3, 3, Type>& Q,
-    const vec_t<3, Type>& d,
-    mat_t<3, 3, Type>& adj_A,
-    const mat_t<3, 3, Type>& adj_Q,
-    const vec_t<3, Type>& adj_d
+    const mat_t<3, 3, Type> WP_THREAD& A,
+    const mat_t<3, 3, Type> WP_THREAD& Q,
+    const vec_t<3, Type> WP_THREAD& d,
+    mat_t<3, 3, Type> WP_THREAD& adj_A,
+    const mat_t<3, 3, Type> WP_THREAD& adj_Q,
+    const vec_t<3, Type> WP_THREAD& adj_d
 )
 {
     // Page 10 of https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pdf

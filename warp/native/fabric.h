@@ -10,8 +10,8 @@ namespace wp {
 struct fabricbucket_t {
     size_t index_start;
     size_t index_end;
-    void* ptr;
-    size_t* lengths;
+    void WP_THREAD* ptr;
+    size_t WP_THREAD* lengths;
 };
 
 
@@ -25,7 +25,7 @@ template <typename T> struct fabricarray_t {
 
     CUDA_CALLABLE inline bool empty() const { return !size; }
 
-    fabricbucket_t* buckets;  // array of fabricbucket_t on the correct device
+    fabricbucket_t WP_THREAD* buckets;  // array of fabricbucket_t on the correct device
 
     size_t nbuckets;
     size_t size;
@@ -45,7 +45,7 @@ template <typename T> struct indexedfabricarray_t {
 
     // TODO: we use 32-bit indices for consistency with other Warp indexed arrays,
     // but Fabric uses 64-bit indexing.
-    int* indices;
+    int WP_THREAD* indices;
     size_t size;
 };
 
@@ -55,11 +55,11 @@ template <typename T> struct indexedfabricarray_t {
 #endif
 
 template <typename T>
-CUDA_CALLABLE inline const fabricbucket_t* fabricarray_find_bucket(const fabricarray_t<T>& fa, size_t i)
+CUDA_CALLABLE inline const fabricbucket_t WP_THREAD* fabricarray_find_bucket(const fabricarray_t<T> WP_THREAD& fa, size_t i)
 {
 #if FABRICARRAY_USE_BINARY_SEARCH
     // use binary search to find the right bucket
-    const fabricbucket_t* bucket = nullptr;
+    const fabricbucket_t WP_THREAD* bucket = nullptr;
     size_t lo = 0;
     size_t hi = fa.nbuckets - 1;
     while (hi >= lo) {
@@ -88,24 +88,24 @@ CUDA_CALLABLE inline const fabricbucket_t* fabricarray_find_bucket(const fabrica
 
 // Compute the pointer to a fabricarray element at index i.
 // This function is similar to wp::index(), but the array data type doesn't need to be known at compile time.
-CUDA_CALLABLE inline void* fabricarray_element_ptr(const fabricarray_t<void>& fa, size_t i, size_t elem_size)
+CUDA_CALLABLE inline void WP_THREAD* fabricarray_element_ptr(const fabricarray_t<void> WP_THREAD& fa, size_t i, size_t elem_size)
 {
-    const fabricbucket_t* bucket = fabricarray_find_bucket(fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(fa, i);
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    return (char*)bucket->ptr + index_in_bucket * elem_size;
+    return (char WP_THREAD*)bucket->ptr + index_in_bucket * elem_size;
 }
 
 
-template <typename T> CUDA_CALLABLE inline T& index(const fabricarray_t<T>& fa, size_t i)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& index(const fabricarray_t<T> WP_THREAD& fa, size_t i)
 {
-    const fabricbucket_t* bucket = fabricarray_find_bucket(fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(fa, i);
     assert(bucket && "Fabric array index out of range");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    T& result = *((T*)bucket->ptr + index_in_bucket);
+    T WP_THREAD& result = *((T WP_THREAD*)bucket->ptr + index_in_bucket);
 
     FP_VERIFY_FWD_1(result)
 
@@ -114,21 +114,21 @@ template <typename T> CUDA_CALLABLE inline T& index(const fabricarray_t<T>& fa, 
 
 
 // indexing for fabric array of arrays
-template <typename T> CUDA_CALLABLE inline T& index(const fabricarray_t<T>& fa, size_t i, size_t j)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& index(const fabricarray_t<T> WP_THREAD& fa, size_t i, size_t j)
 {
-    const fabricbucket_t* bucket = fabricarray_find_bucket(fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(fa, i);
     assert(bucket && "Fabric array index out of range");
 
     assert(bucket->lengths && "Missing inner array lengths");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    void* ptr = *((void**)bucket->ptr + index_in_bucket);
-    size_t length = *((size_t*)bucket->lengths + index_in_bucket);
+    void WP_THREAD* ptr = *((void WP_THREAD* WP_THREAD*)bucket->ptr + index_in_bucket);
+    size_t length = *((size_t WP_THREAD*)bucket->lengths + index_in_bucket);
 
     assert(j < length && "Fabric array inner index out of range");
 
-    T& result = *((T*)ptr + j);
+    T WP_THREAD& result = *((T WP_THREAD*)ptr + j);
 
     FP_VERIFY_FWD_1(result)
 
@@ -136,34 +136,34 @@ template <typename T> CUDA_CALLABLE inline T& index(const fabricarray_t<T>& fa, 
 }
 
 
-template <typename T> CUDA_CALLABLE inline array_t<T> view(fabricarray_t<T>& fa, size_t i)
+template <typename T> CUDA_CALLABLE inline array_t<T> view(fabricarray_t<T> WP_THREAD& fa, size_t i)
 {
-    const fabricbucket_t* bucket = fabricarray_find_bucket(fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(fa, i);
     assert(bucket && "Fabric array index out of range");
 
     assert(bucket->lengths && "Missing inner array lengths");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    void* ptr = *((void**)bucket->ptr + index_in_bucket);
-    size_t length = *((size_t*)bucket->lengths + index_in_bucket);
+    void WP_THREAD* ptr = *((void WP_THREAD* WP_THREAD*)bucket->ptr + index_in_bucket);
+    size_t length = *((size_t WP_THREAD*)bucket->lengths + index_in_bucket);
 
-    return array_t<T>((T*)ptr, int(length));
+    return array_t<T>((T WP_THREAD*)ptr, int(length));
 }
 
 
-template <typename T> CUDA_CALLABLE inline T& index(const indexedfabricarray_t<T>& ifa, size_t i)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& index(const indexedfabricarray_t<T> WP_THREAD& ifa, size_t i)
 {
     // index lookup
     assert(i < ifa.size);
     i = size_t(ifa.indices[i]);
 
-    const fabricbucket_t* bucket = fabricarray_find_bucket(ifa.fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(ifa.fa, i);
     assert(bucket && "Fabric array index out of range");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    T& result = *((T*)bucket->ptr + index_in_bucket);
+    T WP_THREAD& result = *((T WP_THREAD*)bucket->ptr + index_in_bucket);
 
     FP_VERIFY_FWD_1(result)
 
@@ -172,25 +172,25 @@ template <typename T> CUDA_CALLABLE inline T& index(const indexedfabricarray_t<T
 
 
 // indexing for fabric array of arrays
-template <typename T> CUDA_CALLABLE inline T& index(const indexedfabricarray_t<T>& ifa, size_t i, size_t j)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& index(const indexedfabricarray_t<T> WP_THREAD& ifa, size_t i, size_t j)
 {
     // index lookup
     assert(i < ifa.size);
     i = size_t(ifa.indices[i]);
 
-    const fabricbucket_t* bucket = fabricarray_find_bucket(ifa.fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(ifa.fa, i);
     assert(bucket && "Fabric array index out of range");
 
     assert(bucket->lengths && "Missing inner array lengths");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    void* ptr = *((void**)bucket->ptr + index_in_bucket);
-    size_t length = *((size_t*)bucket->lengths + index_in_bucket);
+    void WP_THREAD* ptr = *((void WP_THREAD* WP_THREAD*)bucket->ptr + index_in_bucket);
+    size_t length = *((size_t WP_THREAD*)bucket->lengths + index_in_bucket);
 
     assert(j < length && "Fabric array inner index out of range");
 
-    T& result = *((T*)ptr + j);
+    T WP_THREAD& result = *((T WP_THREAD*)ptr + j);
 
     FP_VERIFY_FWD_1(result)
 
@@ -198,30 +198,30 @@ template <typename T> CUDA_CALLABLE inline T& index(const indexedfabricarray_t<T
 }
 
 
-template <typename T> CUDA_CALLABLE inline array_t<T> view(indexedfabricarray_t<T>& ifa, size_t i)
+template <typename T> CUDA_CALLABLE inline array_t<T> view(indexedfabricarray_t<T> WP_THREAD& ifa, size_t i)
 {
     // index lookup
     assert(i < ifa.size);
     i = size_t(ifa.indices[i]);
 
-    const fabricbucket_t* bucket = fabricarray_find_bucket(ifa.fa, i);
+    const fabricbucket_t WP_THREAD* bucket = fabricarray_find_bucket(ifa.fa, i);
     assert(bucket && "Fabric array index out of range");
 
     assert(bucket->lengths && "Missing inner array lengths");
 
     size_t index_in_bucket = i - bucket->index_start;
 
-    void* ptr = *((void**)bucket->ptr + index_in_bucket);
-    size_t length = *((size_t*)bucket->lengths + index_in_bucket);
+    void WP_THREAD* ptr = *((void WP_THREAD* WP_THREAD*)bucket->ptr + index_in_bucket);
+    size_t length = *((size_t WP_THREAD*)bucket->lengths + index_in_bucket);
 
-    return array_t<T>((T*)ptr, int(length));
+    return array_t<T>((T WP_THREAD*)ptr, int(length));
 }
 
 
 // Stubs for Fabric array descriptors nested in structs. Struct adjoints copy
 // array descriptors rather than accumulating their members.
-template <typename T> CUDA_CALLABLE inline void atomic_add(fabricarray_t<T>*, fabricarray_t<T>) { }
+template <typename T> CUDA_CALLABLE inline void atomic_add(fabricarray_t<T> WP_THREAD*, fabricarray_t<T>) { }
 
-template <typename T> CUDA_CALLABLE inline void atomic_add(indexedfabricarray_t<T>*, indexedfabricarray_t<T>) { }
+template <typename T> CUDA_CALLABLE inline void atomic_add(indexedfabricarray_t<T> WP_THREAD*, indexedfabricarray_t<T>) { }
 
 }  // namespace wp

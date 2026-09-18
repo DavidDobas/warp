@@ -150,6 +150,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.matrix.test_mat_elementwise_ops import TestMatElementwiseOps
     from warp.tests.matrix.test_mat_linalg import TestMatLinalg
     from warp.tests.matrix.test_mat_lite import TestMatLite
+    from warp.tests.native.test_metal_runtime import TestMetalRuntime
     from warp.tests.test_adam import TestAdam
     from warp.tests.test_allocation_tracker import TestAllocTracker
     from warp.tests.test_allocator import (
@@ -264,6 +265,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_vec import TestVec
     from warp.tests.test_vec_constructors import TestVecConstructors
     from warp.tests.test_vec_lite import TestVecLite
+    from warp.tests.test_vec_scan import TestVecScan
     from warp.tests.test_vec_scalar_ops import TestVecScalarOps
     from warp.tests.test_verify_fp import TestVerifyFP
     from warp.tests.test_version import TestVersion
@@ -416,6 +418,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestMeshQueryPoint,
         TestMeshQueryRay,
         TestSweptVolume,
+        TestMetalRuntime,
         TestModuleContamination,
         TestModuleHashing,
         TestModuleLite,
@@ -500,6 +503,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestVec,
         TestVecConstructors,
         TestVecLite,
+        TestVecScan,
         TestVecScalarOps,
         TestVerifyFP,
         TestVersion,
@@ -724,6 +728,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_vec_assign_copy import TestVecAssignCopy
     from warp.tests.test_vec_constructors import TestVecConstructors
     from warp.tests.test_vec_lite import TestVecLite
+    from warp.tests.test_vec_scan import TestVecScan
     from warp.tests.test_vec_scalar_ops import TestVecScalarOps
     from warp.tests.test_verify_fp import TestVerifyFP
     from warp.tests.test_version import TestVerifyLibraryVersion, TestVersion
@@ -955,6 +960,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestVecAssignCopy,
         TestVecConstructors,
         TestVecLite,
+        TestVecScan,
         TestVerifyFP,
         TestVerifyLibraryVersion,
         TestVersion,

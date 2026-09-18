@@ -4305,7 +4305,6 @@ def tile_load_indexed_tuple_value_func(arg_types: Mapping[str, type], arg_values
     a = arg_types["a"]
 
     indices_tile = arg_types["indices"]
-    indices_tile.storage = "shared"  # force to shared
 
     axis = arg_values["axis"]
     if axis >= a.ndim:
@@ -4321,6 +4320,11 @@ def tile_load_indexed_tuple_value_func(arg_types: Mapping[str, type], arg_values
 
     if None in shape:
         raise ValueError("Tile functions require shape to be a compile time constant.")
+
+    # A 1D gather whose index tile has the same shape can read the indices from registers
+    # (each lane owns the indices of the elements it loads); anything else needs shared memory.
+    if not (len(shape) == 1 and tuple(indices_tile.shape) == tuple(shape)):
+        indices_tile.storage = "shared"
 
     num_indices = indices_tile.shape[0]
     if num_indices != shape[axis]:

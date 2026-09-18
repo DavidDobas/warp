@@ -1150,7 +1150,21 @@ class Var:
         return Var.dtype_to_ctype(t)
 
     def ctype(self, value_type: builtins.bool = False) -> str:
+        if is_reference(self.type) and not value_type:
+            return f"{self.address_space()} {Var.type_to_ctype(self.type.value_type)}*"
         return Var.type_to_ctype(self.type, value_type)
+
+    def address_space(self) -> str:
+        """Address-space macro of a ``Reference(T)`` var: ``WP_DEVICE`` for array elements, else ``WP_THREAD``.
+
+        Metal requires an explicit address space on every pointer; the macros expand to nothing elsewhere.
+        """
+        if getattr(self, "array_slot", None) is not None or getattr(self, "device_memory", False):
+            return "WP_DEVICE"
+        origin = self.ref_origin
+        if origin is not None and any(step.kind in ("array", "index") for step in origin.steps):
+            return "WP_DEVICE"
+        return "WP_THREAD"
 
     def emit(self, prefix: str = "var"):
         if self.prefix:
@@ -1877,6 +1891,69 @@ def _store_shared_source(code, entry):
     _shared_function_sources[key] = (weakref.ref(code, _remove), entry)
 
 
+# Builtins with no Metal implementation yet. Their calls compile to wp::metal_unsupported stand-ins
+# and launching a kernel that reaches one raises (see context.invoke_metal).
+METAL_UNSUPPORTED_BUILTIN_PREFIXES = ()
+
+
+def metal_tile_scratch_bytes(key: str, args: Mapping[str, Any], block_dim: int) -> int:
+    """Shared-memory scratch the portable (non-LTO) tile implementations allocate for a builtin.
+
+    CUDA reports static shared memory when a kernel loads and the CPU has a fixed arena, but Metal
+    must size the threadgroup buffer up front, so mirror the allocations in tile_reduce.h,
+    tile_scan.h, tile_cholesky.h and tile_solve.h here.
+    """
+    if key == "tile_from_thread":  # one shared element for the broadcast
+        return warp._src.types.type_size_in_bytes(args["value"].type)
+    tiles = [a.type for a in args.values() if isinstance(a, Var) and is_tile(a.type)]
+    if not tiles:
+        return 0
+    elem = warp._src.types.type_size_in_bytes(tiles[0].dtype)
+    if key in ("tile_sum", "tile_min", "tile_max", "tile_argmin", "tile_argmax", "tile_reduce", "tile_dot"):
+        return tiles[0].size * elem + block_dim * (elem + 8)  # partials, indices and flags per lane
+    if key.startswith("tile_scan_"):
+        return tiles[0].size * elem + block_dim
+    if key == "tile_cholesky":
+        n = tiles[0].shape[0]
+        if 1 < block_dim <= 32 and n <= 40:
+            return 0  # register-and-shuffle path (tile_cholesky.h metal_register_cholesky): no workspaces
+        return 2 * n * n * elem  # W1, W2 workspaces
+    if key in ("tile_cholesky_solve", "tile_lower_solve", "tile_upper_solve"):
+        return tiles[1].size * elem  # W
+    if key == "tile_sort" and len(tiles) > 1:
+        n = 1 << (tiles[0].size - 1).bit_length()  # bitonic sort pads to a power of two
+        return n * (elem + warp._src.types.type_size_in_bytes(tiles[1].dtype))  # key/value temporaries
+    return 0
+
+
+# Tile builtins whose native implementation allocates shared-tile scratch and therefore takes the
+# arena as a hidden first argument (WP_TILE_ARENA_PARAM in the tile headers; empty off Metal).
+TILE_ARENA_NATIVES = frozenset(
+    (
+        "tile_sum",
+        "tile_min",
+        "tile_max",
+        "tile_argmin",
+        "tile_argmax",
+        "tile_scan_inclusive",
+        "tile_scan_exclusive",
+        "tile_scan_max_inclusive",
+        "tile_scan_min_inclusive",
+        "tile_dot",
+        "tile_extract",
+        "tile_from_thread",
+        "tile_sort",
+    )
+)
+
+
+def tile_arena_arg(func, has_args: bool) -> str:
+    """Hidden arena argument for calls to generated functions and arena-using tile builtins."""
+    if func.is_builtin() and func.native_func not in TILE_ARENA_NATIVES:
+        return ""
+    return "WP_TILE_ARENA_ARG " if has_args else "WP_TILE_ARENA_ARG0"
+
+
 class Adjoint:
     # Source code transformer, this class takes a Python function and
     # generates forward and backward SSA forms of the function instructions
@@ -1903,6 +1980,8 @@ class Adjoint:
         adj.skip_reverse_codegen = skip_reverse_codegen
         # Whether this function is used by a kernel that has has the backward pass enabled.
         adj.used_by_backward_kernel = False
+        # keys of unsupported builtins reached on Metal, filled by build() (see METAL_UNSUPPORTED_BUILTIN_PREFIXES)
+        adj.metal_unsupported_builtins = set()
         # Whether to force adjoint code generation regardless of enable_backward setting.
         # This is used by warp.grad() to ensure the adjoint exists even in forward-only modules.
         adj.force_adjoint_codegen = False
@@ -2235,11 +2314,17 @@ class Adjoint:
         adj.blocks = [Block()]
         adj.loop_blocks = []
 
+        adj.metal = getattr(builder, "device", None) == "metal"
+        # Emit loops as for(;;)/break/continue instead of labels and goto (Metal has no goto).
+        adj.structured_loops = adj.metal
+        adj.metal_unsupported_builtins = set()
+
         # holds current indent level
         adj.indentation = ""
 
         # used to generate new label indices
         adj.label_count = 0
+        adj.branch_label_starts = []  # label ids at the start of open if/else bodies (Metal reverse guards)
 
         # tracks how much additional shared memory is required by any dependent function calls
         adj.max_required_extra_shared_memory = 0
@@ -2373,7 +2458,13 @@ class Adjoint:
             elif isinstance(a, warp._src.context.Function):
                 # functions don't have a var_ prefix so strip it off here
                 if prefix == "var":
-                    arg_strs.append(f"{a.namespace}{a.native_func}")
+                    if a.is_builtin():
+                        arg_strs.append(f"{a.namespace}{a.native_func}")
+                    else:
+                        # generated functions take the hidden tile arena first (see WP_TILE_ARENA_PARAM)
+                        arg_strs.append(
+                            f"[&](auto... _a) {{ return WP_TILE_CALL({a.namespace}{a.native_func}, _a...); }}"
+                        )
                 else:
                     arg_strs.append(f"{a.namespace}{prefix}_{a.native_func}")
             elif is_reference(a.type):
@@ -2516,6 +2607,24 @@ class Adjoint:
                 return f'#line {line} "{escaped_path}"'
         return None
 
+    # Metal has no goto. The reverse pass instead keeps `_wp_ret` (id of the return that was
+    # replayed, -1 if none) and `_wp_run` (set once the matching label is reached); every replay and
+    # reverse statement runs only when no return was taken or the label has been passed, and a block
+    # opener whose body holds a label in [a, b) is entered while a return in that range is pending.
+    _METAL_GUARD = "_wp_ret < 0 || _wp_run"
+
+    def metal_guard(adj, statement: str, label_range=None) -> str:
+        if not adj.structured_loops:
+            return statement
+        s = statement.strip()
+        if not s or s[0] in "}#/" or s.startswith(("else", "label", "auto ")):
+            return statement  # declarations (view preludes) must stay in scope; they are side-effect free
+        cond = adj._METAL_GUARD
+        if label_range and label_range[1] > label_range[0]:
+            cond += f" || (_wp_ret >= {label_range[0]} && _wp_ret < {label_range[1]})"
+        indent = statement[: len(statement) - len(statement.lstrip())]
+        return f"{indent}if ({cond}) {statement.lstrip()}"
+
     def add_forward(adj, statement: str, replay: str | None = None, skip_replay: builtins.bool = False) -> None:
         """Append a statement to the forward pass."""
 
@@ -2530,16 +2639,16 @@ class Adjoint:
 
             if replay:
                 # if custom replay specified then output it
-                adj.blocks[-1].body_replay.append(adj.indentation + replay)
+                adj.blocks[-1].body_replay.append(adj.metal_guard(adj.indentation + replay))
             else:
                 # by default just replay the original statement
-                adj.blocks[-1].body_replay.append(adj.indentation + statement)
+                adj.blocks[-1].body_replay.append(adj.metal_guard(adj.indentation + statement))
 
     # append a statement to the reverse pass
     def add_reverse(adj, statement: str) -> None:
         """Append a statement to the reverse pass."""
 
-        adj.blocks[-1].body_reverse.append(adj.indentation + statement)
+        adj.blocks[-1].body_reverse.append(adj.metal_guard(adj.indentation + statement))
 
         if line_directive := adj.get_line_directive(statement, adj.lineno):
             adj.blocks[-1].body_reverse.append(line_directive)
@@ -2972,6 +3081,8 @@ class Adjoint:
         # for example by checking whether an argument corresponds to
         # a literal value or references a variable.
         extra_shared_memory = 0
+        if adj.metal and func.is_builtin():
+            extra_shared_memory = metal_tile_scratch_bytes(func.key, bound_args, adj.builder_options["block_dim"])
         func_arg_names = tuple(bound_args.keys())
         if func.lto_dispatch_func is not None:
             func_args, template_args, _ltoirs, extra_shared_memory = func.lto_dispatch_func(
@@ -2991,6 +3102,14 @@ class Adjoint:
 
         func_args = tuple(adj.register_var(x) for x in func_args)
         func_name = compute_type_str(func.native_func, template_args)
+        if adj.metal:
+            if func.is_builtin() and func.key.startswith(METAL_UNSUPPORTED_BUILTIN_PREFIXES):
+                adj.metal_unsupported_builtins.add(func.key)
+                func_name = (
+                    f"metal_unsupported<{output.ctype()}>" if isinstance(output, Var) else "metal_unsupported_void"
+                )
+            elif not func.is_builtin() and func.adj is not None:
+                adj.metal_unsupported_builtins |= func.adj.metal_unsupported_builtins
         use_initializer_list = func.initializer_list_func(bound_args, return_type)
 
         # For user functions, check which parameters are wp.ref[T] / Reference(T)
@@ -3051,21 +3170,26 @@ class Adjoint:
 
         if return_type is None:
             # handles expression (zero output) functions, e.g.: void do_something();
-            forward_call = f"{func.namespace}{func_name}({adj.format_forward_call_args(fwd_args + det_args, use_initializer_list)});"
+            args_str = adj.format_forward_call_args(fwd_args + det_args, use_initializer_list)
+            forward_call = f"{func.namespace}{func_name}({tile_arena_arg(func, args_str != '')}{args_str});"
             replay_call = forward_call
             if func.custom_replay_func is not None or func.replay_snippet is not None:
                 replay_call = f"{func.namespace}replay_{func_name}({adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)});"
 
         elif not isinstance(return_type, Sequence) or len(return_type) == 1:
             # handle simple function (one output)
-            forward_call = f"var_{output} = {func.namespace}{func_name}({adj.format_forward_call_args(fwd_args + det_args, use_initializer_list)});"
+            args_str = adj.format_forward_call_args(fwd_args + det_args, use_initializer_list)
+            forward_call = (
+                f"var_{output} = {func.namespace}{func_name}({tile_arena_arg(func, args_str != '')}{args_str});"
+            )
             replay_call = forward_call
             if func.custom_replay_func is not None:
                 replay_call = f"var_{output} = {func.namespace}replay_{func_name}({adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)});"
 
         else:
             # handle multiple value functions
-            forward_call = f"{func.namespace}{func_name}({adj.format_forward_call_args(fwd_args + det_args + output, use_initializer_list)});"
+            args_str = adj.format_forward_call_args(fwd_args + det_args + output, use_initializer_list)
+            forward_call = f"{func.namespace}{func_name}({tile_arena_arg(func, args_str != '')}{args_str});"
             replay_call = forward_call
 
         forward_call, replay_call = adj.deterministic.wrap_unintercepted_side_effect_atomic(
@@ -3120,7 +3244,8 @@ class Adjoint:
                     adj_func_name = compute_type_str(func.native_func, template_args)
                 else:
                     adj_func_name = func.native_func
-                reverse_call = f"{func.namespace}adj_{adj_func_name}({arg_str});"
+                arena = "" if func.is_builtin() else tile_arena_arg(func, arg_str != "")
+                reverse_call = f"{func.namespace}adj_{adj_func_name}({arena}{arg_str});"
                 if adj.deterministic.enabled and func.is_builtin() and func.key == "address":
                     reverse_call = adj.deterministic.adjoint_address_call(fwd_args, output_list, reverse_call)
                 adj.add_reverse(reverse_call)
@@ -3269,7 +3394,9 @@ class Adjoint:
         adj_call_args_str = ", ".join(adj_call_args)
 
         # Call the function's adjoint (accumulates into local vars)
-        adj.add_forward(f"{func.namespace}adj_{func.native_func}({adj_call_args_str});")
+        adj.add_forward(
+            f"{func.namespace}adj_{func.native_func}({tile_arena_arg(func, adj_call_args_str != '')}{adj_call_args_str});"
+        )
 
         # Return the accumulated adjoint(s)
         if len(adj_input_vars) == 1:
@@ -3288,19 +3415,24 @@ class Adjoint:
             return result_var
 
     def add_return(adj, var):
+        n = adj.label_count
+        jump = f"_wp_ret = {n};" if adj.structured_loops else f"goto label{n};"
         if var is None or len(var) == 0:
             # Rewritten to `continue;` for CUDA grid-stride kernels by codegen_func_forward().
-            adj.add_forward("return;", f"goto label{adj.label_count};")
+            adj.add_forward("return;", jump)
         elif len(var) == 1:
-            adj.add_forward(f"return {var[0].emit()};", f"goto label{adj.label_count};")
+            adj.add_forward(f"return {var[0].emit()};", jump)
             adj.add_reverse("adj_" + str(var[0]) + " += adj_ret;")
         else:
             for i, v in enumerate(var):
                 adj.add_forward(f"ret_{i} = {v.emit()};")
                 adj.add_reverse(f"adj_{v} += adj_ret_{i};")
-            adj.add_forward("return;", f"goto label{adj.label_count};")
+            adj.add_forward("return;", jump)
 
-        adj.add_reverse(f"label{adj.label_count}:;")
+        if adj.structured_loops:
+            adj.blocks[-1].body_reverse.append(adj.indentation + f"if (_wp_ret == {n}) _wp_run = true;")
+        else:
+            adj.add_reverse(f"label{n}:;")
 
         adj.label_count += 1
 
@@ -3309,6 +3441,7 @@ class Adjoint:
         cond = adj.load(cond)
         adj.add_forward(f"if ({cond.emit()}) {{")
         adj.add_reverse("}")
+        adj.branch_label_starts.append(adj.label_count)
 
         adj.indent()
 
@@ -3317,12 +3450,14 @@ class Adjoint:
 
         adj.add_forward("}")
         cond = adj.load(cond)
-        adj.add_reverse(f"if ({cond.emit()}) {{")
+        label_range = (adj.branch_label_starts.pop(), adj.label_count)
+        adj.blocks[-1].body_reverse.append(adj.metal_guard(adj.indentation + f"if ({cond.emit()}) {{", label_range))
 
     def begin_else(adj, cond):
         cond = adj.load(cond)
         adj.add_forward(f"if (!{cond.emit()}) {{")
         adj.add_reverse("}")
+        adj.branch_label_starts.append(adj.label_count)
 
         adj.indent()
 
@@ -3331,17 +3466,19 @@ class Adjoint:
 
         adj.add_forward("}")
         cond = adj.load(cond)
-        adj.add_reverse(f"if (!{cond.emit()}) {{")
+        label_range = (adj.branch_label_starts.pop(), adj.label_count)
+        adj.blocks[-1].body_reverse.append(adj.metal_guard(adj.indentation + f"if (!{cond.emit()}) {{", label_range))
 
     # define a for-loop
     def begin_for(adj, iter):
         cond_block = adj.begin_block("for")
+        cond_block.label_start = adj.label_count
         adj.loop_blocks.append(cond_block)
-        adj.add_forward(f"start_{cond_block.label}:;")
+        adj.add_forward("for (;;) {" if adj.structured_loops else f"start_{cond_block.label}:;")
         adj.indent()
 
         # evaluate cond
-        adj.add_forward(f"if (iter_cmp({iter.emit()}) == 0) goto end_{cond_block.label};")
+        adj.add_forward(f"if (iter_cmp({iter.emit()}) == 0) {adj.loop_exit(cond_block)}")
 
         # evaluate iter
         val = adj.add_builtin_call("iter_next", [iter])
@@ -3364,10 +3501,13 @@ class Adjoint:
         for i in body_block.body_forward:
             adj.blocks[-1].body_forward.append(i)
 
-        adj.add_forward(f"goto start_{cond_block.label};", skip_replay=True)
-
-        adj.dedent()
-        adj.add_forward(f"end_{cond_block.label}:;", skip_replay=True)
+        if adj.structured_loops:
+            adj.dedent()
+            adj.add_forward("}", skip_replay=True)
+        else:
+            adj.add_forward(f"goto start_{cond_block.label};", skip_replay=True)
+            adj.dedent()
+            adj.add_forward(f"end_{cond_block.label}:;", skip_replay=True)
 
         ####################
         # reverse pass
@@ -3375,10 +3515,11 @@ class Adjoint:
         reverse = []
 
         # reverse iterator
-        reverse.append(adj.indentation + f"{iter.emit()} = wp::iter_reverse({iter.emit()});")
+        reverse.append(adj.metal_guard(adj.indentation + f"{iter.emit()} = wp::iter_reverse({iter.emit()});"))
 
-        for i in cond_block.body_forward:
-            reverse.append(i)
+        label_range = (cond_block.label_start, adj.label_count)
+        for k, i in enumerate(cond_block.body_forward):
+            reverse.append(adj.metal_guard(i, label_range if k == 0 else None))
 
         # zero adjoints
         for i in body_block.vars:
@@ -3390,7 +3531,7 @@ class Adjoint:
                 # loop-invariant accumulator). Resetting here would corrupt that
                 # storage and null the alias pointers in this local handle.
             else:
-                reverse.append(adj.indentation + f"\t{i.emit_adj()} = {{}};")
+                reverse.append(adj.metal_guard(adj.indentation + f"\t{i.emit_adj()} = {{}};"))
 
         # replay
         for i in body_block.body_replay:
@@ -3400,8 +3541,11 @@ class Adjoint:
         for i in reversed(body_block.body_reverse):
             reverse.append(i)
 
-        reverse.append(adj.indentation + f"\tgoto start_{cond_block.label};")
-        reverse.append(adj.indentation + f"end_{cond_block.label}:;")
+        if adj.structured_loops:
+            reverse.append(adj.indentation + "}")
+        else:
+            reverse.append(adj.indentation + f"\tgoto start_{cond_block.label};")
+            reverse.append(adj.indentation + f"end_{cond_block.label}:;")
 
         adj.blocks[-1].body_reverse.extend(reversed(reverse))
 
@@ -3410,13 +3554,14 @@ class Adjoint:
         # evaluate condition in its own block
         # so we can control replay
         cond_block = adj.begin_block("while")
+        cond_block.label_start = adj.label_count
         adj.loop_blocks.append(cond_block)
-        cond_block.body_forward.append(f"start_{cond_block.label}:;")
+        cond_block.body_forward.append("for (;;) {" if adj.structured_loops else f"start_{cond_block.label}:;")
 
         c = adj.eval(cond)
         c = adj.load(c)
 
-        cond_block.body_forward.append(f"if (({c.emit()}) == false) goto end_{cond_block.label};")
+        cond_block.body_forward.append(f"if (({c.emit()}) == false) {adj.loop_exit(cond_block)}")
 
         # being block around loop
         adj.begin_block()
@@ -3437,16 +3582,20 @@ class Adjoint:
         for i in body_block.body_forward:
             adj.blocks[-1].body_forward.append(i)
 
-        adj.blocks[-1].body_forward.append(f"goto start_{cond_block.label};")
-        adj.blocks[-1].body_forward.append(f"end_{cond_block.label}:;")
+        if adj.structured_loops:
+            adj.blocks[-1].body_forward.append("}")
+        else:
+            adj.blocks[-1].body_forward.append(f"goto start_{cond_block.label};")
+            adj.blocks[-1].body_forward.append(f"end_{cond_block.label}:;")
 
         ####################
         # reverse pass
         reverse = []
 
         # cond
-        for i in cond_block.body_forward:
-            reverse.append(i)
+        label_range = (cond_block.label_start, adj.label_count)
+        for k, i in enumerate(cond_block.body_forward):
+            reverse.append(adj.metal_guard(i, label_range if k == 0 else None))
 
         # zero adjoints of local vars
         for i in body_block.vars:
@@ -3458,7 +3607,7 @@ class Adjoint:
                 # loop-invariant accumulator). Resetting here would corrupt that
                 # storage and null the alias pointers in this local handle.
             else:
-                reverse.append(f"{i.emit_adj()} = {{}};")
+                reverse.append(adj.metal_guard(f"{i.emit_adj()} = {{}};"))
 
         # replay
         for i in body_block.body_replay:
@@ -3468,8 +3617,11 @@ class Adjoint:
         for i in reversed(body_block.body_reverse):
             reverse.append(i)
 
-        reverse.append(f"goto start_{cond_block.label};")
-        reverse.append(f"end_{cond_block.label}:;")
+        if adj.structured_loops:
+            reverse.append("}")
+        else:
+            reverse.append(f"goto start_{cond_block.label};")
+            reverse.append(f"end_{cond_block.label}:;")
 
         # output
         adj.blocks[-1].body_reverse.extend(reversed(reverse))
@@ -3826,8 +3978,15 @@ class Adjoint:
 
                 # represent pointer types as uint64
                 if isinstance(attr_var.type, pointer_t):
-                    cast = f"({Var.dtype_to_ctype(uint64)}*)"
-                    adj_cast = f"({Var.dtype_to_ctype(attr_var.type.dtype)}*)"
+                    # Metal needs the pointer's address space: descriptors in device memory (array elements)
+                    # vs. thread-local copies (kernel arguments); the macros expand to nothing elsewhere
+                    pre_origin = None if is_array(aggregate_type) else adj.reference_origin_for_var(aggregate)
+                    in_device = pre_origin is not None and any(s.kind in ("array", "index") for s in pre_origin.steps)
+                    space = "WP_DEVICE" if in_device else "WP_THREAD"
+                    cast = f"({Var.dtype_to_ctype(uint64)} {space}*)"
+                    adj_cast = (
+                        f"({Var.dtype_to_ctype(attr_var.type.dtype)} WP_DEVICE*)"  # data pointers are device memory
+                    )
                     attr_type = Reference(uint64)
                 else:
                     cast = ""
@@ -4192,15 +4351,21 @@ class Adjoint:
 
             adj.end_for(iter)
 
+    def loop_exit(adj, loop_block) -> str:
+        return "break;" if adj.structured_loops else f"goto end_{loop_block.label};"
+
+    def loop_next(adj, loop_block) -> str:
+        return "continue;" if adj.structured_loops else f"goto start_{loop_block.label};"
+
     def emit_Break(adj, node):
         adj.materialize_redefinitions(adj.loop_symbols[-1])
 
-        adj.add_forward(f"goto end_{adj.loop_blocks[-1].label};")
+        adj.add_forward(adj.loop_exit(adj.loop_blocks[-1]))
 
     def emit_Continue(adj, node):
         adj.materialize_redefinitions(adj.loop_symbols[-1])
 
-        adj.add_forward(f"goto start_{adj.loop_blocks[-1].label};")
+        adj.add_forward(adj.loop_next(adj.loop_blocks[-1]))
 
     def emit_Expr(adj, node):
         if isinstance(node.value, ast.Call):
@@ -4383,6 +4548,9 @@ class Adjoint:
         elements = tuple(adj.add_builtin_call(builtin_name, (target, adj.add_constant(i))) for i in range(*bounds))
         if not elements:
             raise WarpCodegenError("Starred expression results in empty sequence.")
+        if builtin_name == "address":
+            for e in elements:
+                e.device_memory = True  # element pointers into array storage
 
         return elements
 
@@ -4762,6 +4930,7 @@ class Adjoint:
                     )
                 # handles array loads (where each dimension has an index specified)
                 out = adj.add_builtin_call("address", [target, *indices])
+                out.device_memory = True
                 if origin := adj.reference_origin_for_var(target):
                     out.ref_origin = origin.extend_array(indices)
 
@@ -5803,7 +5972,7 @@ class Adjoint:
             adj.det_meta.has_component_updates = True
         array_expression = adj._array_slot_root_expr(array_root)
         index_expressions = ", ".join(index.emit() for index in slot.indices)
-        slot_accessor = f"[&](auto& _e) -> auto& {{ return _e{slot.access}; }}"
+        slot_accessor = f"[&](auto WP_DEVICE& _e) -> auto WP_DEVICE& {{ return _e{slot.access}; }}"  # array elements live in device memory on Metal
         if operation is None:
             slot_lvalue = f"wp::index({array_expression}, {index_expressions}){slot.access}"
             forward_statement = adj.deterministic.wrap_slot_store(slot_lvalue, rhs.emit())
@@ -6281,6 +6450,7 @@ class Adjoint:
                     current = adj.add_builtin_call("extract", [target, *indices])
                 elif is_array(target_type):
                     current = adj.add_builtin_call("address", [target, *indices])
+                    current.device_memory = True
                 elif is_tile(target_type):
                     current = adj.add_builtin_call("tile_extract", [target, *indices])
                 else:
@@ -7209,7 +7379,7 @@ struct {name}
     {{
     }}
 
-    CUDA_CALLABLE {name}& operator += (const {name}& rhs)
+    CUDA_CALLABLE {name} WP_THREAD& operator += (const {name} WP_THREAD& rhs)
     {{{prefix_add_body}
         return *this;}}
 {tile_member_ops}
@@ -7220,22 +7390,22 @@ static CUDA_CALLABLE void adj_{name}({reverse_args})
 {reverse_body}}}
 
 // Required when compiling adjoints.
-CUDA_CALLABLE {name} add(const {name}& a, const {name}& b)
+CUDA_CALLABLE {name} add(const {name} WP_THREAD& a, const {name} WP_THREAD& b)
 {{
 {add_body}
 }}
 
-CUDA_CALLABLE void adj_atomic_add({name}* p, {name} t)
+CUDA_CALLABLE void adj_atomic_add({name} WP_DEVICE* p, {name} t)
 {{
 {atomic_add_body}}}
 
 {tile_helper_body}
-
+{metal_fixup}
 """
 
 tile_struct_member_ops_template = """
 
-    CUDA_CALLABLE {name}& operator -= (const {name}& rhs)
+    CUDA_CALLABLE {name} WP_THREAD& operator -= (const {name} WP_THREAD& rhs)
     {{{prefix_sub_body}
         return *this;}}
 
@@ -7250,38 +7420,47 @@ tile_struct_member_ops_template = """
 tile_struct_helpers_template = """
 // Required by tile templates. The overloads are found by ADL when tile.h is
 // instantiated with a generated struct type.
-CUDA_CALLABLE void adj_add(const {name}& a, const {name}& b, {name}& adj_a, {name}& adj_b, const {name}& adj_ret)
+CUDA_CALLABLE void adj_add(const {name} WP_THREAD& a, const {name} WP_THREAD& b, {name} WP_THREAD& adj_a, {name} WP_THREAD& adj_b, const {name} WP_THREAD& adj_ret)
 {{
     adj_a += adj_ret;
     adj_b += adj_ret;
 }}
 
-CUDA_CALLABLE {name} sub(const {name}& a, const {name}& b)
+CUDA_CALLABLE {name} sub(const {name} WP_THREAD& a, const {name} WP_THREAD& b)
 {{
     {name} ret = a;
     ret -= b;
     return ret;
 }}
 
-CUDA_CALLABLE void adj_sub(const {name}& a, const {name}& b, {name}& adj_a, {name}& adj_b, const {name}& adj_ret)
+CUDA_CALLABLE void adj_sub(const {name} WP_THREAD& a, const {name} WP_THREAD& b, {name} WP_THREAD& adj_a, {name} WP_THREAD& adj_b, const {name} WP_THREAD& adj_ret)
 {{
     adj_a += adj_ret;
     adj_b -= adj_ret;
 }}
 
-CUDA_CALLABLE {name} atomic_add({name}* p, {name} t)
+CUDA_CALLABLE {name} atomic_add({name} WP_DEVICE* p, {name} t)
 {{
     {name} old {{}};
 {atomic_add_forward_body}
     return old;
 }}
 
-CUDA_CALLABLE {name} tile_atomic_add_value({name}* p, {name} t)
+CUDA_CALLABLE {name} tile_atomic_add_value({name} WP_DEVICE* p, {name} t)
 {{
     return atomic_add(p, t);
 }}
 
-CUDA_CALLABLE {name} tile_adj_atomic_add_value({name}* p, {name} t)
+#if defined(__METAL_VERSION__)
+inline {name} tile_atomic_add_value({name} threadgroup* p, {name} t)  // shared tiles of structs
+{{
+    {name} old {{}};
+{metal_atomic_add_body}
+    return old;
+}}
+#endif
+
+CUDA_CALLABLE {name} tile_adj_atomic_add_value({name} WP_DEVICE* p, {name} t)
 {{
     // Tile adjoint struct atomics accumulate only for side effects; callers
     // currently ignore the returned old value, so avoid a second atomic here.
@@ -7444,22 +7623,61 @@ def cuda_kernel_backward_name(kernel, name=None):
 
 cpu_kernel_template_forward = """
 
-void {name}_cpu_kernel_forward(
-    {forward_args},
-    wp_args_{name} *_wp_args)
+WP_FORCE_INLINE void {name}_cpu_kernel_forward(
+    WP_TILE_ARENA_PARAM {forward_args},
+    WP_CONSTANT wp_args_{name}* _wp_args)
 {{
 {forward_body}}}
 
 """
 
+# Metal entry point: one GPU thread per task, arguments read from a constant buffer.
+metal_module_template_forward = """
+
+kernel void {name}_metal_forward(
+    constant wp::launch_bounds_t<{launch_ndim}>& dim [[buffer(0)]],
+    constant wp_args_{name}* _wp_args [[buffer(1)]],
+    threadgroup char* _wp_arena [[threadgroup(0)]],
+    uint task_index [[thread_position_in_grid]])
+{{
+    if (task_index >= dim.size)
+        return;
+    wp::tile_shared_storage_t::init(_wp_arena);  // shared-tile arena (see tile.h)
+    {name}_cpu_kernel_forward(_wp_arena, dim, task_index, _wp_args);
+}}
+
+"""
+
 cpu_kernel_template_backward = """
 
-void {name}_cpu_kernel_backward(
-    {reverse_args},
-    wp_args_{name} *_wp_args,
-    wp_args_{name} *_wp_adj_args)
+WP_FORCE_INLINE void {name}_cpu_kernel_backward(
+    WP_TILE_ARENA_PARAM {reverse_args},
+    WP_CONSTANT wp_args_{name} *_wp_args,
+    WP_CONSTANT wp_args_{name} *_wp_adj_args)
 {{
 {reverse_body}}}
+
+"""
+
+# Metal backward entry point: both argument structs travel in one constant buffer.
+metal_module_template_backward = """
+
+struct wp_bwd_args_{name} {{
+    wp_args_{name} args;
+    wp_args_{name} adj_args;
+}};
+
+kernel void {name}_metal_backward(
+    constant wp::launch_bounds_t<{launch_ndim}>& dim [[buffer(0)]],
+    constant wp_bwd_args_{name}* _wp [[buffer(1)]],
+    threadgroup char* _wp_arena [[threadgroup(0)]],
+    uint task_index [[thread_position_in_grid]])
+{{
+    if (task_index >= dim.size)
+        return;
+    wp::tile_shared_storage_t::init(_wp_arena);
+    {name}_cpu_kernel_backward(_wp_arena, dim, task_index, &_wp->args, &_wp->adj_args);
+}}
 
 """
 
@@ -7479,7 +7697,7 @@ WP_API void {name}_cpu_forward(
 
     for (size_t task_index = 0; task_index < dim->size; ++task_index)
     {{
-        {name}_cpu_kernel_forward(*dim, task_index, _wp_args);
+        {name}_cpu_kernel_forward(WP_TILE_ARENA_ARG *dim, task_index, _wp_args);
     }}
 }}
 
@@ -7503,7 +7721,7 @@ static void {name}_cpu_block_thunk_forward(
     {name}_cpu_block_payload_forward* payload = ({name}_cpu_block_payload_forward*)payload_ptr;
     wp::tile_shared_storage_t::bind(payload->tile_mem);
     const size_t task_index = payload->block_first + (size_t)lane;
-    {name}_cpu_kernel_forward(*dim, task_index, payload->args);
+    {name}_cpu_kernel_forward(WP_TILE_ARENA_ARG *dim, task_index, payload->args);
 }}
 
 extern "C" {{
@@ -7551,7 +7769,7 @@ WP_API void {name}_cpu_backward(
 
     for (size_t task_index = 0; task_index < dim->size; ++task_index)
     {{
-        {name}_cpu_kernel_backward(*dim, task_index, _wp_args, _wp_adj_args);
+        {name}_cpu_kernel_backward(WP_TILE_ARENA_ARG *dim, task_index, _wp_args, _wp_adj_args);
     }}
 }}
 
@@ -7576,7 +7794,7 @@ static void {name}_cpu_block_thunk_backward(
     {name}_cpu_block_payload_backward* payload = ({name}_cpu_block_payload_backward*)payload_ptr;
     wp::tile_shared_storage_t::bind(payload->tile_mem);
     const size_t task_index = payload->block_first + (size_t)lane;
-    {name}_cpu_kernel_backward(*dim, task_index, payload->args, payload->adj_args);
+    {name}_cpu_kernel_backward(WP_TILE_ARENA_ARG *dim, task_index, payload->args, payload->adj_args);
 }}
 
 extern "C" {{
@@ -7762,6 +7980,23 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
         # for empty structs, emit the dummy attribute to avoid any compiler-specific alignment issues
         body.append("char _dummy_;\n")
 
+    # Metal: struct values loaded from device memory carry host pointers in their array members
+    # (see wp_metal_translate); wp::load() calls this fixup after copying the value
+    fixup_lines = []
+    for label, var in struct.vars.items():
+        if is_array(var.type):
+            fixup_lines.append(f"    s.{label} = wp::metal_load_array(s.{label});")
+        elif type_is_struct(var.type):
+            fixup_lines.append(f"    wp_metal_fixup(s.{label});")
+    metal_fixup = ""
+    if fixup_lines:
+        metal_fixup = (
+            "#if defined(__METAL_VERSION__)\n"
+            f"inline void wp_metal_fixup({struct.native_name} WP_THREAD& s)\n{{\n"
+            + "\n".join(fixup_lines)
+            + "\n}\n#endif\n"
+        )
+
     forward_args = []
     reverse_args = []
     forward_initializers = []
@@ -7778,8 +8013,8 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
     for label, var in struct.vars.items():
         var_ctype = var.ctype()
         default_arg_def = " = {}" if forward_args else ""
-        forward_args.append(f"{var_ctype} const& {label}{default_arg_def}")
-        reverse_args.append(f"{var_ctype} const&")
+        forward_args.append(f"const {var_ctype} WP_THREAD& {label}{default_arg_def}")
+        reverse_args.append(f"const {var_ctype} WP_THREAD&")
 
         namespace = "wp::" if var_ctype.startswith("wp::") or var_ctype == "bool" else ""
         if not warp._src.types.is_native_type(var.type):
@@ -7824,7 +8059,7 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
 
     # reverse args
     for label, var in struct.vars.items():
-        reverse_args.append(var.ctype() + " & adj_" + label)
+        reverse_args.append(var.ctype() + " WP_THREAD& adj_" + label)
         if warp._src.types.is_native_type(var.type):
             continue
         elif is_array(var.type):
@@ -7832,7 +8067,7 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
         else:
             reverse_body.append(f"{indent_block}adj_{label} += adj_ret.{label};\n")
 
-    reverse_args.append(name + " & adj_ret")
+    reverse_args.append(name + " WP_THREAD& adj_ret")
 
     # explicitly defaulted default constructor if no default constructor has been defined
     defaulted_constructor_def = f"{name}() = default;" if forward_args else ""
@@ -7848,6 +8083,8 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
         tile_helper_body = tile_struct_helpers_template.format(
             name=name,
             atomic_add_forward_body="".join(atomic_add_forward_body),
+            # threadgroup pointers resolve through the per-type tile helpers, not the device atomics
+            metal_atomic_add_body="".join(atomic_add_forward_body).replace("atomic_add(&", "tile_atomic_add_value(&"),
             shuffle_down_body="".join(shuffle_down_body),
             shuffle_xor_body="".join(shuffle_xor_body),
         )
@@ -7862,19 +8099,20 @@ def codegen_struct(struct, device="cpu", indent_size=4, include_tile_helpers=Fal
         struct_body="".join([indent_block + l for l in body]),
         forward_args=indent(forward_args),
         forward_initializers="".join(forward_initializers),
-        reverse_args=indent(reverse_args),
+        reverse_args=indent(reverse_args),  # struct adjoints take no arena
         reverse_body="".join(reverse_body),
         prefix_add_body="".join(prefix_add_body),
         atomic_add_body="".join(atomic_add_body),
         tile_member_ops=tile_member_ops,
         add_body=add_body,
         tile_helper_body=tile_helper_body,
+        metal_fixup=metal_fixup,
         defaulted_constructor_def=defaulted_constructor_def,
     )
 
 
 def codegen_func_forward(adj, func_type="kernel", device="cpu", grid_stride=False):
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         indent = 4
     elif device == "cuda":
         if func_type == "kernel":
@@ -7889,7 +8127,7 @@ def codegen_func_forward(adj, func_type="kernel", device="cpu", grid_stride=Fals
     lines = []
 
     # argument vars
-    if device == "cpu" and func_type == "kernel":
+    if device in ("cpu", "metal") and func_type == "kernel":
         lines += ["//---------\n"]
         lines += ["// argument vars\n"]
 
@@ -7930,7 +8168,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu", grid_stride=Fals
     if adj.slot_augassign_error is not None:
         raise WarpCodegenError(adj.slot_augassign_error)
 
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         indent = 4
     elif device == "cuda":
         if func_type == "kernel":
@@ -7945,7 +8183,7 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu", grid_stride=Fals
     lines = []
 
     # argument vars
-    if device == "cpu" and func_type == "kernel":
+    if device in ("cpu", "metal") and func_type == "kernel":
         lines += ["//---------\n"]
         lines += ["// argument vars\n"]
 
@@ -8002,6 +8240,12 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu", grid_stride=Fals
     lines += ["//---------\n"]
     lines += ["// forward\n"]
 
+    if adj.structured_loops:
+        lines += [
+            "int _wp_ret = -1;  // id of the replayed return, see Adjoint.metal_guard\n",
+            "bool _wp_run = false;\n",
+        ]
+
     for f in adj.blocks[0].body_replay:
         lines += [f + "\n"]
 
@@ -8020,6 +8264,12 @@ def codegen_func_reverse(adj, func_type="kernel", device="cpu", grid_stride=Fals
     return "".join(l.lstrip() if l.lstrip().startswith("#line") else indent_block + l for l in lines)
 
 
+def template_prefix_str(template_params):
+    if not template_params:
+        return ""
+    return "template<" + ", ".join(f"typename {t}" for t in template_params) + ">\n"
+
+
 def codegen_func(
     adj,
     c_func_name: str,
@@ -8035,6 +8285,8 @@ def codegen_func(
     # The hint covers the adjoint too: keeping a large @wp.func out of line is pointless if the
     # adjoint generated from it is still inlined everywhere.
     inline_attr = _INLINE_ATTRS.get(inline_hint, "")
+    if not inline_attr and device in ("cpu", "metal"):
+        inline_attr = "WP_FORCE_INLINE "  # Metal does not inline generated bodies on its own; empty on CPU
 
     # Build line directive for function definition (subtract 1 to account for 1-indexing of AST line numbers)
     # This is used as a catch-all C-to-Python source line mapping for any code that does not have
@@ -8080,6 +8332,7 @@ def codegen_func(
     # it matches the Python semantics where augmented assignment on a
     # mutable object modifies it in place.
     template_params = []
+    reverse_template_params = []
 
     # forward args
     for i, arg in enumerate(adj.args):
@@ -8088,7 +8341,12 @@ def codegen_func(
         if is_tile(arg.type) or is_tile_stack(arg.type):
             tname = f"tile_{arg.label}"
             template_params.append(tname)
-            s = f"{tname}& {arg.emit()}"
+            s = f"{tname} WP_THREAD& {arg.emit()}"
+        elif is_reference(arg.type) and adj.metal:
+            # Metal: a reference may point to thread or device memory; deduce the pointer type per call
+            tname = f"ref_{arg.label}"
+            template_params.append(tname)
+            s = f"{tname} {arg.emit()}"
         else:
             s = f"{arg.ctype()} {arg.emit()}"
         forward_args.append(s)
@@ -8099,8 +8357,8 @@ def codegen_func(
     reverse_args.extend(det_args)
     if has_multiple_outputs:
         for i, arg in enumerate(adj.return_var):
-            forward_args.append(arg.ctype() + " & ret_" + str(i))
-            reverse_args.append(arg.ctype() + " & ret_" + str(i))
+            forward_args.append(arg.ctype() + " WP_THREAD& ret_" + str(i))
+            reverse_args.append(arg.ctype() + " WP_THREAD& ret_" + str(i))
 
     # reverse args
     for i, arg in enumerate(adj.args):
@@ -8111,36 +8369,40 @@ def codegen_func(
         # indexed array gradients are regular arrays
         if matches_array_class(arg.type, indexedarray):
             _arg = Var(arg.label, array(dtype=arg.type.dtype, ndim=arg.type.ndim))
-            reverse_args.append(_arg.ctype() + " & adj_" + arg.label)
+            reverse_args.append(_arg.ctype() + " WP_THREAD& adj_" + arg.label)
         elif is_tile(arg.type) or is_tile_stack(arg.type):
             tname = f"tile_{arg.label}"
-            reverse_args.append(f"{tname} & adj_{arg.label}")
+            reverse_args.append(f"{tname} WP_THREAD& adj_{arg.label}")
         elif is_reference(arg.type):
-            reverse_args.append(arg.ctype() + " adj_" + arg.label)
+            if adj.metal:
+                tname = f"adj_ref_{arg.label}"
+                reverse_template_params.append(tname)
+                reverse_args.append(f"{tname} adj_{arg.label}")
+            else:
+                reverse_args.append(arg.ctype() + " adj_" + arg.label)
         else:
-            reverse_args.append(arg.ctype() + " & adj_" + arg.label)
+            reverse_args.append(arg.ctype() + " WP_THREAD& adj_" + arg.label)
     if has_multiple_outputs:
         for i, arg in enumerate(adj.return_var):
-            reverse_args.append(arg.ctype() + " & adj_ret_" + str(i))
+            reverse_args.append(arg.ctype() + " WP_THREAD& adj_ret_" + str(i))
     elif return_type != "void":
-        reverse_args.append(return_type + " & adj_ret")
+        reverse_args.append(return_type + " WP_THREAD& adj_ret")
     # custom output reverse args (user-declared)
     if adj.custom_reverse_mode:
         for arg in adj.args[adj.custom_reverse_num_input_args :]:
             if is_tile(arg.type) or is_tile_stack(arg.type):
                 tname = f"tile_{arg.label}"
-                reverse_args.append(f"{tname} & {arg.emit()}")
+                reverse_args.append(f"{tname} WP_THREAD& {arg.emit()}")
             elif is_reference(arg.type):
-                reverse_args.append(f"{arg.ctype()} {arg.emit()}")
+                reverse_args.append(f"{'ref_' + arg.label if adj.metal else arg.ctype()} {arg.emit()}")
             else:
-                reverse_args.append(f"{arg.ctype()} & {arg.emit()}")
+                reverse_args.append(f"{arg.ctype()} WP_THREAD& {arg.emit()}")
 
     # build template prefix for functions with tile parameters
-    template_prefix = ""
-    if template_params:
-        template_prefix = "template<" + ", ".join(f"typename {t}" for t in template_params) + ">\n"
+    template_prefix = template_prefix_str(template_params)
+    reverse_template_prefix = template_prefix_str(template_params + reverse_template_params)
 
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         forward_template = cpu_forward_function_template
         reverse_template = cpu_reverse_function_template
     elif device == "cuda":
@@ -8158,7 +8420,11 @@ def codegen_func(
             name=c_func_name,
             return_type=return_type,
             inline_attr=inline_attr,
-            forward_args=indent(forward_args),
+            forward_args=indent(
+                ["WP_TILE_ARENA_PARAM " + forward_args[0], *forward_args[1:]]
+                if forward_args
+                else ["WP_TILE_ARENA_PARAM0"]
+            ),
             forward_body=forward_body,
             filename=adj.filename,
             lineno=adj.fun_lineno,
@@ -8180,11 +8446,15 @@ def codegen_func(
                 reverse_body = codegen_func_reverse(adj, func_type="function", device=device)
             else:
                 reverse_body = "\t// reverse mode disabled (no backward-enabled kernel depends on this function)\n"
-        s += template_prefix + reverse_template.format(
+        s += reverse_template_prefix + reverse_template.format(
             name=c_func_name,
             return_type=return_type,
             inline_attr=inline_attr,
-            reverse_args=indent(reverse_args),
+            reverse_args=indent(
+                ["WP_TILE_ARENA_PARAM " + reverse_args[0], *reverse_args[1:]]
+                if reverse_args
+                else ["WP_TILE_ARENA_PARAM0"]
+            ),
             forward_body=forward_body,
             reverse_body=reverse_body,
             filename=adj.filename,
@@ -8212,19 +8482,27 @@ def codegen_snippet(adj, name, snippet, adj_snippet, replay_snippet, forward_onl
     # for the same reasons as @wp.func: owning shared tiles cannot be
     # copied, and adjoint built-ins expect non-const Tile& parameters.
     template_params = []
+    reverse_template_params = []
 
     # forward args
     for _i, arg in enumerate(adj.args):
         if is_tile(arg.type):
             tname = f"tile_{arg.label}"
             template_params.append(tname)
-            s = f"{tname}& {arg.emit().replace('var_', '')}"
+            s = f"{tname} WP_THREAD& {arg.emit().replace('var_', '')}"
         elif is_reference(arg.type):
             label = arg.emit().replace("var_", "")
             internal = f"_wp_ref_{label}"
-            s = f"{arg.ctype()} {internal}"
-            forward_ref_aliases.append(f"    {Var.type_to_ctype(arg.type.value_type)}& {label} = *{internal};\n")
-            reverse_ref_aliases.append(f"    {Var.type_to_ctype(arg.type.value_type)}& {label} = *{internal};\n")
+            if adj.metal:  # deduced pointer type, alias keeps its address space through decltype
+                tname = f"ref_{label}"
+                template_params.append(tname)
+                s = f"{tname} {internal}"
+                alias = f"    decltype(*{internal}) {label} = *{internal};\n"
+            else:
+                s = f"{arg.ctype()} {internal}"
+                alias = f"    {Var.type_to_ctype(arg.type.value_type)} {arg.address_space()}& {label} = *{internal};\n"
+            forward_ref_aliases.append(alias)
+            reverse_ref_aliases.append(alias)
         else:
             s = f"{arg.ctype()} {arg.emit().replace('var_', '')}"
         forward_args.append(s)
@@ -8234,24 +8512,29 @@ def codegen_snippet(adj, name, snippet, adj_snippet, replay_snippet, forward_onl
     for _i, arg in enumerate(adj.args):
         if matches_array_class(arg.type, indexedarray):
             _arg = Var(arg.label, array(dtype=arg.type.dtype, ndim=arg.type.ndim))
-            reverse_args.append(_arg.ctype() + " & adj_" + arg.label)
+            reverse_args.append(_arg.ctype() + " WP_THREAD& adj_" + arg.label)
         elif is_tile(arg.type):
-            reverse_args.append(f"tile_{arg.label} & adj_{arg.label}")
+            reverse_args.append(f"tile_{arg.label} WP_THREAD& adj_{arg.label}")
         elif is_reference(arg.type):
             internal = f"_wp_ref_adj_{arg.label}"
-            reverse_args.append(f"{arg.ctype()} {internal}")
-            reverse_ref_aliases.append(
-                f"    {Var.type_to_ctype(arg.type.value_type)}& adj_{arg.label} = *{internal};\n"
-            )
+            if adj.metal:
+                tname = f"adj_ref_{arg.label}"
+                reverse_template_params.append(tname)
+                reverse_args.append(f"{tname} {internal}")
+                reverse_ref_aliases.append(f"    decltype(*{internal}) adj_{arg.label} = *{internal};\n")
+            else:
+                reverse_args.append(f"{arg.ctype()} {internal}")
+                reverse_ref_aliases.append(
+                    f"    {Var.type_to_ctype(arg.type.value_type)} {arg.address_space()}& adj_{arg.label} = *{internal};\n"
+                )
         else:
-            reverse_args.append(arg.ctype() + " & adj_" + arg.label)
+            reverse_args.append(arg.ctype() + " WP_THREAD& adj_" + arg.label)
     if return_type != "void":
-        reverse_args.append(return_type + " & adj_ret")
+        reverse_args.append(return_type + " WP_THREAD& adj_ret")
 
     # build template prefix for snippets with tile parameters
-    template_prefix = ""
-    if template_params:
-        template_prefix = "template<" + ", ".join(f"typename {t}" for t in template_params) + ">\n"
+    template_prefix = template_prefix_str(template_params)
+    reverse_template_prefix = template_prefix_str(template_params + reverse_template_params)
 
     forward_ref_aliases_str = "".join(forward_ref_aliases)
     reverse_ref_aliases_str = "".join(reverse_ref_aliases)
@@ -8271,7 +8554,11 @@ def codegen_snippet(adj, name, snippet, adj_snippet, replay_snippet, forward_onl
             name=name,
             return_type=return_type,
             inline_attr=inline_attr,
-            forward_args=indent(forward_args),
+            forward_args=indent(
+                ["WP_TILE_ARENA_PARAM " + forward_args[0], *forward_args[1:]]
+                if forward_args
+                else ["WP_TILE_ARENA_PARAM0"]
+            ),
             forward_body=forward_ref_aliases_str + snippet,
             filename=adj.filename,
             lineno=adj.fun_lineno,
@@ -8297,11 +8584,15 @@ def codegen_snippet(adj, name, snippet, adj_snippet, replay_snippet, forward_onl
         else:
             reverse_body = reverse_ref_aliases_str
 
-        s += template_prefix + reverse_template.format(
+        s += reverse_template_prefix + reverse_template.format(
             name=name,
             return_type=return_type,
             inline_attr=inline_attr,
-            reverse_args=indent(reverse_args),
+            reverse_args=indent(
+                ["WP_TILE_ARENA_PARAM " + reverse_args[0], *reverse_args[1:]]
+                if reverse_args
+                else ["WP_TILE_ARENA_PARAM0"]
+            ),
             forward_body=snippet,
             reverse_body=reverse_body,
             filename=adj.filename,
@@ -8329,7 +8620,7 @@ def codegen_kernel(kernel, device, options):
     adj = kernel.adj
 
     args_struct = ""
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         args_struct = f"struct wp_args_{kernel.get_mangled_name()} {{\n"
         for i in adj.args:
             args_struct += f"    {i.ctype()} {i.label};\n"
@@ -8380,6 +8671,9 @@ def codegen_kernel(kernel, device, options):
     if device == "cpu":
         template_forward = cpu_kernel_template_forward
         template_backward = cpu_kernel_template_backward
+    elif device == "metal":
+        template_forward = cpu_kernel_template_forward
+        template_backward = cpu_kernel_template_backward  # the Metal backward entry passes the shared arena
     elif is_external_constant_params_entry:
         template_forward = cuda_external_constant_params_kernel_template_forward
         template_backward = ""
@@ -8444,7 +8738,7 @@ def codegen_kernel(kernel, device, options):
     forward_args = []
     if not is_external_constant_params_entry:
         forward_args.append(f"wp::launch_bounds_t<{adj.kernel_dim}> dim")
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         forward_args.append("size_t task_index")
     elif not is_external_constant_params_entry:
         for arg in adj.args:
@@ -8460,7 +8754,7 @@ def codegen_kernel(kernel, device, options):
             "Warp struct argument."
         )
 
-    if not is_external_constant_params_entry and device != "cpu":
+    if not is_external_constant_params_entry and device == "cuda":
         forward_args.extend(adj.deterministic.kernel_args())
 
     forward_func_type = "function" if is_external_constant_params_entry else "kernel"
@@ -8488,7 +8782,7 @@ def codegen_kernel(kernel, device, options):
     if options["enable_backward"] and not is_external_constant_params_entry:
         # build reverse signature
         reverse_args = [f"wp::launch_bounds_t<{adj.kernel_dim}> dim"]
-        if device == "cpu":
+        if device in ("cpu", "metal"):
             reverse_args.append("size_t task_index")
         else:
             for arg in adj.args:
@@ -8527,6 +8821,24 @@ def codegen_kernel(kernel, device, options):
 
 
 def codegen_module(kernel, device, options):
+    """Generate the per-kernel entry points that wrap the per-thread kernel body (CPU and Metal only)."""
+    template_fmt_args = {
+        "name": kernel.get_mangled_name(),
+        "launch_ndim": kernel.adj.kernel_dim,
+    }
+    if device == "metal":
+        source = metal_module_template_forward.format(**template_fmt_args)
+        if (options | kernel.options)["enable_backward"]:
+            if any(is_tile(v.type) for v in kernel.adj.variables):
+                # tile adjoints still run with a null shared arena; Module.load turns this into a launch error
+                source += f"// wp_metal_backward_unsupported {template_fmt_args['name']}\n"
+            else:
+                source += metal_module_template_backward.format(**template_fmt_args)
+        if kernel.adj.metal_unsupported_builtins:
+            # Module.load reads this marker back so that cached modules keep raising at launch.
+            builtins = " ".join(sorted(kernel.adj.metal_unsupported_builtins))
+            source = f"// wp_metal_unsupported {template_fmt_args['name']}: {builtins}\n" + source
+        return source
     if device != "cpu":
         return ""
 
@@ -8534,10 +8846,6 @@ def codegen_module(kernel, device, options):
     options = options | kernel.options
 
     template = ""
-    template_fmt_args = {
-        "name": kernel.get_mangled_name(),
-        "launch_ndim": kernel.adj.kernel_dim,
-    }
 
     if options["block_dim"] == 1:
         template += cpu_module_template_forward

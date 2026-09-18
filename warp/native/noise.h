@@ -35,17 +35,17 @@ inline CUDA_CALLABLE float interpolate_gradient(float a0, float a1, float t, flo
     // return (d_a1 - d_a0) * t + (a1 - a0) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec2 interpolate_gradient_2d(float a0, float a1, float t, vec2& d_a0, vec2& d_a1, vec2& d_t)
+inline CUDA_CALLABLE vec2 interpolate_gradient_2d(float a0, float a1, float t, vec2 WP_THREAD& d_a0, vec2 WP_THREAD& d_a1, vec2 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec3 interpolate_gradient_3d(float a0, float a1, float t, vec3& d_a0, vec3& d_a1, vec3& d_t)
+inline CUDA_CALLABLE vec3 interpolate_gradient_3d(float a0, float a1, float t, vec3 WP_THREAD& d_a0, vec3 WP_THREAD& d_a1, vec3 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec4 interpolate_gradient_4d(float a0, float a1, float t, vec4& d_a0, vec4& d_a1, vec4& d_t)
+inline CUDA_CALLABLE vec4 interpolate_gradient_4d(float a0, float a1, float t, vec4 WP_THREAD& d_a0, vec4 WP_THREAD& d_a1, vec4 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
@@ -464,7 +464,7 @@ template <unsigned N> struct noise_level_t {
 
 // Leaf node: v_ij... = dot(d, g). Linear in input → Hessian is zero.
 template <unsigned N>
-inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float>& d, const vec_t<N, float>& g)
+inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float> WP_THREAD& d, const vec_t<N, float> WP_THREAD& g)
 {
     noise_level_t<N> F;
     F.val = dot(d, g);
@@ -483,7 +483,7 @@ inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float>& d,
 //            + (B - A) S''(u) δ_{i,k} δ_{j,k}
 template <unsigned N>
 inline CUDA_CALLABLE noise_level_t<N>
-noise_level_compose(const noise_level_t<N>& A, const noise_level_t<N>& B, unsigned k, float S, float S1, float S2)
+noise_level_compose(const noise_level_t<N> WP_THREAD& A, const noise_level_t<N> WP_THREAD& B, unsigned k, float S, float S1, float S2)
 {
     noise_level_t<N> F;
     float dv = B.val - A.val;
@@ -646,7 +646,7 @@ inline CUDA_CALLABLE float noise(uint32 state, float x)
     return noise_1d(state, x0, x1, dx);
 }
 
-inline CUDA_CALLABLE void adj_noise(uint32 state, float x, uint32& adj_state, float& adj_x, const float adj_ret)
+inline CUDA_CALLABLE void adj_noise(uint32 state, float x, uint32 WP_THREAD& adj_state, float WP_THREAD& adj_x, const float adj_ret)
 {
     float dx = x - floor(x);
 
@@ -657,7 +657,7 @@ inline CUDA_CALLABLE void adj_noise(uint32 state, float x, uint32& adj_state, fl
     adj_x += gradient * adj_ret;
 }
 
-inline CUDA_CALLABLE float noise(uint32 state, const vec2& xy)
+inline CUDA_CALLABLE float noise(uint32 state, const vec2 WP_THREAD& xy)
 {
     float dx = xy[0] - floor(xy[0]);
     float dy = xy[1] - floor(xy[1]);
@@ -671,7 +671,7 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec2& xy)
     return noise_2d(state, x0, y0, x1, y1, dx, dy);
 }
 
-inline CUDA_CALLABLE void adj_noise(uint32 state, const vec2& xy, uint32& adj_state, vec2& adj_xy, const float adj_ret)
+inline CUDA_CALLABLE void adj_noise(uint32 state, const vec2 WP_THREAD& xy, uint32 WP_THREAD& adj_state, vec2 WP_THREAD& adj_xy, const float adj_ret)
 {
     float dx = xy[0] - floor(xy[0]);
     float dy = xy[1] - floor(xy[1]);
@@ -688,7 +688,7 @@ inline CUDA_CALLABLE void adj_noise(uint32 state, const vec2& xy, uint32& adj_st
     adj_xy[1] += gradient[1] * adj_ret;
 }
 
-inline CUDA_CALLABLE float noise(uint32 state, const vec3& xyz)
+inline CUDA_CALLABLE float noise(uint32 state, const vec3 WP_THREAD& xyz)
 {
     float dx = xyz[0] - floor(xyz[0]);
     float dy = xyz[1] - floor(xyz[1]);
@@ -706,7 +706,7 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec3& xyz)
 }
 
 inline CUDA_CALLABLE void
-adj_noise(uint32 state, const vec3& xyz, uint32& adj_state, vec3& adj_xyz, const float adj_ret)
+adj_noise(uint32 state, const vec3 WP_THREAD& xyz, uint32 WP_THREAD& adj_state, vec3 WP_THREAD& adj_xyz, const float adj_ret)
 {
     float dx = xyz[0] - floor(xyz[0]);
     float dy = xyz[1] - floor(xyz[1]);
@@ -726,7 +726,7 @@ adj_noise(uint32 state, const vec3& xyz, uint32& adj_state, vec3& adj_xyz, const
     adj_xyz[2] += gradient[2] * adj_ret;
 }
 
-inline CUDA_CALLABLE float noise(uint32 state, const vec4& xyzt)
+inline CUDA_CALLABLE float noise(uint32 state, const vec4 WP_THREAD& xyzt)
 {
     float dx = xyzt[0] - floor(xyzt[0]);
     float dy = xyzt[1] - floor(xyzt[1]);
@@ -747,7 +747,7 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec4& xyzt)
 }
 
 inline CUDA_CALLABLE void
-adj_noise(uint32 state, const vec4& xyzt, uint32& adj_state, vec4& adj_xyzt, const float adj_ret)
+adj_noise(uint32 state, const vec4 WP_THREAD& xyzt, uint32 WP_THREAD& adj_state, vec4 WP_THREAD& adj_xyzt, const float adj_ret)
 {
     float dx = xyzt[0] - floor(xyzt[0]);
     float dy = xyzt[1] - floor(xyzt[1]);
@@ -785,7 +785,7 @@ inline CUDA_CALLABLE float pnoise(uint32 state, float x, int px)
 }
 
 inline CUDA_CALLABLE void
-adj_pnoise(uint32 state, float x, int px, uint32& adj_state, float& adj_x, int& adj_px, const float adj_ret)
+adj_pnoise(uint32 state, float x, int px, uint32 WP_THREAD& adj_state, float WP_THREAD& adj_x, int WP_THREAD& adj_px, const float adj_ret)
 {
     float dx = x - floor(x);
 
@@ -796,7 +796,7 @@ adj_pnoise(uint32 state, float x, int px, uint32& adj_state, float& adj_x, int& 
     adj_x += gradient * adj_ret;
 }
 
-inline CUDA_CALLABLE float pnoise(uint32 state, const vec2& xy, int px, int py)
+inline CUDA_CALLABLE float pnoise(uint32 state, const vec2 WP_THREAD& xy, int px, int py)
 {
     float dx = xy[0] - floor(xy[0]);
     float dy = xy[1] - floor(xy[1]);
@@ -812,13 +812,13 @@ inline CUDA_CALLABLE float pnoise(uint32 state, const vec2& xy, int px, int py)
 
 inline CUDA_CALLABLE void adj_pnoise(
     uint32 state,
-    const vec2& xy,
+    const vec2 WP_THREAD& xy,
     int px,
     int py,
-    uint32& adj_state,
-    vec2& adj_xy,
-    int& adj_px,
-    int& adj_py,
+    uint32 WP_THREAD& adj_state,
+    vec2 WP_THREAD& adj_xy,
+    int WP_THREAD& adj_px,
+    int WP_THREAD& adj_py,
     const float adj_ret
 )
 {
@@ -837,7 +837,7 @@ inline CUDA_CALLABLE void adj_pnoise(
     adj_xy[1] += gradient[1] * adj_ret;
 }
 
-inline CUDA_CALLABLE float pnoise(uint32 state, const vec3& xyz, int px, int py, int pz)
+inline CUDA_CALLABLE float pnoise(uint32 state, const vec3 WP_THREAD& xyz, int px, int py, int pz)
 {
     float dx = xyz[0] - floor(xyz[0]);
     float dy = xyz[1] - floor(xyz[1]);
@@ -856,15 +856,15 @@ inline CUDA_CALLABLE float pnoise(uint32 state, const vec3& xyz, int px, int py,
 
 inline CUDA_CALLABLE void adj_pnoise(
     uint32 state,
-    const vec3& xyz,
+    const vec3 WP_THREAD& xyz,
     int px,
     int py,
     int pz,
-    uint32& adj_state,
-    vec3& adj_xyz,
-    int& adj_px,
-    int& adj_py,
-    int& adj_pz,
+    uint32 WP_THREAD& adj_state,
+    vec3 WP_THREAD& adj_xyz,
+    int WP_THREAD& adj_px,
+    int WP_THREAD& adj_py,
+    int WP_THREAD& adj_pz,
     const float adj_ret
 )
 {
@@ -886,7 +886,7 @@ inline CUDA_CALLABLE void adj_pnoise(
     adj_xyz[2] += gradient[2] * adj_ret;
 }
 
-inline CUDA_CALLABLE float pnoise(uint32 state, const vec4& xyzt, int px, int py, int pz, int pt)
+inline CUDA_CALLABLE float pnoise(uint32 state, const vec4 WP_THREAD& xyzt, int px, int py, int pz, int pt)
 {
     float dx = xyzt[0] - floor(xyzt[0]);
     float dy = xyzt[1] - floor(xyzt[1]);
@@ -908,17 +908,17 @@ inline CUDA_CALLABLE float pnoise(uint32 state, const vec4& xyzt, int px, int py
 
 inline CUDA_CALLABLE void adj_pnoise(
     uint32 state,
-    const vec4& xyzt,
+    const vec4 WP_THREAD& xyzt,
     int px,
     int py,
     int pz,
     int pt,
-    uint32& adj_state,
-    vec4& adj_xyzt,
-    int& adj_px,
-    int& adj_py,
-    int& adj_pz,
-    int& adj_pt,
+    uint32 WP_THREAD& adj_state,
+    vec4 WP_THREAD& adj_xyzt,
+    int WP_THREAD& adj_px,
+    int WP_THREAD& adj_py,
+    int WP_THREAD& adj_pz,
+    int WP_THREAD& adj_pt,
     const float adj_ret
 )
 {
@@ -948,7 +948,7 @@ inline CUDA_CALLABLE void adj_pnoise(
 // curl noise
 
 inline CUDA_CALLABLE vec2
-curlnoise(uint32 state, const vec2& xy, const uint32 octaves, const float lacunarity, const float gain)
+curlnoise(uint32 state, const vec2 WP_THREAD& xy, const uint32 octaves, const float lacunarity, const float gain)
 {
     vec2 curl_sum = vec2(0.f);
     float freq = 1.f;
@@ -985,16 +985,16 @@ curlnoise(uint32 state, const vec2& xy, const uint32 octaves, const float lacuna
 // where H = noise_2d_hessian at pt_i. Reverse-mode accumulates J^T @ adj_ret.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
-    const vec2& xy,
+    const vec2 WP_THREAD& xy,
     const uint32 octaves,
     const float lacunarity,
     const float gain,
-    uint32& adj_state,
-    vec2& adj_xy,
-    const uint32& adj_octaves,
-    const float& adj_lacunarity,
-    const float& adj_gain,
-    const vec2& adj_ret
+    uint32 WP_THREAD& adj_state,
+    vec2 WP_THREAD& adj_xy,
+    const uint32 WP_THREAD& adj_octaves,
+    const float WP_THREAD& adj_lacunarity,
+    const float WP_THREAD& adj_gain,
+    const vec2 WP_THREAD& adj_ret
 )
 {
     float freq = 1.f;
@@ -1022,7 +1022,7 @@ inline CUDA_CALLABLE void adj_curlnoise(
 }
 
 inline CUDA_CALLABLE vec3
-curlnoise(uint32 state, const vec3& xyz, const uint32 octaves, const float lacunarity, const float gain)
+curlnoise(uint32 state, const vec3 WP_THREAD& xyz, const uint32 octaves, const float lacunarity, const float gain)
 {
     vec3 curl_sum_1 = vec3(0.f);
     vec3 curl_sum_2 = vec3(0.f);
@@ -1074,16 +1074,16 @@ curlnoise(uint32 state, const vec3& xyz, const uint32 octaves, const float lacun
 // where H_k is the Hessian of N_k at pt_i. Reverse-mode accumulates J^T @ adj_ret.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
-    const vec3& xyz,
+    const vec3 WP_THREAD& xyz,
     const uint32 octaves,
     const float lacunarity,
     const float gain,
-    uint32& adj_state,
-    vec3& adj_xyz,
-    const uint32& adj_octaves,
-    const float& adj_lacunarity,
-    const float& adj_gain,
-    const vec3& adj_ret
+    uint32 WP_THREAD& adj_state,
+    vec3 WP_THREAD& adj_xyz,
+    const uint32 WP_THREAD& adj_octaves,
+    const float WP_THREAD& adj_lacunarity,
+    const float WP_THREAD& adj_gain,
+    const vec3 WP_THREAD& adj_ret
 )
 {
     float freq = 1.f;
@@ -1121,7 +1121,7 @@ inline CUDA_CALLABLE void adj_curlnoise(
 }
 
 inline CUDA_CALLABLE vec3
-curlnoise(uint32 state, const vec4& xyzt, const uint32 octaves, const float lacunarity, const float gain)
+curlnoise(uint32 state, const vec4 WP_THREAD& xyzt, const uint32 octaves, const float lacunarity, const float gain)
 {
     vec4 curl_sum_1 = vec4(0.f);
     vec4 curl_sum_2 = vec4(0.f);
@@ -1169,16 +1169,16 @@ curlnoise(uint32 state, const vec4& xyzt, const uint32 octaves, const float lacu
 // extra Hessian column.
 inline CUDA_CALLABLE void adj_curlnoise(
     uint32 state,
-    const vec4& xyzt,
+    const vec4 WP_THREAD& xyzt,
     const uint32 octaves,
     const float lacunarity,
     const float gain,
-    uint32& adj_state,
-    vec4& adj_xyzt,
-    const uint32& adj_octaves,
-    const float& adj_lacunarity,
-    const float& adj_gain,
-    const vec3& adj_ret
+    uint32 WP_THREAD& adj_state,
+    vec4 WP_THREAD& adj_xyzt,
+    const uint32 WP_THREAD& adj_octaves,
+    const float WP_THREAD& adj_lacunarity,
+    const float WP_THREAD& adj_gain,
+    const vec3 WP_THREAD& adj_ret
 )
 {
     float freq = 1.f;

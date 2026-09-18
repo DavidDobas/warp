@@ -15,12 +15,12 @@ enum HashGridTypeId {
 // point_ids is at a consistent offset regardless of Type. This allows
 // hash_grid_point_id to work without knowing the grid's scalar type.
 template <typename Type> struct HashGrid_t {
-    int* point_cells = nullptr;  // cell id of a point
-    int* point_ids = nullptr;  // index to original point
-    uint64_t* point_keys = nullptr;  // sorted (cell, group) keys, allocated only for grouped builds
+    int WP_DEVICE* point_cells = nullptr;  // cell id of a point
+    int WP_DEVICE* point_ids = nullptr;  // index to original point
+    uint64_t WP_DEVICE* point_keys = nullptr;  // sorted (cell, group) keys, allocated only for grouped builds
 
-    int* cell_starts = nullptr;  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
-    int* cell_ends = nullptr;  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int WP_DEVICE* cell_starts = nullptr;  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int WP_DEVICE* cell_ends = nullptr;  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
 
     int dim_x = 0;
     int dim_y = 0;
@@ -31,7 +31,7 @@ template <typename Type> struct HashGrid_t {
     int max_keys = 0;  // capacity of point_keys
     int has_groups = 0;  // whether the most recent build was grouped
 
-    void* context = nullptr;
+    void WP_THREAD* context = nullptr;
 
     // Type-dependent fields at end (different sizes for half/float/double)
     Type cell_width = {};
@@ -41,15 +41,17 @@ template <typename Type> struct HashGrid_t {
 // Type aliases for backward compatibility and convenience
 using HashGrid = HashGrid_t<float>;
 using HashGridH = HashGrid_t<half>;
+#if !defined(WP_NO_FLOAT64)
 using HashGridD = HashGrid_t<double>;
+#endif
 
-template <typename Type> CUDA_CALLABLE inline int hash_grid_num_cells(const HashGrid_t<Type>& grid)
+template <typename Type> CUDA_CALLABLE inline int hash_grid_num_cells(const HashGrid_t<Type> WP_THREAD& grid)
 {
     // dimensions are validated against overflow at grid creation (HashGrid._validate_cell_count)
     return grid.dim_x * grid.dim_y * grid.dim_z;
 }
 
-template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const HashGrid_t<Type>& grid)
+template <typename Type> CUDA_CALLABLE inline bool hash_grid_has_groups(const HashGrid_t<Type> WP_THREAD& grid)
 {
     return grid.point_keys != nullptr && grid.has_groups != 0;
 }
@@ -61,7 +63,7 @@ CUDA_CALLABLE inline uint64_t hash_grid_point_key(int cell, int group)
 }
 
 // first index in [lo, hi) whose key is >= key
-CUDA_CALLABLE inline int hash_grid_lower_bound(const uint64_t* keys, int lo, int hi, uint64_t key)
+CUDA_CALLABLE inline int hash_grid_lower_bound(const uint64_t WP_DEVICE* keys, int lo, int hi, uint64_t key)
 {
     while (lo < hi) {
         const int mid = lo + (hi - lo) / 2;
@@ -74,7 +76,7 @@ CUDA_CALLABLE inline int hash_grid_lower_bound(const uint64_t* keys, int lo, int
 }
 
 // convert a virtual (world) cell coordinate to a physical one
-template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, int x, int y, int z)
+template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type> WP_THREAD& grid, int x, int y, int z)
 {
     // offset to ensure positive coordinates (means grid dim should be less than 4096^3)
     const int origin = 1 << 20;
@@ -105,7 +107,7 @@ template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid
     return cz * (grid.dim_x * grid.dim_y) + cy * grid.dim_x + cx;
 }
 
-template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type>& grid, const vec_t<3, Type>& p)
+template <typename Type> CUDA_CALLABLE inline int hash_grid_index(const HashGrid_t<Type> WP_THREAD& grid, const vec_t<3, Type> WP_THREAD& p)
 {
     // Use floor() to round toward negative infinity, not int() which truncates toward zero.
     // Without floor(), negative fractional coordinates map to the wrong cell
@@ -139,7 +141,7 @@ template <typename Type> struct hash_grid_query_t {
     }
 
     // Required for adjoint computations.
-    CUDA_CALLABLE inline hash_grid_query_t& operator+=(const hash_grid_query_t& other) { return *this; }
+    CUDA_CALLABLE inline hash_grid_query_t WP_THREAD& operator+=(const hash_grid_query_t WP_THREAD& other) { return *this; }
 
     int x_start;
     int y_start;
@@ -168,10 +170,12 @@ template <typename Type> struct hash_grid_query_t {
 // Type aliases for query structs
 using hash_grid_query_f = hash_grid_query_t<float>;
 using hash_grid_query_h = hash_grid_query_t<half>;
+#if !defined(WP_NO_FLOAT64)
 using hash_grid_query_d = hash_grid_query_t<double>;
+#endif
 
 
-template <typename Type> CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type>& query)
+template <typename Type> CUDA_CALLABLE inline void hash_grid_query_set_cell(hash_grid_query_t<Type> WP_THREAD& query)
 {
     const int cell = hash_grid_index(query.grid, query.x, query.y, query.z);
     int start = query.grid.cell_starts[cell];
@@ -195,7 +199,7 @@ hash_grid_query_impl(uint64_t id, vec_t<3, Type> pos, Type radius, int group, bo
 {
     hash_grid_query_t<Type> query;
 
-    query.grid = *(const HashGrid_t<Type>*)(id);
+    query.grid = *(const HashGrid_t<Type> WP_DEVICE*)(id);  // descriptor copied to registers
     query.group = group;
     query.filter_by_group = filter_by_group;
 
@@ -233,9 +237,9 @@ CUDA_CALLABLE inline hash_grid_query_t<Type> hash_grid_query(uint64_t id, vec_t<
 }
 
 
-template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_grid_query_t<Type>& query, int& index)
+template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_grid_query_t<Type> WP_THREAD& query, int WP_THREAD& index)
 {
-    const HashGrid_t<Type>& grid = query.grid;
+    const HashGrid_t<Type> WP_THREAD& grid = query.grid;
     if (!grid.point_cells)
         return false;
 
@@ -267,15 +271,15 @@ template <typename Type> CUDA_CALLABLE inline bool hash_grid_query_next(hash_gri
     }
 }
 
-template <typename Type> CUDA_CALLABLE inline int iter_next(hash_grid_query_t<Type>& query) { return query.current; }
+template <typename Type> CUDA_CALLABLE inline int iter_next(hash_grid_query_t<Type> WP_THREAD& query) { return query.current; }
 
-template <typename Type> CUDA_CALLABLE inline bool iter_cmp(hash_grid_query_t<Type>& query)
+template <typename Type> CUDA_CALLABLE inline bool iter_cmp(hash_grid_query_t<Type> WP_THREAD& query)
 {
     bool finished = hash_grid_query_next(query, query.current);
     return finished;
 }
 
-template <typename Type> CUDA_CALLABLE inline hash_grid_query_t<Type> iter_reverse(const hash_grid_query_t<Type>& query)
+template <typename Type> CUDA_CALLABLE inline hash_grid_query_t<Type> iter_reverse(const hash_grid_query_t<Type> WP_THREAD& query)
 {
     // can't reverse grid queries, users should not rely on neighbor ordering
     return query;
@@ -283,9 +287,9 @@ template <typename Type> CUDA_CALLABLE inline hash_grid_query_t<Type> iter_rever
 
 // hash_grid_point_id is not templated because it only accesses point_ids (int*)
 // which is at the same offset in all HashGrid_t<Type> instantiations
-CUDA_CALLABLE inline int hash_grid_point_id(uint64_t id, int& index)
+CUDA_CALLABLE inline int hash_grid_point_id(uint64_t id, int WP_THREAD& index)
 {
-    const HashGrid* grid = (const HashGrid*)(id);
+    const HashGrid WP_DEVICE* grid = (const HashGrid WP_DEVICE*)(id);
     if (grid->point_ids == nullptr)
         return -1;
     return grid->point_ids[index];

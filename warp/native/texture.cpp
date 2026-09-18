@@ -532,3 +532,91 @@ WP_API uint64_t wp_surface_object_create_device(void* context, uint64_t array_ha
 WP_API void wp_surface_object_destroy_device(void* context, uint64_t surface_handle) { }
 
 #endif  // WP_ENABLE_CUDA
+
+
+#if defined(__APPLE__)
+// Metal textures: the host-side Texture is built as on the CPU, its texel storage is moved into a
+// Metal allocation (unified memory, so uploads stay plain host copies) and a copy of the struct with
+// GPU addresses is placed in Metal memory; that copy's GPU address is the id kernels sample through.
+#include "metal.h"
+#include <map>
+
+namespace {
+struct MetalTexture {
+    int ordinal;
+    wp::Texture* host;  // owns its metadata; data pointers moved to `storage`
+    void* storage;  // Metal allocation holding every mip level
+    wp::Texture* descriptor;  // Metal allocation read by kernels
+};
+std::map<uint64_t, MetalTexture> g_metal_textures;
+}  // namespace
+
+uint64_t wp_texture_create_metal(
+    int ordinal,
+    int ndim,
+    int num_mip_levels,
+    int* mip_widths,
+    int* mip_heights,
+    int* mip_depths,
+    int num_channels,
+    int dtype,
+    int filter_mode,
+    int mip_filter_mode,
+    int* address_modes,
+    bool use_normalized_coords,
+    void** mip_data_ptrs_out
+)
+{
+    uint64_t host_id = wp_texture_create_host(
+        ndim, num_mip_levels, mip_widths, mip_heights, mip_depths, num_channels, dtype, filter_mode, mip_filter_mode,
+        address_modes, use_normalized_coords, mip_data_ptrs_out
+    );
+    if (!host_id)
+        return 0;
+    wp::Texture* host = reinterpret_cast<wp::Texture*>(host_id);
+    const int bytes_per_channel = wp::get_texture_bytes_per_channel(dtype);
+    size_t total_bytes = 0;
+    for (int level = 0; level < num_mip_levels; ++level)
+        total_bytes += size_t(host->mip_widths_arr[level]) * size_t(host->mip_heights_arr[level])
+            * size_t(host->mip_depths_arr[level]) * size_t(num_channels) * size_t(bytes_per_channel);
+    void* storage = wp_alloc_metal(ordinal, total_bytes);
+    wp::Texture* descriptor = static_cast<wp::Texture*>(wp_alloc_metal(ordinal, sizeof(wp::Texture)));
+    const uint64_t storage_gpu = storage ? wp_metal_gpu_address(ordinal, storage) : 0;
+    const uint64_t id = descriptor ? wp_metal_gpu_address(ordinal, descriptor) : 0;
+    if (!storage || !descriptor || !storage_gpu || !id) {
+        wp_free_metal(ordinal, storage);
+        wp_free_metal(ordinal, descriptor);
+        wp_texture_destroy_host(host_id);
+        wp::set_error_string("Failed to allocate Metal texture memory");
+        return 0;
+    }
+    // host struct: data pointers into the Metal allocation (host addresses)
+    delete[] static_cast<wp::uint8*>(host->data);
+    host->data = storage;
+    for (int level = 0; level < num_mip_levels; ++level) {
+        host->mip_data[level] = static_cast<char*>(storage) + host->mip_offsets[level];
+        mip_data_ptrs_out[level] = host->mip_data[level];
+    }
+    // device descriptor: the same struct with GPU addresses
+    memcpy(static_cast<void*>(descriptor), static_cast<const void*>(host), sizeof(wp::Texture));  // same layout
+    descriptor->data = reinterpret_cast<void*>(storage_gpu);
+    for (int level = 0; level < num_mip_levels; ++level)
+        descriptor->mip_data[level] = reinterpret_cast<void*>(storage_gpu + host->mip_offsets[level]);
+    g_metal_textures[id] = MetalTexture { ordinal, host, storage, descriptor };
+    return id;
+}
+
+void wp_texture_destroy_metal(uint64_t id)
+{
+    auto it = g_metal_textures.find(id);
+    if (it == g_metal_textures.end())
+        return;
+    MetalTexture t = it->second;
+    g_metal_textures.erase(it);
+    wp_metal_synchronize(t.ordinal);  // kernels may still be sampling
+    t.host->data = nullptr;  // the destructor must not free the Metal storage
+    wp_texture_destroy_host(reinterpret_cast<uint64_t>(t.host));
+    wp_free_metal(t.ordinal, t.storage);
+    wp_free_metal(t.ordinal, t.descriptor);
+}
+#endif  // __APPLE__

@@ -57,11 +57,14 @@ inline int get_texture_bytes_per_channel(int dtype)
     }
 }
 
+// Built on the host; Metal kernels read it through a device pointer (the same layout, with the
+// data pointers rewritten to GPU addresses, see wp_texture_create_metal).
 // Texture class for CPU or other hardware without texture units.
 //
 // Stores the full mipmap chain as a single contiguous buffer with per-level pointers.
 // For a non-mipmapped texture (``num_mip_levels == 1``), ``data == mip_data[0]``.
 struct Texture {
+#if !defined(__METAL_VERSION__)
 
     // Unified constructor: allocates a contiguous buffer holding all mipmap levels
     // and initializes per-level pointers. Per-level shapes come from ``mip_widths``,
@@ -128,8 +131,9 @@ struct Texture {
     Texture& operator=(const Texture&) = delete;
 
     ~Texture() { delete[] static_cast<uint8*>(data); }
+#endif  // !__METAL_VERSION__
 
-    void* data = nullptr;  // base-level pointer, equals mip_data[0]
+    void WP_DEVICE* data = nullptr;  // base-level pointer, equals mip_data[0]
     int32 width = 0;  // base-level width
     int32 height = 0;  // base-level height
     int32 depth = 0;  // base-level depth
@@ -144,7 +148,7 @@ struct Texture {
     bool use_normalized_coords = false;  // If true, coords in [0,1]; if false, in texel space
 
     // Per-level metadata (owned by the texture; indexed [0, num_mip_levels))
-    void* mip_data[WP_TEXTURE_MAX_MIP_LEVELS] = {};
+    void WP_DEVICE* mip_data[WP_TEXTURE_MAX_MIP_LEVELS] = {};
     size_t mip_offsets[WP_TEXTURE_MAX_MIP_LEVELS] = {};
     int32 mip_widths_arr[WP_TEXTURE_MAX_MIP_LEVELS] = {};
     int32 mip_heights_arr[WP_TEXTURE_MAX_MIP_LEVELS] = {};
@@ -322,7 +326,7 @@ inline bool cpu_in_bounds_3d(int x, int y, int z, int w, int h, int d)
 }
 
 // Clamp a LOD value to the texture's valid mip-level range.
-inline float cpu_clamp_lod(const Texture* tex, float lod)
+inline float cpu_clamp_lod(const Texture WP_DEVICE* tex, float lod)
 {
     if (lod < 0.0f)
         return 0.0f;
@@ -358,48 +362,52 @@ inline float cpu_half_to_float(uint16_t h)
         result = sign | ((uint32_t)(exp + 127 - 15) << 23) | ((uint32_t)mantissa << 13);
     }
 
+#if defined(__METAL_VERSION__)
+    return as_type<float>(result);
+#else
     union {
         uint32_t u;
         float f;
     } conv;
     conv.u = result;
     return conv.f;
+#endif
 }
 
 // Decode a raw texel at ``idx`` into a normalized float.
 // Unsigned integers are normalized to [0, 1], signed integers to [-1, 1],
 // float types are returned as-is.
-inline float cpu_decode_texel(const void* level_data, int dtype, int idx)
+inline float cpu_decode_texel(const void WP_DEVICE* level_data, int dtype, int idx)
 {
     switch (dtype) {
     case WP_TEXTURE_DTYPE_UINT8:
-        return ((const uint8_t*)level_data)[idx] / 255.0f;
+        return ((const uint8_t WP_DEVICE*)level_data)[idx] / 255.0f;
     case WP_TEXTURE_DTYPE_UINT16:
-        return ((const uint16_t*)level_data)[idx] / 65535.0f;
+        return ((const uint16_t WP_DEVICE*)level_data)[idx] / 65535.0f;
     case WP_TEXTURE_DTYPE_UINT32:
-        return ((const uint32_t*)level_data)[idx] / 4294967295.0f;
+        return ((const uint32_t WP_DEVICE*)level_data)[idx] / 4294967295.0f;
     case WP_TEXTURE_DTYPE_INT8: {
-        float v = ((const int8_t*)level_data)[idx] / 127.0f;
+        float v = ((const int8_t WP_DEVICE*)level_data)[idx] / 127.0f;
         return v < -1.0f ? -1.0f : v;
     }
     case WP_TEXTURE_DTYPE_INT16: {
-        float v = ((const int16_t*)level_data)[idx] / 32767.0f;
+        float v = ((const int16_t WP_DEVICE*)level_data)[idx] / 32767.0f;
         return v < -1.0f ? -1.0f : v;
     }
     case WP_TEXTURE_DTYPE_INT32: {
-        float v = ((const int32_t*)level_data)[idx] / 2147483647.0f;
+        float v = ((const int32_t WP_DEVICE*)level_data)[idx] / 2147483647.0f;
         return v < -1.0f ? -1.0f : v;
     }
     case WP_TEXTURE_DTYPE_FLOAT16:
-        return cpu_half_to_float(((const uint16_t*)level_data)[idx]);
+        return cpu_half_to_float(((const uint16_t WP_DEVICE*)level_data)[idx]);
     case WP_TEXTURE_DTYPE_FLOAT32:
     default:
-        return ((const float*)level_data)[idx];
+        return ((const float WP_DEVICE*)level_data)[idx];
     }
 }
 
 // Fetch a single texel value from the given mip level.
-inline float cpu_fetch_texel_1d(const Texture* tex, int level, int x, int channel)
+inline float cpu_fetch_texel_1d(const Texture WP_DEVICE* tex, int level, int x, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     if (!cpu_in_bounds_1d(x, w) || channel < 0 || channel >= tex->num_channels) {
@@ -409,7 +417,7 @@ inline float cpu_fetch_texel_1d(const Texture* tex, int level, int x, int channe
     return cpu_decode_texel(tex->mip_data[level], tex->dtype, idx);
 }
 
-inline float cpu_fetch_texel_2d(const Texture* tex, int level, int x, int y, int channel)
+inline float cpu_fetch_texel_2d(const Texture WP_DEVICE* tex, int level, int x, int y, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -420,7 +428,7 @@ inline float cpu_fetch_texel_2d(const Texture* tex, int level, int x, int y, int
     return cpu_decode_texel(tex->mip_data[level], tex->dtype, idx);
 }
 
-inline float cpu_fetch_texel_3d(const Texture* tex, int level, int x, int y, int z, int channel)
+inline float cpu_fetch_texel_3d(const Texture WP_DEVICE* tex, int level, int x, int y, int z, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -433,7 +441,7 @@ inline float cpu_fetch_texel_3d(const Texture* tex, int level, int x, int y, int
 }
 
 // Sample a single channel with linear interpolation (1D) at a specific mip level.
-inline float cpu_sample_1d_channel_at_level(const Texture* tex, int level, float u, int channel)
+inline float cpu_sample_1d_channel_at_level(const Texture WP_DEVICE* tex, int level, float u, int channel)
 {
     const int w = tex->mip_widths_arr[level];
 
@@ -470,7 +478,7 @@ inline float cpu_sample_1d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel with bilinear interpolation (2D) at a specific mip level.
-inline float cpu_sample_2d_channel_at_level(const Texture* tex, int level, float u, float v, int channel)
+inline float cpu_sample_2d_channel_at_level(const Texture WP_DEVICE* tex, int level, float u, float v, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -519,7 +527,7 @@ inline float cpu_sample_2d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel with trilinear interpolation (3D) at a specific mip level.
-inline float cpu_sample_3d_channel_at_level(const Texture* tex, int level, float u, float v, float w_coord, int channel)
+inline float cpu_sample_3d_channel_at_level(const Texture WP_DEVICE* tex, int level, float u, float v, float w_coord, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -590,7 +598,7 @@ inline float cpu_sample_3d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel across mipmap levels using the texture's mip filter mode.
-inline float cpu_sample_1d_channel(const Texture* tex, float u, int channel, float lod)
+inline float cpu_sample_1d_channel(const Texture WP_DEVICE* tex, float u, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -609,7 +617,7 @@ inline float cpu_sample_1d_channel(const Texture* tex, float u, int channel, flo
     return v0 * (1.0f - fl) + v1 * fl;
 }
 
-inline float cpu_sample_2d_channel(const Texture* tex, float u, float v, int channel, float lod)
+inline float cpu_sample_2d_channel(const Texture WP_DEVICE* tex, float u, float v, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -628,7 +636,7 @@ inline float cpu_sample_2d_channel(const Texture* tex, float u, float v, int cha
     return v0 * (1.0f - fl) + v1 * fl;
 }
 
-inline float cpu_sample_3d_channel(const Texture* tex, float u, float v, float w, int channel, float lod)
+inline float cpu_sample_3d_channel(const Texture WP_DEVICE* tex, float u, float v, float w, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -695,7 +703,7 @@ template <typename T> __device__ T tex3DLod(unsigned long long texObj, float x, 
 template <typename T> struct texture_sample_helper;
 
 template <> struct texture_sample_helper<float> {
-    static CUDA_CALLABLE float sample_1d(const texture1d_t& tex, float u, float lod)
+    static CUDA_CALLABLE float sample_1d(const texture1d_t WP_THREAD& tex, float u, float lod)
     {
 #if defined(__CUDA_ARCH__)
         if (lod < 0.0f)
@@ -704,14 +712,14 @@ template <> struct texture_sample_helper<float> {
 #else
         if (tex.tex == 0)
             return 0.0f;
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return cpu_sample_1d_channel_at_level(cpu_tex, 0, u, 0);
         return cpu_sample_1d_channel(cpu_tex, u, 0, lod);
 #endif
     }
 
-    static CUDA_CALLABLE float sample_2d(const texture2d_t& tex, float u, float v, float lod)
+    static CUDA_CALLABLE float sample_2d(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
     {
 #if defined(__CUDA_ARCH__)
         if (lod < 0.0f)
@@ -720,14 +728,14 @@ template <> struct texture_sample_helper<float> {
 #else
         if (tex.tex == 0)
             return 0.0f;
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return cpu_sample_2d_channel_at_level(cpu_tex, 0, u, v, 0);
         return cpu_sample_2d_channel(cpu_tex, u, v, 0, lod);
 #endif
     }
 
-    static CUDA_CALLABLE float sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
+    static CUDA_CALLABLE float sample_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
     {
 #if defined(__CUDA_ARCH__)
         if (lod < 0.0f)
@@ -736,7 +744,7 @@ template <> struct texture_sample_helper<float> {
 #else
         if (tex.tex == 0)
             return 0.0f;
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return cpu_sample_3d_channel_at_level(cpu_tex, 0, u, v, w, 0);
         return cpu_sample_3d_channel(cpu_tex, u, v, w, 0, lod);
@@ -762,23 +770,23 @@ constexpr bool use_cuda_texture_mixed_width_workaround = false;
 
 template <> struct texture_sample_helper<vec2f> {
 #if defined(__CUDA_ARCH__)
-    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_1d(const texture1d_t& tex, float u)
+    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_1d(const texture1d_t WP_THREAD& tex, float u)
     {
         return tex1D<float2>(tex.tex, u);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_2d(const texture2d_t& tex, float u, float v)
+    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_2d(const texture2d_t WP_THREAD& tex, float u, float v)
     {
         return tex2D<float2>(tex.tex, u, v);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_3d(const texture3d_t& tex, float u, float v, float w)
+    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
     {
         return tex3D<float2>(tex.tex, u, v, w);
     }
 #endif
 
-    static CUDA_CALLABLE vec2f sample_1d(const texture1d_t& tex, float u, float lod)
+    static CUDA_CALLABLE vec2f sample_1d(const texture1d_t WP_THREAD& tex, float u, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float2 val;
@@ -790,7 +798,7 @@ template <> struct texture_sample_helper<vec2f> {
 #else
         if (tex.tex == 0)
             return vec2f(0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec2f(
                 cpu_sample_1d_channel_at_level(cpu_tex, 0, u, 0), cpu_sample_1d_channel_at_level(cpu_tex, 0, u, 1)
@@ -799,7 +807,7 @@ template <> struct texture_sample_helper<vec2f> {
 #endif
     }
 
-    static CUDA_CALLABLE vec2f sample_2d(const texture2d_t& tex, float u, float v, float lod)
+    static CUDA_CALLABLE vec2f sample_2d(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float2 val;
@@ -811,7 +819,7 @@ template <> struct texture_sample_helper<vec2f> {
 #else
         if (tex.tex == 0)
             return vec2f(0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec2f(
                 cpu_sample_2d_channel_at_level(cpu_tex, 0, u, v, 0), cpu_sample_2d_channel_at_level(cpu_tex, 0, u, v, 1)
@@ -820,7 +828,7 @@ template <> struct texture_sample_helper<vec2f> {
 #endif
     }
 
-    static CUDA_CALLABLE vec2f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
+    static CUDA_CALLABLE vec2f sample_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float2 val;
@@ -832,7 +840,7 @@ template <> struct texture_sample_helper<vec2f> {
 #else
         if (tex.tex == 0)
             return vec2f(0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec2f(
                 cpu_sample_3d_channel_at_level(cpu_tex, 0, u, v, w, 0),
@@ -847,23 +855,23 @@ template <> struct texture_sample_helper<vec2f> {
 
 template <> struct texture_sample_helper<vec4f> {
 #if defined(__CUDA_ARCH__)
-    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_1d(const texture1d_t& tex, float u)
+    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_1d(const texture1d_t WP_THREAD& tex, float u)
     {
         return tex1D<float4>(tex.tex, u);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_2d(const texture2d_t& tex, float u, float v)
+    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_2d(const texture2d_t WP_THREAD& tex, float u, float v)
     {
         return tex2D<float4>(tex.tex, u, v);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_3d(const texture3d_t& tex, float u, float v, float w)
+    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
     {
         return tex3D<float4>(tex.tex, u, v, w);
     }
 #endif
 
-    static CUDA_CALLABLE vec4f sample_1d(const texture1d_t& tex, float u, float lod)
+    static CUDA_CALLABLE vec4f sample_1d(const texture1d_t WP_THREAD& tex, float u, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float4 val;
@@ -875,7 +883,7 @@ template <> struct texture_sample_helper<vec4f> {
 #else
         if (tex.tex == 0)
             return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec4f(
                 cpu_sample_1d_channel_at_level(cpu_tex, 0, u, 0), cpu_sample_1d_channel_at_level(cpu_tex, 0, u, 1),
@@ -888,7 +896,7 @@ template <> struct texture_sample_helper<vec4f> {
 #endif
     }
 
-    static CUDA_CALLABLE vec4f sample_2d(const texture2d_t& tex, float u, float v, float lod)
+    static CUDA_CALLABLE vec4f sample_2d(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float4 val;
@@ -900,7 +908,7 @@ template <> struct texture_sample_helper<vec4f> {
 #else
         if (tex.tex == 0)
             return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec4f(
                 cpu_sample_2d_channel_at_level(cpu_tex, 0, u, v, 0),
@@ -914,7 +922,7 @@ template <> struct texture_sample_helper<vec4f> {
 #endif
     }
 
-    static CUDA_CALLABLE vec4f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
+    static CUDA_CALLABLE vec4f sample_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
     {
 #if defined(__CUDA_ARCH__)
         float4 val;
@@ -926,7 +934,7 @@ template <> struct texture_sample_helper<vec4f> {
 #else
         if (tex.tex == 0)
             return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
-        const Texture* cpu_tex = (const Texture*)tex.tex;
+        const Texture WP_DEVICE* cpu_tex = (const Texture WP_DEVICE*)tex.tex;
         if (lod < 0.0f)
             return vec4f(
                 cpu_sample_3d_channel_at_level(cpu_tex, 0, u, v, w, 0),
@@ -981,28 +989,28 @@ CUDA_CALLABLE_DEVICE inline bool texture_handle_is_uniform(uint64 handle)
 }
 
 template <typename T>
-CUDA_CALLABLE_DEVICE __noinline__ T texture_sample_divergent(const texture2d_t& tex, float u, float v, float lod)
+CUDA_CALLABLE_DEVICE __noinline__ T texture_sample_divergent(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
 {
     return texture_sample_helper<T>::sample_2d(tex, u, v, lod);
 }
 
 template <typename T>
 CUDA_CALLABLE_DEVICE __noinline__ T
-texture_sample_divergent(const texture3d_t& tex, float u, float v, float w, float lod)
+texture_sample_divergent(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
 {
     return texture_sample_helper<T>::sample_3d(tex, u, v, w, lod);
 }
 #endif
 
 // 1D texture sampling with scalar coordinate
-template <typename T> CUDA_CALLABLE T texture_sample(const texture1d_t& tex, float u, float lod)
+template <typename T> CUDA_CALLABLE T texture_sample(const texture1d_t WP_THREAD& tex, float u, float lod)
 {
     texture_assert_sampleable(tex.dtype);
     return texture_sample_helper<T>::sample_1d(tex, u, lod);
 }
 
 // 2D texture sampling with vec2 coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t& tex, const vec2f& uv, float lod)
+template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t WP_THREAD& tex, const vec2f WP_THREAD& uv, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1013,7 +1021,7 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t& tex, con
 }
 
 // 2D texture sampling with separate u, v coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t& tex, float u, float v, float lod)
+template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1024,7 +1032,7 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t& tex, flo
 }
 
 // 3D texture sampling with vec3 coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t& tex, const vec3f& uvw, float lod)
+template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, const vec3f WP_THREAD& uvw, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1035,7 +1043,7 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t& tex, con
 }
 
 // 3D texture sampling with separate u, v, w coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t& tex, float u, float v, float w, float lod)
+template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1048,7 +1056,7 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t& tex, flo
 // Adjoint stubs for texture sampling
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture1d_t& tex, float u, float lod, texture1d_t& adj_tex, float& adj_u, float& adj_lod, const T& adj_ret
+    const texture1d_t WP_THREAD& tex, float u, float lod, texture1d_t WP_THREAD& adj_tex, float WP_THREAD& adj_u, float WP_THREAD& adj_lod, const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1058,13 +1066,13 @@ CUDA_CALLABLE void adj_texture_sample(
 
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture2d_t& tex,
-    const vec2f& uv,
+    const texture2d_t WP_THREAD& tex,
+    const vec2f WP_THREAD& uv,
     float lod,
-    texture2d_t& adj_tex,
-    vec2f& adj_uv,
-    float& adj_lod,
-    const T& adj_ret
+    texture2d_t WP_THREAD& adj_tex,
+    vec2f WP_THREAD& adj_uv,
+    float WP_THREAD& adj_lod,
+    const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1074,15 +1082,15 @@ CUDA_CALLABLE void adj_texture_sample(
 
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture2d_t& tex,
+    const texture2d_t WP_THREAD& tex,
     float u,
     float v,
     float lod,
-    texture2d_t& adj_tex,
-    float& adj_u,
-    float& adj_v,
-    float& adj_lod,
-    const T& adj_ret
+    texture2d_t WP_THREAD& adj_tex,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_lod,
+    const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1092,13 +1100,13 @@ CUDA_CALLABLE void adj_texture_sample(
 
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture3d_t& tex,
-    const vec3f& uvw,
+    const texture3d_t WP_THREAD& tex,
+    const vec3f WP_THREAD& uvw,
     float lod,
-    texture3d_t& adj_tex,
-    vec3f& adj_uvw,
-    float& adj_lod,
-    const T& adj_ret
+    texture3d_t WP_THREAD& adj_tex,
+    vec3f WP_THREAD& adj_uvw,
+    float WP_THREAD& adj_lod,
+    const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1108,17 +1116,17 @@ CUDA_CALLABLE void adj_texture_sample(
 
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture3d_t& tex,
+    const texture3d_t WP_THREAD& tex,
     float u,
     float v,
     float w,
     float lod,
-    texture3d_t& adj_tex,
-    float& adj_u,
-    float& adj_v,
-    float& adj_w,
-    float& adj_lod,
-    const T& adj_ret
+    texture3d_t WP_THREAD& adj_tex,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_w,
+    float WP_THREAD& adj_lod,
+    const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1137,57 +1145,58 @@ using Texture3D = texture3d_t;
 // ============================================================================
 
 // 1D Texture operations
-CUDA_CALLABLE inline texture1d_t add(const texture1d_t& a, const texture1d_t& b)
+CUDA_CALLABLE inline texture1d_t add(const texture1d_t WP_THREAD& a, const texture1d_t WP_THREAD& b)
 {
     // Textures are not addable; return first argument unchanged
     return a;
 }
 
-CUDA_CALLABLE inline texture1d_t& operator+=(texture1d_t& a, const texture1d_t& b)
+CUDA_CALLABLE inline texture1d_t WP_THREAD& operator+=(texture1d_t WP_THREAD& a, const texture1d_t WP_THREAD& b)
 {
     // No-op: textures have no gradients to accumulate
     return a;
 }
 
-CUDA_CALLABLE inline void adj_atomic_add(texture1d_t* p, const texture1d_t& t)
+CUDA_CALLABLE inline void adj_atomic_add(texture1d_t WP_DEVICE* p, const texture1d_t WP_THREAD& t)
 {
     // No-op: textures are not differentiable
 }
 
 // 2D Texture operations
-CUDA_CALLABLE inline texture2d_t add(const texture2d_t& a, const texture2d_t& b)
+CUDA_CALLABLE inline texture2d_t add(const texture2d_t WP_THREAD& a, const texture2d_t WP_THREAD& b)
 {
     // Textures are not addable; return first argument unchanged
     return a;
 }
 
-CUDA_CALLABLE inline texture2d_t& operator+=(texture2d_t& a, const texture2d_t& b)
+CUDA_CALLABLE inline texture2d_t WP_THREAD& operator+=(texture2d_t WP_THREAD& a, const texture2d_t WP_THREAD& b)
 {
     // No-op: textures have no gradients to accumulate
     return a;
 }
 
-CUDA_CALLABLE inline void adj_atomic_add(texture2d_t* p, const texture2d_t& t)
+CUDA_CALLABLE inline void adj_atomic_add(texture2d_t WP_DEVICE* p, const texture2d_t WP_THREAD& t)
 {
     // No-op: textures are not differentiable
 }
 
 // 3D Texture operations
-CUDA_CALLABLE inline texture3d_t add(const texture3d_t& a, const texture3d_t& b)
+CUDA_CALLABLE inline texture3d_t add(const texture3d_t WP_THREAD& a, const texture3d_t WP_THREAD& b)
 {
     // Textures are not addable; return first argument unchanged
     return a;
 }
 
-CUDA_CALLABLE inline texture3d_t& operator+=(texture3d_t& a, const texture3d_t& b)
+CUDA_CALLABLE inline texture3d_t WP_THREAD& operator+=(texture3d_t WP_THREAD& a, const texture3d_t WP_THREAD& b)
 {
     // No-op: textures have no gradients to accumulate
     return a;
 }
 
-CUDA_CALLABLE inline void adj_atomic_add(texture3d_t* p, const texture3d_t& t)
+CUDA_CALLABLE inline void adj_atomic_add(texture3d_t WP_DEVICE* p, const texture3d_t WP_THREAD& t)
 {
     // No-op: textures are not differentiable
 }
+  // !__METAL_VERSION__
 
 }  // namespace wp
