@@ -55,7 +55,11 @@ host pointer:
   array has one. PyTorch's ``mps`` tensors cannot alias Warp arrays: PyTorch does not expose their buffers, and it
   schedules work on its own command queue. Move data to ``mps`` explicitly when a network should run on the GPU.
 * NumPy arrays and PyTorch CPU tensors can be passed to a Metal kernel directly. Warp maps their pages into the
-  GPU address space for the duration of the array's lifetime, without copying, and synchronizes after such a launch.
+  GPU address space without copying and synchronizes after such a launch. The mapping is released when the object
+  is garbage collected; for objects that cannot be weakly referenced it stays until the process exits. Mapping is
+  page granular, so the GPU can address the whole pages around the data, and overlapping mappings are merged.
+  The memory must stay mapped in the process for as long as the object lives: memory from a custom allocator
+  that is unmapped while the object is still alive leaves the GPU with a dangling mapping.
 * Copies between ``"cpu"`` and ``"metal:0"`` are plain memory copies.
 
 Limitations
@@ -69,7 +73,17 @@ Limitations
 * Tile kernels are limited by threadgroup memory, 32 KB on current Apple GPUs. A kernel whose tiles need more
   raises at launch. Keeping block-local tiles small, or accumulating into an output tile
   (``wp.tile_matmul(a, b, out)``) instead of creating temporaries, stays below the limit.
-* Signed 64-bit ``wp.atomic_min()`` and ``wp.atomic_max()`` are read-modify-write and not atomic.
+* Not every atomic operation is atomic on Metal, which only has 32-bit atomics and, from the Apple9 GPU family
+  (M3, A17) on, unsigned 64-bit minimum and maximum. All operations on 32-bit integers and floats are atomic, and
+  so is ``wp.atomic_add()`` on 16-bit types, including ``wp.float16`` and ``wp.bfloat16``. The rest is as follows:
+
+  * ``wp.atomic_add()`` on 64-bit integers adds the two halves separately. The final value is exact, but a kernel
+    that reads the element while others add to it can see a half-updated value.
+  * ``wp.atomic_min()`` and ``wp.atomic_max()`` on ``wp.uint64`` are atomic on Apple9 and later, where the returned
+    previous value can be stale under contention. On older GPUs they are plain read-modify-write.
+  * Plain read-modify-write, correct only without concurrent writers to the same element: every atomic operation
+    on 8-bit integers; minimum, maximum, exchange and compare-and-swap on 16-bit types; minimum and maximum on
+    ``wp.int64``; exchange and compare-and-swap on 64-bit integers.
 * Spinlocks built from ``wp.atomic_cas()`` can hang: Apple GPUs do not guarantee forward progress between
   SIMD lanes.
 * ``wp.fixedarray``, fabric arrays, deterministic mode (``wp.config.deterministic``), saveable (APIC) captures and
