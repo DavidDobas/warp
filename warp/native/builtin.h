@@ -223,6 +223,12 @@ struct half {
     }
 
     CUDA_CALLABLE inline operator float32() const { return float32(half_to_float(*this)); }
+#if defined(__METAL_VERSION__)
+    // Member functions are per address space on Metal: values read straight from tile (threadgroup)
+    // or array (device) memory, as in mixed-precision tile_matmul(), convert without a thread copy.
+    inline operator float32() const threadgroup { return float32(half_to_float(*this)); }
+    inline operator float32() const device { return float32(half_to_float(*this)); }
+#endif
 #if !defined(WP_NO_FLOAT64)
     CUDA_CALLABLE inline operator float64() const { return float64(half_to_float(*this)); }
 #endif  // !WP_NO_FLOAT64
@@ -320,6 +326,10 @@ struct wp_bfloat16 {
 
     // Conversion operators — non-explicit, using Warp type aliases (same as half)
     CUDA_CALLABLE inline operator float32() const { return bfloat16_to_float(*this); }
+#if defined(__METAL_VERSION__)
+    inline operator float32() const threadgroup { return bfloat16_to_float(*this); }
+    inline operator float32() const device { return bfloat16_to_float(*this); }
+#endif
 #if !defined(WP_NO_FLOAT64)
     CUDA_CALLABLE inline operator float64() const { return static_cast<float64>(bfloat16_to_float(*this)); }
 #endif  // !WP_NO_FLOAT64

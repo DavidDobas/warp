@@ -599,9 +599,16 @@ bool translate_pointer(const Device& dev, char* args, size_t args_size, size_t o
     memcpy(&host_address, args + offset, sizeof(host_address));
     if (host_address == 0)
         return true;
-    uint64_t address = gpu_address(dev, host_address);
-    if (!address)
+    uint64_t address = find_gpu_address(dev, host_address);
+    if (!address) {
+        // the offset identifies the argument (or the array member of a struct argument) at fault
+        wp::set_error_string(
+            "Pointer 0x%llx at kernel argument offset %zu is not Metal memory of device \"%s\"; memory used by "
+            "Metal kernels must be allocated on that device",
+            (unsigned long long)host_address, offset, dev.name.c_str()
+        );
         return false;
+    }
     memcpy(args + offset, &address, sizeof(address));
     return true;
 }
