@@ -3514,10 +3514,11 @@ class ModuleBuilder:
 
     def _metal_unsupported_reason(self, source: str) -> str | None:
         """Why a generated function or kernel cannot be compiled for Metal, or None."""
-        if "float64" in source:
+        code = re.sub(r"//[^\n]*", "", source)  # comments echo the Python source
+        if re.search(r"\bfloat64\b|\bdouble\b", code):  # whole tokens: not names that merely contain them
             return "float64"
         for name in self.metal_skipped:
-            if name in source:
+            if re.search(rf"\b{re.escape(name)}\b", code):
                 return f"{name} (float64)"
         return None
 
@@ -3729,6 +3730,7 @@ class ModuleExec:
         # Metal: kernel name -> builtins it reaches that have no Metal implementation
         self.metal_unsupported: dict[str, str] = {}
         self.metal_backward_unsupported: set[str] = set()  # kernels whose adjoint cannot run on Metal (tiles)
+        self.metal_backward_error: str | None = None  # compile error that forced a forward-only build
         # Compute capability the loaded binary was actually compiled for (None for
         # CPU). Cluster classification must use this frozen target, not the current
         # global config, which can change after the module is loaded.
@@ -4713,7 +4715,7 @@ class Module:
         try:
             source_str, source_code_ext, meta, ltoir_values, fatbin_values = self._run_codegen(options, target)
         except Exception as e:
-            self._record_build_failure(device, is_cpu, active_block_dim, e)
+            self._record_build_failure(device, target == "cpu", active_block_dim, e)
             raise
 
         meta_path = os.path.join(output_dir, self._get_meta_name(block_dim=active_block_dim, device=device))
@@ -4755,7 +4757,7 @@ class Module:
             try:
                 _check_and_raise_long_path_error(e)
             except Exception as reported:
-                self._record_build_failure(device, is_cpu, active_block_dim, reported)
+                self._record_build_failure(device, target == "cpu", active_block_dim, reported)
                 raise
 
         output_path = os.path.join(build_dir, output_name)
@@ -4817,10 +4819,10 @@ class Module:
                 try:
                     _check_and_raise_long_path_error(e)
                 except Exception as reported:
-                    self._record_build_failure(device, is_cpu, active_block_dim, reported)
+                    self._record_build_failure(device, target == "cpu", active_block_dim, reported)
                     raise
 
-            self._record_build_failure(device, is_cpu, active_block_dim, e)
+            self._record_build_failure(device, target == "cpu", active_block_dim, e)
 
             raise (e)
 
@@ -5055,6 +5057,7 @@ class Module:
                 )
                 module_exec.metal_unsupported = metal_unsupported
                 module_exec.metal_backward_unsupported = metal_backward_unsupported
+                module_exec.metal_backward_error = backward_error  # set when the adjoints failed to compile
                 self.execs[(device.context, active_block_dim)] = module_exec
 
             elif device.is_cuda:
@@ -10823,7 +10826,11 @@ def event_from_ipc_handle(handle, device: DeviceLike = None) -> Event:
 #  to a c-type that can be passed to a kernel
 def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
     device = runtime.get_device(device)
-    if device.is_metal and value is not None:
+    if (
+        device.is_metal
+        and value is not None
+        and (warp._src.types.is_array(arg_type) or isinstance(arg_type, warp._src.codegen.Struct))
+    ):
         _metal_import_host_value(value, device)
 
     if warp._src.types.is_array(arg_type):
@@ -12166,6 +12173,12 @@ def launch(
 
         elif device.is_metal:
             if adjoint and hooks.backward is None:
+                if module_exec.metal_backward_error:
+                    # a defect, not a missing feature: keep it an error (the test harness skips the latter)
+                    raise RuntimeError(
+                        f"The adjoint of module '{kernel.module.name}' failed to compile for device '{device}', so "
+                        f"'{kernel.key}' has no backward kernel:\n{module_exec.metal_backward_error[:2000]}"
+                    )
                 raise RuntimeError(
                     f"No backward kernel for '{kernel.key}' on device '{device}': tile adjoints are not supported "
                     "on Metal yet, and modules built with enable_backward=False have none"
@@ -13965,7 +13978,14 @@ def _metal_capture_branch(device: Device, body, kwargs):
         raise TypeError("Branches must be a Callable or a Graph")
     if runtime.core.wp_metal_capture_push(device.metal_ordinal) != 0:
         raise RuntimeError(runtime.get_error_string())
-    body(**kwargs)
+    try:
+        body(**kwargs)
+    except BaseException:
+        # close the branch recording so the enclosing capture (and the device) stay usable
+        handle = runtime.core.wp_metal_capture_pop(device.metal_ordinal)
+        if handle:
+            runtime.core.wp_metal_graph_destroy(device.metal_ordinal, handle)
+        raise
     handle = runtime.core.wp_metal_capture_pop(device.metal_ordinal)
     if not handle:
         raise RuntimeError(runtime.get_error_string())

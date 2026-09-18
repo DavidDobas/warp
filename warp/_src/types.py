@@ -4086,6 +4086,8 @@ class array(Array[DType, NDim]):
                         + (" (Metal arrays are host memory)" if self.device.is_metal else "")
                     )
 
+        if self.device.is_metal:
+            self.device.metal_synchronize()  # exported as host memory: finish pending GPU work first
         return warp._src.dlpack.to_dlpack(self)
 
     def __dlpack_device__(self):

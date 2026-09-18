@@ -944,25 +944,37 @@ uint64_t wp_bvh_create_device(
     return id;
 }
 
-void wp_bvh_refit_device(uint64_t id)
+// Runs a host-side BVH update now, or records it so a graph replays it in order with its dispatches.
+static void metal_bvh_apply(uint64_t id, std::function<void(const MetalMirror<BVH>&)> update)
 {
     auto it = g_metal_bvhs.find(id);
     if (it == g_metal_bvhs.end())
         return;
-    wp_metal_synchronize(it->second.ordinal);
-    wp_bvh_refit_host(it->second.host_id);
+    const int ordinal = it->second.ordinal;
+    auto apply = [=]() {
+        auto it = g_metal_bvhs.find(id);
+        if (it == g_metal_bvhs.end())
+            return false;
+        ScopedMetalHostAlloc scope(ordinal);
+        update(it->second);
+        return metal_bvh_update(it->second);
+    };
+    if (wp_metal_capture_host_op(ordinal, apply))
+        return;
+    wp_metal_synchronize(ordinal);  // the bounds may still be written by GPU kernels
+    apply();
+}
+
+void wp_bvh_refit_device(uint64_t id)
+{
+    metal_bvh_apply(id, [](const MetalMirror<BVH>& m) { wp_bvh_refit_host(m.host_id); });
 }
 
 void wp_bvh_rebuild_device(uint64_t id)
 {
-    auto it = g_metal_bvhs.find(id);
-    if (it == g_metal_bvhs.end())
-        return;
-    const MetalMirror<BVH>& m = it->second;
-    wp_metal_synchronize(m.ordinal);
-    ScopedMetalHostAlloc scope(m.ordinal);
-    wp_bvh_rebuild_host(m.host_id, reinterpret_cast<BVH*>(m.host_id)->constructor_type);
-    metal_bvh_update(m);
+    metal_bvh_apply(id, [](const MetalMirror<BVH>& m) {
+        wp_bvh_rebuild_host(m.host_id, reinterpret_cast<BVH*>(m.host_id)->constructor_type);
+    });
 }
 
 void wp_bvh_destroy_device(uint64_t id)

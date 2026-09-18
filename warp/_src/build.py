@@ -927,14 +927,28 @@ def metal_rewrite_printf(source: str) -> str:
     format and any other string argument is shown as ``<str>``. ``wp::print`` of a string constant
     becomes a direct ``printf`` of the literal.
     """
-    consts = {}
-    for m in _STR_CONST.finditer(source):
-        consts[m.group(1)] = m.group(2)  # later declarations shadow earlier ones; per-kernel names rarely collide
-    source = re.sub(
-        r"wp::print\((var_\d+)\)",
-        lambda m: f'printf("{consts[m.group(1)]}\\n")' if m.group(1) in consts else m.group(0),
-        source,
-    )
+    # var_N numbering restarts in every kernel and function, so a name resolves to its nearest preceding
+    # declaration rather than to one module-wide table
+    declarations = [(m.start(), m.group(1), m.group(2)) for m in _STR_CONST.finditer(source)]
+
+    def const_at(name: str, pos: int):
+        text = None
+        for start, declared, value in declarations:
+            if start >= pos:
+                break
+            if declared == name:
+                text = value
+        return text
+
+    def print_const(m):
+        text = const_at(m.group(1), m.start())
+        return f'printf("{text}\\n")' if text is not None else m.group(0)
+
+    rewritten = re.sub(r"wp::print\((var_\d+)\)", print_const, source)
+    if rewritten != source:
+        # positions moved: recompute the declaration table for the printf pass below
+        source = rewritten
+        declarations = [(m.start(), m.group(1), m.group(2)) for m in _STR_CONST.finditer(source)]
     out, pos = [], 0
     for m in re.finditer(r"(?<![\w.:])printf\s*\(", source):
         if m.start() < pos:
@@ -962,7 +976,9 @@ def metal_rewrite_printf(source: str) -> str:
             elif arg in ("__FUNCTION__", "__func__", "__PRETTY_FUNCTION__"):
                 text = "<function>"
             else:
-                text = consts.get(arg, "<str>")
+                text = const_at(arg, m.start())
+                if text is None:
+                    text = "<str>"
             removed.add(k + 1)
             fmt = fmt[: sp.start()] + text.replace("%", "%%") + fmt[sp.end() :]
         rest = [a.strip() for i, a in enumerate(args) if i > 0 and i not in removed]

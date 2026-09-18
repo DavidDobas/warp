@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -111,6 +112,12 @@ struct Device {
     id<MTLBuffer> table_slot;
     id<MTLBuffer> table;
     bool table_dirty = true;
+
+    // Buffers allocated while a capture was open: the recording bakes their GPU addresses into its argument
+    // blocks, so the graph keeps them alive when the array is freed later (like a CUDA graph's memory pool).
+    std::map<uintptr_t, Graph*> capture_owned;
+    // A GPU failure observed where it cannot be returned (freeing memory); raised by the next synchronize.
+    std::string deferred_error;
 
     id<MTLBuffer> args_ring;
     size_t args_ring_offset = 0;
@@ -507,25 +514,46 @@ void refresh_table(Device& dev)
 }
 
 // Returns the GPU virtual address of a host pointer into a Metal allocation, or 0 if there is none.
+// The buffer whose range contains host_address (end exclusive, or inclusive for the one-past-the-end
+// address of an empty view), with its host base; nil if none.
+template <typename Map, typename GetBuffer>
+static id<MTLBuffer>
+buffer_containing(const Map& map, uint64_t host_address, bool allow_end, uintptr_t& base, GetBuffer get)
+{
+    auto it = map.upper_bound(uintptr_t(host_address));
+    if (it == map.begin())
+        return nil;
+    --it;
+    id<MTLBuffer> buffer = get(it->second);
+    const uint64_t offset = host_address - it->first;
+    if (offset < buffer.length || (allow_end && offset == buffer.length)) {
+        base = it->first;
+        return buffer;
+    }
+    return nil;
+}
+
 uint64_t find_gpu_address(const Device& dev, uint64_t host_address)
 {
-    auto it = dev.allocations.upper_bound(uintptr_t(host_address));
-    if (it != dev.allocations.begin()) {
-        --it;
-        uintptr_t base = it->first;
-        id<MTLBuffer> buffer = it->second;
-        if (host_address - base <= buffer.length)  // one-past-the-end is allowed for empty views
-            return buffer.gpuAddress + (host_address - base);
-    }
-    auto im = dev.imports.upper_bound(uintptr_t(host_address));
-    if (im != dev.imports.begin()) {
-        --im;
-        uintptr_t base = im->first;
-        id<MTLBuffer> buffer = im->second.buffer;
-        if (host_address - base <= buffer.length)
-            return buffer.gpuAddress + (host_address - base);
+    auto own = [](id<MTLBuffer> b) { return b; };
+    auto imported = [](const Device::Import& i) { return i.buffer; };
+    uintptr_t base = 0;
+    // An address strictly inside a buffer wins; the end address of one buffer may be the start of another.
+    for (bool allow_end : { false, true }) {
+        if (id<MTLBuffer> b = buffer_containing(dev.allocations, host_address, allow_end, base, own))
+            return b.gpuAddress + (host_address - base);
+        if (id<MTLBuffer> b = buffer_containing(dev.imports, host_address, allow_end, base, imported))
+            return b.gpuAddress + (host_address - base);
     }
     return 0;
+}
+
+// True if [ptr, ptr + size) lies entirely inside one of this device's own allocations.
+static bool owns_range(const Device& dev, uintptr_t ptr, size_t size)
+{
+    uintptr_t base = 0;
+    id<MTLBuffer> b = buffer_containing(dev.allocations, ptr, false, base, [](id<MTLBuffer> x) { return x; });
+    return b && (ptr - base) + size <= b.length;
 }
 
 // Finds the import whose pages cover [ptr, ptr + size), or imports.end().
@@ -784,6 +812,8 @@ void* wp_alloc_metal(int ordinal, size_t size)
         }
         void* ptr = buffer.contents;
         dev->allocations[uintptr_t(ptr)] = buffer;
+        if (dev->capture)
+            dev->capture_owned[uintptr_t(ptr)] = dev->capture_stack.empty() ? dev->capture : dev->capture_stack.front();
         [dev->residency_set addAllocation:buffer];
         dev->residency_dirty = true;
         dev->table_dirty = true;
@@ -804,15 +834,21 @@ void wp_free_metal(int ordinal, void* ptr)
             return;
         }
         dev->table_dirty = true;
-        if (dev->capture) {
-            // the recording still references this memory: the graph keeps it alive (like CUDA graph allocations)
-            dev->capture->retained.push_back(it->second);
+        auto owned = dev->capture_owned.find(uintptr_t(ptr));
+        if (dev->capture || owned != dev->capture_owned.end()) {
+            // a recording references this memory (freed during capture, or allocated during one and freed
+            // later): the graph keeps it alive, like CUDA graph allocations
+            Graph* owner = owned != dev->capture_owned.end() ? owned->second : dev->capture;
+            owner->retained.push_back(it->second);
+            if (owned != dev->capture_owned.end())
+                dev->capture_owned.erase(owned);
             dev->allocations.erase(it);
             return;
         }
         dev->deferred_frees.push_back(it->second);
         dev->allocations.erase(it);
-        retire_completed(*dev);
+        if (!retire_completed(*dev))
+            dev->deferred_error = wp::get_error_string();  // cannot be returned from a free
         if (!has_pending_work(*dev))
             release_buffers(*dev, dev->deferred_frees);
     }
@@ -824,11 +860,7 @@ int wp_metal_owns_pointer(int ordinal, const void* ptr)
     Device* dev = get_device(ordinal);
     if (!dev || !ptr)
         return 0;
-    auto it = dev->allocations.upper_bound(uintptr_t(ptr));
-    if (it == dev->allocations.begin())
-        return 0;
-    --it;
-    return uintptr_t(ptr) - it->first < it->second.length ? 1 : 0;
+    return owns_range(*dev, uintptr_t(ptr), 1) ? 1 : 0;
 }
 
 int wp_metal_import_host_memory(int ordinal, const void* ptr, size_t size)
@@ -843,8 +875,8 @@ int wp_metal_import_host_memory(int ordinal, const void* ptr, size_t size)
             ++it->second.refs;
             return 2;
         }
-        if (find_gpu_address(*dev, (uint64_t)(uintptr_t)ptr))
-            return 1;  // already Metal memory of this device: nothing to release later
+        if (owns_range(*dev, uintptr_t(ptr), std::max(size, size_t(1))))
+            return 1;  // the whole range already is Metal memory of this device: nothing to release later
         const uintptr_t page = uintptr_t(getpagesize());
         const uintptr_t base = uintptr_t(ptr) & ~(page - 1);
         const size_t length = size_t(((uintptr_t(ptr) + std::max(size, size_t(1)) - base) + page - 1) & ~(page - 1));
@@ -885,7 +917,8 @@ void wp_metal_release_host_memory(int ordinal, const void* ptr, size_t size)
         }
         dev->deferred_frees.push_back(it->second.buffer);
         dev->imports.erase(it);
-        retire_completed(*dev);
+        if (!retire_completed(*dev))
+            dev->deferred_error = wp::get_error_string();  // cannot be returned from a release
         if (!has_pending_work(*dev))
             release_buffers(*dev, dev->deferred_frees);
     }
@@ -1085,6 +1118,27 @@ int wp_metal_capture_begin(int ordinal)
     return 0;
 }
 
+static void graph_destroy(int ordinal, Device* dev, Graph* graph);
+
+// Stops tracking allocations for a graph that is going away.
+static void forget_capture_owned(Device& dev, Graph* graph)
+{
+    for (auto it = dev.capture_owned.begin(); it != dev.capture_owned.end();)
+        it = it->second == graph ? dev.capture_owned.erase(it) : std::next(it);
+}
+
+// Drops a recording that was never finalized (no argument buffer yet).
+static void discard_recording(Device& dev, Graph* graph)
+{
+    forget_capture_owned(dev, graph);
+    for (id<MTLBuffer> buffer : graph->retained)
+        dev.deferred_frees.push_back(buffer);
+    for (const auto& child : graph->children)
+        if (child.second)
+            graph_destroy(0, &dev, child.first);
+    delete graph;
+}
+
 // Uploads a recorded graph's argument blocks; the graph is ready to launch afterwards.
 static Graph* finalize_capture(Device& dev, Graph* graph)
 {
@@ -1093,7 +1147,7 @@ static Graph* finalize_capture(Device& dev, Graph* graph)
                                 options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
     if (!graph->buffer) {
         wp::set_error_string("Failed to allocate %zu bytes for a Metal graph", graph->bytes.size());
-        delete graph;
+        discard_recording(dev, graph);
         return nullptr;
     }
     graph->buffer.label = @"Warp graph";
@@ -1118,7 +1172,13 @@ void* wp_metal_capture_end(int ordinal)
             return nullptr;
         }
         if (!dev->capture_stack.empty()) {
-            wp::set_error_string("A conditional branch capture is still open");
+            // a branch body raised: drop every open recording so the device leaves capture mode
+            discard_recording(*dev, dev->capture);
+            for (Graph* enclosing : dev->capture_stack)
+                discard_recording(*dev, enclosing);
+            dev->capture_stack.clear();
+            dev->capture = nullptr;
+            wp::set_error_string("Graph capture ended while a conditional branch capture was still open");
             return nullptr;
         }
         Graph* graph = dev->capture;
@@ -1216,6 +1276,7 @@ int wp_metal_graph_launch(int ordinal, void* handle)
 static int graph_launch(Device& device, Graph* graph)
 {
     Device* dev = &device;
+    refresh_table(device);  // recorded kernels translate host pointers they read from memory, too
     {
         size_t next_host_op = 0;
         auto run_host_ops = [&](size_t before_dispatch) {
@@ -1277,15 +1338,33 @@ int wp_metal_capture_host_call(int ordinal, void* fn, const unsigned long long* 
     auto call = [fn, a]() -> bool {
         const U* v = a.data();
         switch (a.size()) {
-        case 0: ((void (*)())fn)(); break;
-        case 1: ((void (*)(U))fn)(v[0]); break;
-        case 2: ((void (*)(U, U))fn)(v[0], v[1]); break;
-        case 3: ((void (*)(U, U, U))fn)(v[0], v[1], v[2]); break;
-        case 4: ((void (*)(U, U, U, U))fn)(v[0], v[1], v[2], v[3]); break;
-        case 5: ((void (*)(U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4]); break;
-        case 6: ((void (*)(U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5]); break;
-        case 7: ((void (*)(U, U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5], v[6]); break;
-        default: ((void (*)(U, U, U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]); break;
+        case 0:
+            ((void (*)())fn)();
+            break;
+        case 1:
+            ((void (*)(U))fn)(v[0]);
+            break;
+        case 2:
+            ((void (*)(U, U))fn)(v[0], v[1]);
+            break;
+        case 3:
+            ((void (*)(U, U, U))fn)(v[0], v[1], v[2]);
+            break;
+        case 4:
+            ((void (*)(U, U, U, U))fn)(v[0], v[1], v[2], v[3]);
+            break;
+        case 5:
+            ((void (*)(U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4]);
+            break;
+        case 6:
+            ((void (*)(U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5]);
+            break;
+        case 7:
+            ((void (*)(U, U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+            break;
+        default:
+            ((void (*)(U, U, U, U, U, U, U, U))fn)(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+            break;
         }
         return true;
     };
@@ -1302,7 +1381,9 @@ static void graph_destroy(int ordinal, Device* dev, Graph* graph)
 {
     if (!dev || !graph)
         return;
-    dev->deferred_frees.push_back(graph->buffer);  // released once no GPU work can use it
+    forget_capture_owned(*dev, graph);
+    if (graph->buffer)
+        dev->deferred_frees.push_back(graph->buffer);  // released once no GPU work can use it
     for (id<MTLBuffer> buffer : graph->retained)
         dev->deferred_frees.push_back(buffer);
     for (const auto& child : graph->children)
@@ -1419,7 +1500,14 @@ int wp_metal_synchronize(int ordinal)
     }
     @autoreleasepool {
         Device* dev = get_device(ordinal);
-        return dev && synchronize(*dev) ? 0 : -1;
+        if (!dev || !synchronize(*dev))
+            return -1;
+        if (!dev->deferred_error.empty()) {
+            wp::set_error_string("%s", dev->deferred_error.c_str());
+            dev->deferred_error.clear();
+            return -1;
+        }
+        return 0;
     }
 }
 

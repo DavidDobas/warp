@@ -389,6 +389,9 @@ def to_torch(a: warp.array, requires_grad: bool | None = None):
         # unified memory: the tensor aliases the Metal array as CPU memory (synchronize before reading)
         t = torch.as_tensor(a._metal_host_view())
         t.requires_grad = requires_grad
+        if requires_grad and a.requires_grad:
+            t.grad = torch.as_tensor(a.grad._metal_host_view())
+            t.grad._warp_grad_array = a.grad
         t._warp_array = a  # keep the Metal allocation alive as long as the tensor
         return t
     if a.device.is_cpu:
