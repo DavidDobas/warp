@@ -2998,6 +2998,31 @@ def _verify_library_version(lib, library_name: str, version_symbol: str, expecte
 # other modules.  The module hash is computed in the constructor and can be retrieved
 # using get_hash().  In addition, the ModuleHasher takes care of filtering out
 # duplicate kernels for codegen (see get_unique_kernels()).
+@functools.cache
+def native_headers_digest() -> bytes:
+    """Digest of the native headers that generated kernel code is compiled against.
+
+    Part of every module hash, so that cached kernels are not reused after the headers change.
+    The Warp version does not capture this: the headers change while developing the native
+    library, and a package that overlays Warp with another set of headers (as the Metal backend
+    can be shipped) shares the version, and therefore the kernel cache directory, with the stock
+    package. Metal modules are cached as source with the headers inlined, so a stale entry
+    would silently keep running the old library code.
+    """
+    native_dir = os.path.join(warp_home, "native")
+    digest = hashlib.sha256()
+    for directory in (native_dir, os.path.join(native_dir, "nanovdb")):
+        try:
+            names = sorted(name for name in os.listdir(directory) if name.endswith(".h"))
+        except OSError:
+            continue
+        for name in names:
+            with open(os.path.join(directory, name), "rb") as f:
+                digest.update(name.encode("utf-8"))
+                digest.update(f.read())
+    return digest.digest()
+
+
 class ModuleHasher:
     def __init__(self, kernels, options):
         # Hashing another block-size variant can change the shared Kernel.hash
@@ -3056,6 +3081,9 @@ class ModuleHasher:
         for opt in sorted(options.keys()):
             s = f"{opt}:{options[opt]}"
             ch.update(bytes(s, "utf-8"))
+
+        # the native headers the kernels compile against (see native_headers_digest())
+        ch.update(native_headers_digest())
 
         # Note: cuda_output defaults to None in the options dict and is not
         # resolved before hashing, so modules with different cuda_output

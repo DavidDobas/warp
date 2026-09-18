@@ -748,6 +748,8 @@ def test_deterministic_backward_missing_adjoint_target(test, device):
 
 def test_deterministic_backward_counter_store_rejected(test, device):
     """Verify generated backward replay of consumed-return counters fails closed."""
+    if device.is_metal:
+        test.skipTest("Deterministic mode is not supported on Metal")
     n = 64
     data_np = np.arange(n, dtype=np.float32)
 
@@ -1112,6 +1114,8 @@ def test_custom_adjoint_not_guaranteed_mode(test, device):
 
 def test_deterministic_custom_adjoint_consumed_counter_rejected(test, device):
     """Verify consumed-return counters in custom adjoints fail closed."""
+    if device.is_metal:
+        test.skipTest("Deterministic mode is not supported on Metal")
     n = 16
     values = wp.ones(n, dtype=wp.float32, device=device, requires_grad=True)
     counter = wp.zeros(1, dtype=wp.int32, device=device)

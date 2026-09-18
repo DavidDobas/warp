@@ -76,8 +76,7 @@ CUDA_CALLABLE inline uint64_t mesh_get_bvh(uint64_t id) { return (uint64_t)&(((M
 
 CUDA_CALLABLE inline int mesh_get_group_root(uint64_t id, int group_id)
 {
-    Mesh WP_THREAD* mesh = (Mesh WP_THREAD*)(id);
-    return bvh_get_group_root((uint64_t)&mesh->bvh, group_id);
+    return bvh_get_group_root(mesh_get_bvh(id), group_id);
 }
 
 
