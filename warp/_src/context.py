@@ -5404,6 +5404,7 @@ class MetalDefaultAllocator:
             raise RuntimeError(
                 f"Failed to allocate {size_in_bytes} bytes on device '{self.device}': {runtime.get_error_string()}"
             )
+        _set_alloc_tag_if_tracking(ptr)
         return ptr
 
     def deallocate(self, ptr, size_in_bytes):

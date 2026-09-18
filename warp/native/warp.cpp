@@ -207,8 +207,12 @@ int wp_host_alloc_redirect_metal(int ordinal)
 
 void* wp_alloc_host(size_t s, const char* tag)
 {
-    if (g_host_alloc_metal_ordinal >= 0)
-        return wp_alloc_metal(g_host_alloc_metal_ordinal, s);
+    if (g_host_alloc_metal_ordinal >= 0) {
+        void* metal_ptr = wp_alloc_metal(g_host_alloc_metal_ordinal, s);
+        if (g_alloc_tracker.enabled && metal_ptr && tag)
+            g_alloc_tracker.set_tag(metal_ptr, tag);
+        return metal_ptr;
+    }
 
     // increase CPU array alignment for compatibility with other libs, e.g., JAX, XLA, Eigen.
     size_t alignment = 64;

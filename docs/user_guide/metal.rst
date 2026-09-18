@@ -87,8 +87,8 @@ Limitations
     operations on 64-bit integers.
 * Spinlocks built from ``wp.atomic_cas()`` can hang: Apple GPUs do not guarantee forward progress between
   SIMD lanes.
-* ``wp.fixedarray``, fabric arrays, deterministic mode (``wp.config.deterministic``), saveable (APIC) captures and
-  the allocation tracker are not supported.
+* ``wp.fixedarray``, fabric arrays, deterministic mode (``wp.config.deterministic``) and saveable (APIC) captures
+  are not supported.
 * Host-side utilities that are not recorded into a graph, such as building or changing the topology of a
   :class:`warp.sparse.BsrMatrix`, raise when called during a graph capture on Metal. Call them outside the
   capture.

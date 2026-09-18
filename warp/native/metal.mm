@@ -10,6 +10,7 @@
 // Because kernels dereference raw addresses, Metal cannot track hazards between dispatches, so all dispatches go
 // through serial compute encoders which execute in order.
 
+#include "alloc_tracker.h"
 #include "error.h"
 #include "metal.h"
 
@@ -829,6 +830,8 @@ void* wp_alloc_metal(int ordinal, size_t size)
         [dev->residency_set addAllocation:buffer];
         dev->residency_dirty = true;
         dev->table_dirty = true;
+        if (g_alloc_tracker.enabled)
+            g_alloc_tracker.record_alloc(ptr, size, ALLOC_KIND_DEVICE, ordinal);
         return ptr;
     }
 }
@@ -846,6 +849,8 @@ void wp_free_metal(int ordinal, void* ptr)
             return;
         }
         dev->table_dirty = true;
+        if (g_alloc_tracker.enabled)
+            g_alloc_tracker.record_free(ptr);
         auto owned = dev->capture_owned.find(uintptr_t(ptr));
         if (dev->capture || owned != dev->capture_owned.end()) {
             // a recording references this memory (freed during capture, or allocated during one and freed
