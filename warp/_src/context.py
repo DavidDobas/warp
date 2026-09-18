@@ -6639,6 +6639,14 @@ class Runtime:
         # Verify the core library version before exercising any other native ABI.
         _verify_library_version(self.core, "warp", "wp_version", warp.config.version)
 
+        if not os.path.exists(llvm_lib):
+            # An overlay package (warp-metal) ships only the core library next to its own modules;
+            # the LLVM helper library then comes from the ``warp`` package it overlays.
+            import warp as _warp_pkg  # noqa: PLC0415
+
+            candidate = os.path.join(os.path.dirname(os.path.abspath(_warp_pkg.__file__)), "bin", os.path.basename(llvm_lib))
+            if os.path.exists(candidate):
+                llvm_lib = candidate
         if os.path.exists(llvm_lib):
             self.llvm = self.load_dll(llvm_lib)
 
