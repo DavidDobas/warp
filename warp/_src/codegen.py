@@ -1951,6 +1951,17 @@ TILE_ARENA_NATIVES = frozenset(
 )
 
 
+def replay_arena_arg(func, has_args: bool) -> str:
+    """Hidden arena argument for a call to the replay function of ``func``.
+
+    A custom replay function is a generated function and takes the arena like any other;
+    a replay snippet is emitted without it.
+    """
+    if func.custom_replay_func is None:
+        return ""
+    return "WP_TILE_ARENA_ARG " if has_args else "WP_TILE_ARENA_ARG0"
+
+
 def tile_arena_arg(func, has_args: bool) -> str:
     """Hidden arena argument for calls to generated functions and arena-using tile builtins."""
     if func.is_builtin() and func.native_func not in TILE_ARENA_NATIVES:
@@ -3179,7 +3190,9 @@ class Adjoint:
             forward_call = f"{func.namespace}{func_name}({tile_arena_arg(func, args_str != '')}{args_str});"
             replay_call = forward_call
             if func.custom_replay_func is not None or func.replay_snippet is not None:
-                replay_call = f"{func.namespace}replay_{func_name}({adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)});"
+                replay_args_str = adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)
+                replay_arena = replay_arena_arg(func, replay_args_str != "")
+                replay_call = f"{func.namespace}replay_{func_name}({replay_arena}{replay_args_str});"
 
         elif not isinstance(return_type, Sequence) or len(return_type) == 1:
             # handle simple function (one output)
@@ -3189,7 +3202,9 @@ class Adjoint:
             )
             replay_call = forward_call
             if func.custom_replay_func is not None:
-                replay_call = f"var_{output} = {func.namespace}replay_{func_name}({adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)});"
+                replay_args_str = adj.format_forward_call_args(fwd_args + replay_det_args, use_initializer_list)
+                replay_arena = replay_arena_arg(func, replay_args_str != "")
+                replay_call = f"var_{output} = {func.namespace}replay_{func_name}({replay_arena}{replay_args_str});"
 
         else:
             # handle multiple value functions
@@ -7531,6 +7546,26 @@ cuda_reverse_function_template = """
 # by builtin.h, so a hinted @wp.func stays valid for CPU and CUDA alike.
 _INLINE_ATTRS = {"noinline": "WP_NOINLINE ", "forceinline": "WP_FORCEINLINE "}
 
+# Metal keeps real calls, with a thread-memory stack frame, for generated functions it decides not
+# to inline, which is several times slower for small functions, so those are force-inlined. Forcing
+# it on every function makes the compile time of deep call graphs explode instead (minutes to hours
+# for MuJoCo Warp's flex narrowphase), so a function whose body, with everything it calls inlined,
+# exceeds this many lines is left to the compiler's own heuristics.
+_METAL_FORCE_INLINE_MAX_LINES = 4000
+# Fully inlined size in lines per generated function name; callees are always emitted before callers.
+_metal_inlined_lines: dict[str, int] = {}
+_CALL_NAME_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+
+def _metal_force_inline(c_func_name: str, forward_body: str) -> bool:
+    """Record the fully inlined size of a generated function and tell whether to force-inline it."""
+    lines = forward_body.count("\n")
+    for callee in _CALL_NAME_RE.findall(forward_body):
+        lines += _metal_inlined_lines.get(callee, 0)
+    _metal_inlined_lines[c_func_name] = lines
+    return lines <= _METAL_FORCE_INLINE_MAX_LINES
+
+
 # Lean (grid_stride=False) templates: 3D grid with a per-thread early return, no grid-stride loop.
 # The index flattens blockIdx.{z,y,x}; the grid shape (and its uint32 cap) is built in wp_cuda_launch_kernel.
 cuda_kernel_template_forward = """
@@ -8290,8 +8325,6 @@ def codegen_func(
     # The hint covers the adjoint too: keeping a large @wp.func out of line is pointless if the
     # adjoint generated from it is still inlined everywhere.
     inline_attr = _INLINE_ATTRS.get(inline_hint, "")
-    if not inline_attr and device in ("cpu", "metal"):
-        inline_attr = "WP_FORCE_INLINE "  # Metal does not inline generated bodies on its own; empty on CPU
 
     # Build line directive for function definition (subtract 1 to account for 1-indexing of AST line numbers)
     # This is used as a catch-all C-to-Python source line mapping for any code that does not have
@@ -8418,6 +8451,9 @@ def codegen_func(
 
     # codegen body
     forward_body = codegen_func_forward(adj, func_type="function", device=device)
+
+    if not inline_attr and device in ("cpu", "metal") and _metal_force_inline(c_func_name, forward_body):
+        inline_attr = "WP_FORCE_INLINE "  # empty on CPU
 
     s = ""
     if not adj.skip_forward_codegen and not reverse_only:

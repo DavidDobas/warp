@@ -198,5 +198,24 @@ class TestMetal(unittest.TestCase):
         np.testing.assert_array_equal(t.grad.numpy(), np.full(4, 2.0, dtype=np.float32))
 
 
+class TestMetalInlineBudget(unittest.TestCase):
+    """Forced inlining is bounded by the fully inlined size (pure codegen logic, no device needed)."""
+
+    def test_budget_counts_callees(self):
+        from warp._src import codegen  # noqa: PLC0415
+
+        budget = codegen._METAL_FORCE_INLINE_MAX_LINES
+        names = ("wp_test_inline_small", "wp_test_inline_big", "wp_test_inline_caller")
+        try:
+            self.assertTrue(codegen._metal_force_inline(names[0], "x = 1;\n" * 10))
+            self.assertFalse(codegen._metal_force_inline(names[1], "x = 1;\n" * (budget + 1)))
+            # two lines of its own, but inlining its callee would exceed the budget
+            self.assertFalse(codegen._metal_force_inline(names[2], f"y = {names[1]}(a);\nreturn y;\n"))
+            self.assertTrue(codegen._metal_force_inline(names[2], f"y = {names[0]}(a);\nreturn y;\n"))
+        finally:
+            for name in names:
+                codegen._metal_inlined_lines.pop(name, None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
