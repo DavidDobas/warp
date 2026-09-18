@@ -3697,8 +3697,10 @@ class ModuleBuilder:
                     struct,
                     include_tile_helpers=struct.hash in tile_helper_structs,
                 )
-                if device == "metal" and "float64" in struct_source:
-                    self.metal_skipped.add(struct.native_name)  # users are dropped by name below
+                if device == "metal" and ("float64" in struct_source or self._metal_unsupported_reason(struct_source)):
+                    # no float64 on Metal; structs nesting a dropped struct are dropped with it, and
+                    # functions and kernels that use them are dropped by name below
+                    self.metal_skipped.add(struct.native_name)
                     struct_source = ""
                 source += struct_source
                 visited_structs.add(struct.hash)
