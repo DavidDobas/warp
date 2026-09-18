@@ -55,7 +55,7 @@ print(positions.numpy())
 
 ## Installing
 
-Warp requires Python 3.10 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. CUDA acceleration requires a supported NVIDIA GPU and driver. The macOS wheels support CPU execution but not Metal acceleration.
+Warp requires Python 3.10 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. CUDA acceleration requires a supported NVIDIA GPU and driver. The macOS wheels support CPU execution only; Metal acceleration on Apple GPUs is available when building from source (see [Apple GPUs (Metal)](docs/user_guide/metal.rst)).
 
 The easiest way to install Warp is from [PyPI](https://pypi.org/project/warp-lang/):
 

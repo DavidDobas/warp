@@ -1,7 +1,8 @@
 Installation
 ============
 
-Warp requires Python 3.10 or newer. We publish ``warp-lang`` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. The macOS wheels support CPU execution but not Metal acceleration.
+Warp requires Python 3.10 or newer. We publish ``warp-lang`` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. The macOS wheels support CPU execution only; Metal acceleration on Apple GPUs is available when
+:ref:`building from source <building-from-source>`, see :doc:`metal`.
 
 PyPI and nightly wheels for Linux and Windows use CUDA Toolkit 13.4. They require an
 NVIDIA R580-series or newer driver and a Turing (``sm_75``) or newer GPU for CUDA acceleration.
@@ -247,8 +248,8 @@ running the CMake commands:
     $ cmake --build _build/cmake --parallel
 
 Upon success, the CMake build writes the native libraries to ``warp/bin/``.
-The default CMake build enables CUDA on Linux and Windows, disables CUDA on
-macOS, and builds both ``warp`` and ``warp-clang``. Pass
+The default CMake build enables CUDA on Linux and Windows, disables CUDA and
+builds the Metal runtime on macOS, and builds both ``warp`` and ``warp-clang``. Pass
 ``-DWARP_ENABLE_CUDA=OFF`` for a CPU-only CMake build. CUDA builds default to a
 single PTX target for fast local builds; use ``CMAKE_CUDA_ARCHITECTURES`` to
 select different GPU architectures. Use ``build_lib.py`` for release builds

@@ -18,6 +18,12 @@ To achieve good performance on GPUs some dynamic language features are not suppo
 * Runtime evaluation of expressions, e.g.: eval()
 * Dynamic structures such as lists, sets, dictionaries, etc.
 
+Apple GPUs
+----------
+
+The Metal backend has its own restrictions, most notably the absence of ``float64``.
+See :doc:`metal` for the list.
+
 Kernels and User Functions
 --------------------------
 
