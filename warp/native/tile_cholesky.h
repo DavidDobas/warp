@@ -242,7 +242,8 @@ inline WP_FORCE_INLINE CUDA_CALLABLE void scalar_cholesky_impl(TileA WP_THREAD& 
 //
 // Upper=false: A = L L^T, Upper=true: A = U^T U
 template <bool Upper, typename TileA, typename TileOut>
-inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA WP_THREAD& adj_A, TileOut WP_THREAD& adj_Out, TileOut WP_THREAD& Out)
+inline CUDA_CALLABLE void
+cooperative_scalar_cholesky_adj(TileA WP_THREAD& adj_A, TileOut WP_THREAD& adj_Out, TileOut WP_THREAD& Out)
 {
     WP_TILE_ARENA_NULL
     using T = typename TileA::Type;
@@ -363,7 +364,8 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA WP_THREAD& adj_A
 // Upper=false: produces lower-triangular L s.t. A = L L^T, zeros upper triangle.
 // Upper=true:  produces upper-triangular U s.t. A = U^T U, zeros lower triangle.
 template <bool Upper, typename Fwd, typename TileA, typename TileOut>
-WP_FORCE_INLINE CUDA_CALLABLE TileOut WP_THREAD& tile_cholesky_impl(Fwd fun_forward, TileA WP_THREAD& A, TileOut WP_THREAD& Out)
+WP_FORCE_INLINE CUDA_CALLABLE TileOut WP_THREAD&
+tile_cholesky_impl(Fwd fun_forward, TileA WP_THREAD& A, TileOut WP_THREAD& Out)
 {
     static_assert(TileA::Layout::Shape::N == 2, "Expected TileA::Layout::Shape::N == 2");
     static_assert(TileOut::Layout::Shape::N == 2, "Expected TileOut::Layout::Shape::N == 2");
@@ -425,8 +427,13 @@ WP_FORCE_INLINE CUDA_CALLABLE TileOut WP_THREAD& tile_cholesky_impl(Fwd fun_forw
 
 
 template <bool Upper, typename BkwdGemm, typename BkwdTrsm, typename TileA, typename TileOut>
-CUDA_CALLABLE void
-adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut WP_THREAD& Out, TileA WP_THREAD& adj_A, TileOut WP_THREAD& adj_Out)
+CUDA_CALLABLE void adj_tile_cholesky_impl(
+    BkwdGemm fun_bkwd_gemm,
+    BkwdTrsm fun_bkwd_trsm,
+    TileOut WP_THREAD& Out,
+    TileA WP_THREAD& adj_A,
+    TileOut WP_THREAD& adj_Out
+)
 {
     using T = typename TileA::Type;
     constexpr int n = TileA::Layout::Shape::dim(1);
@@ -560,8 +567,9 @@ WP_FORCE_INLINE CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, T
 
 // Cholesky (out-of-place): tile_cholesky<false>(...) for lower, tile_cholesky<true>(...) for upper
 template <bool Upper, typename Fwd, typename BkwdGemm, typename BkwdTrsm, typename TileA, typename TileOut>
-CUDA_CALLABLE TileOut WP_THREAD&
-tile_cholesky(Fwd fun_forward, BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileA WP_THREAD& A, TileOut WP_THREAD& Out)
+CUDA_CALLABLE TileOut WP_THREAD& tile_cholesky(
+    Fwd fun_forward, BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileA WP_THREAD& A, TileOut WP_THREAD& Out
+)
 {
     return tile_cholesky_impl<Upper>(fun_forward, A, Out);
 }
@@ -587,7 +595,8 @@ CUDA_CALLABLE void adj_tile_cholesky(
 }
 
 // Cholesky (inplace): tile_cholesky_inplace<false>(...) for lower, tile_cholesky_inplace<true>(...) for upper
-template <bool Upper, typename Fwd, typename TileA> CUDA_CALLABLE void tile_cholesky_inplace(Fwd fun_forward, TileA WP_THREAD& A)
+template <bool Upper, typename Fwd, typename TileA>
+CUDA_CALLABLE void tile_cholesky_inplace(Fwd fun_forward, TileA WP_THREAD& A)
 {
     tile_cholesky_inplace_impl<Upper>(fun_forward, A);
 }

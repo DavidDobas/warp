@@ -135,8 +135,9 @@ CUDA_CALLABLE inline void my_swap(int WP_THREAD& a, int WP_THREAD& b)
     b = c;
 }
 
-CUDA_CALLABLE inline void
-precompute_triangle_solid_angle_props(const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, SolidAngleProps WP_THREAD& my_data)
+CUDA_CALLABLE inline void precompute_triangle_solid_angle_props(
+    const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, SolidAngleProps WP_THREAD& my_data
+)
 {
     const vec3 ab = b - a;
     const vec3 ac = c - a;
@@ -260,7 +261,9 @@ precompute_triangle_solid_angle_props(const vec3 WP_THREAD& a, const vec3 WP_THR
 }
 
 CUDA_CALLABLE inline void combine_precomputed_solid_angle_props(
-    SolidAngleProps WP_THREAD& my_data, const SolidAngleProps WP_THREAD* left_child_data, const SolidAngleProps WP_THREAD* right_child_data
+    SolidAngleProps WP_THREAD& my_data,
+    const SolidAngleProps WP_THREAD* left_child_data,
+    const SolidAngleProps WP_THREAD* right_child_data
 )
 {
     vec3 N = left_child_data->normal;
@@ -378,8 +381,9 @@ CUDA_CALLABLE inline void combine_precomputed_solid_angle_props(
         = length_sq(max(my_data.average_p - my_data.box.lower, my_data.box.upper - my_data.average_p));
 }
 
-CUDA_CALLABLE inline SolidAngleProps
-combine_precomputed_solid_angle_props(const SolidAngleProps WP_THREAD* left_child_data, const SolidAngleProps WP_THREAD* right_child_data)
+CUDA_CALLABLE inline SolidAngleProps combine_precomputed_solid_angle_props(
+    const SolidAngleProps WP_THREAD* left_child_data, const SolidAngleProps WP_THREAD* right_child_data
+)
 {
     SolidAngleProps my_data;
     combine_precomputed_solid_angle_props(my_data, left_child_data, right_child_data);
@@ -388,7 +392,10 @@ combine_precomputed_solid_angle_props(const SolidAngleProps WP_THREAD* left_chil
 
 // Return whether need to
 CUDA_CALLABLE inline bool evaluate_node_solid_angle(
-    const vec3 WP_THREAD& query_point, SolidAngleProps WP_DEVICE* current_data, float WP_THREAD& solid_angle, const float accuracy_scale_sq
+    const vec3 WP_THREAD& query_point,
+    SolidAngleProps WP_DEVICE* current_data,
+    float WP_THREAD& solid_angle,
+    const float accuracy_scale_sq
 )
 {
     const SolidAngleProps data = *current_data;  // local copy: Metal has no device-reference operators
@@ -451,7 +458,8 @@ CUDA_CALLABLE inline bool evaluate_node_solid_angle(
     return false;
 }
 
-CUDA_CALLABLE inline float robust_solid_angle(const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, const vec3 WP_THREAD& p)
+CUDA_CALLABLE inline float
+robust_solid_angle(const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, const vec3 WP_THREAD& p)
 {
     vec3 qa = a - p;
     vec3 qb = b - p;

@@ -35,17 +35,20 @@ inline CUDA_CALLABLE float interpolate_gradient(float a0, float a1, float t, flo
     // return (d_a1 - d_a0) * t + (a1 - a0) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec2 interpolate_gradient_2d(float a0, float a1, float t, vec2 WP_THREAD& d_a0, vec2 WP_THREAD& d_a1, vec2 WP_THREAD& d_t)
+inline CUDA_CALLABLE vec2
+interpolate_gradient_2d(float a0, float a1, float t, vec2 WP_THREAD& d_a0, vec2 WP_THREAD& d_a1, vec2 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec3 interpolate_gradient_3d(float a0, float a1, float t, vec3 WP_THREAD& d_a0, vec3 WP_THREAD& d_a1, vec3 WP_THREAD& d_t)
+inline CUDA_CALLABLE vec3
+interpolate_gradient_3d(float a0, float a1, float t, vec3 WP_THREAD& d_a0, vec3 WP_THREAD& d_a1, vec3 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
 
-inline CUDA_CALLABLE vec4 interpolate_gradient_4d(float a0, float a1, float t, vec4 WP_THREAD& d_a0, vec4 WP_THREAD& d_a1, vec4 WP_THREAD& d_t)
+inline CUDA_CALLABLE vec4
+interpolate_gradient_4d(float a0, float a1, float t, vec4 WP_THREAD& d_a0, vec4 WP_THREAD& d_a1, vec4 WP_THREAD& d_t)
 {
     return (d_a1 - d_a0) * smootherstep(t) + (a1 - a0) * smootherstep_gradient(t) * d_t + d_a0;
 }
@@ -464,7 +467,8 @@ template <unsigned N> struct noise_level_t {
 
 // Leaf node: v_ij... = dot(d, g). Linear in input → Hessian is zero.
 template <unsigned N>
-inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float> WP_THREAD& d, const vec_t<N, float> WP_THREAD& g)
+inline CUDA_CALLABLE noise_level_t<N>
+noise_level_leaf(const vec_t<N, float> WP_THREAD& d, const vec_t<N, float> WP_THREAD& g)
 {
     noise_level_t<N> F;
     F.val = dot(d, g);
@@ -482,8 +486,9 @@ inline CUDA_CALLABLE noise_level_t<N> noise_level_leaf(const vec_t<N, float> WP_
 //            + S'(u) * ((∇B - ∇A)[i] δ_{j,k} + (∇B - ∇A)[j] δ_{i,k})
 //            + (B - A) S''(u) δ_{i,k} δ_{j,k}
 template <unsigned N>
-inline CUDA_CALLABLE noise_level_t<N>
-noise_level_compose(const noise_level_t<N> WP_THREAD& A, const noise_level_t<N> WP_THREAD& B, unsigned k, float S, float S1, float S2)
+inline CUDA_CALLABLE noise_level_t<N> noise_level_compose(
+    const noise_level_t<N> WP_THREAD& A, const noise_level_t<N> WP_THREAD& B, unsigned k, float S, float S1, float S2
+)
 {
     noise_level_t<N> F;
     float dv = B.val - A.val;
@@ -646,7 +651,8 @@ inline CUDA_CALLABLE float noise(uint32 state, float x)
     return noise_1d(state, x0, x1, dx);
 }
 
-inline CUDA_CALLABLE void adj_noise(uint32 state, float x, uint32 WP_THREAD& adj_state, float WP_THREAD& adj_x, const float adj_ret)
+inline CUDA_CALLABLE void
+adj_noise(uint32 state, float x, uint32 WP_THREAD& adj_state, float WP_THREAD& adj_x, const float adj_ret)
 {
     float dx = x - floor(x);
 
@@ -671,7 +677,9 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec2 WP_THREAD& xy)
     return noise_2d(state, x0, y0, x1, y1, dx, dy);
 }
 
-inline CUDA_CALLABLE void adj_noise(uint32 state, const vec2 WP_THREAD& xy, uint32 WP_THREAD& adj_state, vec2 WP_THREAD& adj_xy, const float adj_ret)
+inline CUDA_CALLABLE void adj_noise(
+    uint32 state, const vec2 WP_THREAD& xy, uint32 WP_THREAD& adj_state, vec2 WP_THREAD& adj_xy, const float adj_ret
+)
 {
     float dx = xy[0] - floor(xy[0]);
     float dy = xy[1] - floor(xy[1]);
@@ -705,8 +713,9 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec3 WP_THREAD& xyz)
     return noise_3d(state, x0, y0, z0, x1, y1, z1, dx, dy, dz);
 }
 
-inline CUDA_CALLABLE void
-adj_noise(uint32 state, const vec3 WP_THREAD& xyz, uint32 WP_THREAD& adj_state, vec3 WP_THREAD& adj_xyz, const float adj_ret)
+inline CUDA_CALLABLE void adj_noise(
+    uint32 state, const vec3 WP_THREAD& xyz, uint32 WP_THREAD& adj_state, vec3 WP_THREAD& adj_xyz, const float adj_ret
+)
 {
     float dx = xyz[0] - floor(xyz[0]);
     float dy = xyz[1] - floor(xyz[1]);
@@ -746,8 +755,9 @@ inline CUDA_CALLABLE float noise(uint32 state, const vec4 WP_THREAD& xyzt)
     return noise_4d(state, x0, y0, z0, t0, x1, y1, z1, t1, dx, dy, dz, dt);
 }
 
-inline CUDA_CALLABLE void
-adj_noise(uint32 state, const vec4 WP_THREAD& xyzt, uint32 WP_THREAD& adj_state, vec4 WP_THREAD& adj_xyzt, const float adj_ret)
+inline CUDA_CALLABLE void adj_noise(
+    uint32 state, const vec4 WP_THREAD& xyzt, uint32 WP_THREAD& adj_state, vec4 WP_THREAD& adj_xyzt, const float adj_ret
+)
 {
     float dx = xyzt[0] - floor(xyzt[0]);
     float dy = xyzt[1] - floor(xyzt[1]);
@@ -784,8 +794,15 @@ inline CUDA_CALLABLE float pnoise(uint32 state, float x, int px)
     return noise_1d(state, x0, x1, dx);
 }
 
-inline CUDA_CALLABLE void
-adj_pnoise(uint32 state, float x, int px, uint32 WP_THREAD& adj_state, float WP_THREAD& adj_x, int WP_THREAD& adj_px, const float adj_ret)
+inline CUDA_CALLABLE void adj_pnoise(
+    uint32 state,
+    float x,
+    int px,
+    uint32 WP_THREAD& adj_state,
+    float WP_THREAD& adj_x,
+    int WP_THREAD& adj_px,
+    const float adj_ret
+)
 {
     float dx = x - floor(x);
 

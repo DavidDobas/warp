@@ -326,7 +326,8 @@ bvh_query_aabb_thread_block_impl(uint64_t id, const vec3 WP_THREAD& lower, const
 
 // CPU version: single-threaded. bvh_query_thread_block_t is just bvh_query_t and is shared
 // by the AABB and ray tiled entry points, so dispatch on the query's stored kind.
-CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_block_t WP_THREAD& query, int WP_THREAD& index)
+CUDA_CALLABLE inline bool
+bvh_query_next_thread_block_impl(bvh_query_thread_block_t WP_THREAD& query, int WP_THREAD& index)
 {
     return bvh_query_next_dynamic(query, index, FLT_MAX);
 }
@@ -405,7 +406,8 @@ inline auto tile_bvh_query_next(bvh_query_thread_block_t WP_THREAD& query)
 inline bool tile_query_valid(const bvh_query_thread_block_t WP_THREAD& query) { return query.last_query_valid; }
 
 // CPU version: tile_bvh_query_aabb just creates a regular query
-inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
+inline bvh_query_thread_block_t
+tile_bvh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     // On CPU, this is just bvh_query_aabb since bvh_query_thread_block_t = bvh_query_t
     return bvh_query_aabb(id, lower, upper, -1);

@@ -539,6 +539,7 @@ WP_API void wp_surface_object_destroy_device(void* context, uint64_t surface_han
 // Metal allocation (unified memory, so uploads stay plain host copies) and a copy of the struct with
 // GPU addresses is placed in Metal memory; that copy's GPU address is the id kernels sample through.
 #include "metal.h"
+
 #include <map>
 
 namespace {

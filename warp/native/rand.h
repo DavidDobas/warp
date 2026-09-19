@@ -77,7 +77,10 @@ inline CUDA_CALLABLE float randf(uint32 WP_THREAD& state)
     state = rand_pcg(state);
     return (state >> 8) * (1.0f / 16777216.0f);
 }
-inline CUDA_CALLABLE float randf(uint32 WP_THREAD& state, float min, float max) { return (max - min) * randf(state) + min; }
+inline CUDA_CALLABLE float randf(uint32 WP_THREAD& state, float min, float max)
+{
+    return (max - min) * randf(state) + min;
+}
 
 // Box-Muller method
 inline CUDA_CALLABLE float randn(uint32 WP_THREAD& state)

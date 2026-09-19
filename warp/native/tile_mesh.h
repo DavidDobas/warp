@@ -315,7 +315,8 @@ mesh_query_aabb_thread_block_impl(uint64_t id, const vec3 WP_THREAD& lower, cons
 }
 
 // CPU version: single-threaded, just calls regular mesh_query_aabb_next
-CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb_thread_block_t WP_THREAD& query, int WP_THREAD& index)
+CUDA_CALLABLE inline bool
+mesh_query_aabb_next_thread_block_impl(mesh_query_aabb_thread_block_t WP_THREAD& query, int WP_THREAD& index)
 {
     // On CPU, mesh_query_aabb_thread_block_t is just mesh_query_aabb_t, so call regular mesh_query_aabb_next
     return mesh_query_aabb_next(query, index);
@@ -390,7 +391,8 @@ inline auto tile_mesh_query_aabb_next(mesh_query_aabb_thread_block_t WP_THREAD& 
 inline bool tile_query_valid(const mesh_query_aabb_thread_block_t WP_THREAD& query) { return query.last_query_valid; }
 
 // CPU version: tile_mesh_query_aabb just creates a regular query
-inline mesh_query_aabb_thread_block_t tile_mesh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
+inline mesh_query_aabb_thread_block_t
+tile_mesh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     // On CPU, this is just mesh_query_aabb since mesh_query_aabb_thread_block_t = mesh_query_aabb_t
     return mesh_query_aabb(id, lower, upper);

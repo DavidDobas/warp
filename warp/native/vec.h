@@ -171,12 +171,14 @@ inline CUDA_CALLABLE vec_t<Length, Type> operator-(const vec_t<Length, Type> WP_
     return ret;
 }
 
-template <unsigned Length, typename Type> CUDA_CALLABLE inline vec_t<Length, Type> pos(const vec_t<Length, Type> WP_THREAD& x)
+template <unsigned Length, typename Type>
+CUDA_CALLABLE inline vec_t<Length, Type> pos(const vec_t<Length, Type> WP_THREAD& x)
 {
     return x;
 }
 
-template <unsigned Length, typename Type> CUDA_CALLABLE inline vec_t<Length, Type> neg(const vec_t<Length, Type> WP_THREAD& x)
+template <unsigned Length, typename Type>
+CUDA_CALLABLE inline vec_t<Length, Type> neg(const vec_t<Length, Type> WP_THREAD& x)
 {
     return -x;
 }
@@ -192,8 +194,11 @@ template <typename Type> CUDA_CALLABLE inline vec_t<2, Type> neg(const vec_t<2, 
 }
 
 template <unsigned Length, typename Type>
-CUDA_CALLABLE inline void
-adj_neg(const vec_t<Length, Type> WP_THREAD& x, vec_t<Length, Type> WP_THREAD& adj_x, const vec_t<Length, Type> WP_THREAD& adj_ret)
+CUDA_CALLABLE inline void adj_neg(
+    const vec_t<Length, Type> WP_THREAD& x,
+    vec_t<Length, Type> WP_THREAD& adj_x,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     adj_x -= adj_ret;
 }
@@ -568,7 +573,8 @@ inline Type vec_get_at(const vec_t<Length, Type> WP_THREAD& v, int idx)
 }
 #endif
 
-template <unsigned Length, typename Type> inline CUDA_CALLABLE Type extract(const vec_t<Length, Type> WP_THREAD& a, int idx)
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type extract(const vec_t<Length, Type> WP_THREAD& a, int idx)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -610,7 +616,8 @@ inline CUDA_CALLABLE vec_t<SliceLength, Type> extract(const vec_t<Length, Type> 
     return ret;
 }
 
-template <unsigned Length, typename Type> inline CUDA_CALLABLE Type WP_THREAD* index(vec_t<Length, Type> WP_THREAD& v, int idx)
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type WP_THREAD* index(vec_t<Length, Type> WP_THREAD& v, int idx)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -626,7 +633,8 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE Type WP_THREAD* i
     return &v[idx];
 }
 
-template <unsigned Length, typename Type> inline CUDA_CALLABLE Type WP_THREAD* indexref(vec_t<Length, Type> WP_THREAD* v, int idx)
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type WP_THREAD* indexref(vec_t<Length, Type> WP_THREAD* v, int idx)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -656,16 +664,26 @@ template <unsigned Length, typename Type> inline Type WP_DEVICE* indexref(vec_t<
 #endif
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_index(vec_t<Length, Type> WP_THREAD& v, int idx, vec_t<Length, Type> WP_THREAD& adj_v, int adj_idx, const Type WP_THREAD& adj_value)
+inline CUDA_CALLABLE void adj_index(
+    vec_t<Length, Type> WP_THREAD& v,
+    int idx,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    int adj_idx,
+    const Type WP_THREAD& adj_value
+)
 {
     // nop
 }
 
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_indexref(vec_t<Length, Type> WP_THREAD* v, int idx, vec_t<Length, Type> WP_THREAD& adj_v, int adj_idx, const Type WP_THREAD& adj_value)
+inline CUDA_CALLABLE void adj_indexref(
+    vec_t<Length, Type> WP_THREAD* v,
+    int idx,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    int adj_idx,
+    const Type WP_THREAD& adj_value
+)
 {
     // nop
 }
@@ -690,7 +708,8 @@ inline CUDA_CALLABLE void add_inplace(vec_t<Length, Type> WP_THREAD& v, int idx,
 
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void add_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+add_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -710,8 +729,14 @@ inline CUDA_CALLABLE void add_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t 
 
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_add_inplace(vec_t<Length, Type> WP_THREAD& v, int idx, Type value, vec_t<Length, Type> WP_THREAD& adj_v, int adj_idx, Type WP_THREAD& adj_value)
+inline CUDA_CALLABLE void adj_add_inplace(
+    vec_t<Length, Type> WP_THREAD& v,
+    int idx,
+    Type value,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    int adj_idx,
+    Type WP_THREAD& adj_value
+)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -774,7 +799,8 @@ inline CUDA_CALLABLE void sub_inplace(vec_t<Length, Type> WP_THREAD& v, int idx,
 
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void sub_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+sub_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -794,8 +820,14 @@ inline CUDA_CALLABLE void sub_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t 
 
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_sub_inplace(vec_t<Length, Type> WP_THREAD& v, int idx, Type value, vec_t<Length, Type> WP_THREAD& adj_v, int adj_idx, Type WP_THREAD& adj_value)
+inline CUDA_CALLABLE void adj_sub_inplace(
+    vec_t<Length, Type> WP_THREAD& v,
+    int idx,
+    Type value,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    int adj_idx,
+    Type WP_THREAD& adj_value
+)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -858,7 +890,8 @@ inline CUDA_CALLABLE void bit_and_inplace(vec_t<Length, Type> WP_THREAD& v, int 
 
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void bit_and_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+bit_and_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -896,7 +929,8 @@ inline CUDA_CALLABLE void bit_or_inplace(vec_t<Length, Type> WP_THREAD& v, int i
 
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void bit_or_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+bit_or_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -934,7 +968,8 @@ inline CUDA_CALLABLE void bit_xor_inplace(vec_t<Length, Type> WP_THREAD& v, int 
 
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void bit_xor_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+bit_xor_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -971,7 +1006,8 @@ inline CUDA_CALLABLE void assign_inplace(vec_t<Length, Type> WP_THREAD& v, int i
 }
 
 template <unsigned SliceLength, unsigned Length, typename Type>
-inline CUDA_CALLABLE void assign_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
+inline CUDA_CALLABLE void
+assign_inplace(vec_t<Length, Type> WP_THREAD& v, slice_t slice, const vec_t<SliceLength, Type> WP_THREAD& a)
 {
     assert(slice.start >= 0 && slice.start <= (int)Length);
     assert(slice.stop >= -1 && slice.stop <= (int)Length);
@@ -991,7 +1027,12 @@ inline CUDA_CALLABLE void assign_inplace(vec_t<Length, Type> WP_THREAD& v, slice
 
 template <unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    vec_t<Length, Type> WP_THREAD& v, int idx, Type value, vec_t<Length, Type> WP_THREAD& adj_v, int WP_THREAD& adj_idx, Type WP_THREAD& adj_value
+    vec_t<Length, Type> WP_THREAD& v,
+    int idx,
+    Type value,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    int WP_THREAD& adj_idx,
+    Type WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1311,16 +1352,22 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE vec_t<Length, Typ
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_sign(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_sign(
+    const vec_t<Length, Type> WP_THREAD& v,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: element-wise subgradient; gradient is zero almost everywhere with subgradient
     // at v[i] = 0
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-expect_near(const vec_t<Length, Type> WP_THREAD& actual, const vec_t<Length, Type> WP_THREAD& expected, const Type WP_THREAD& tolerance)
+inline CUDA_CALLABLE void expect_near(
+    const vec_t<Length, Type> WP_THREAD& actual,
+    const vec_t<Length, Type> WP_THREAD& expected,
+    const Type WP_THREAD& tolerance
+)
 {
     Type diff(0);
     for (size_t i = 0; i < Length; ++i) {
@@ -1354,7 +1401,9 @@ inline CUDA_CALLABLE void adj_vec_t(
 
 // adjoint for the component constructors:
 template <typename Type>
-inline CUDA_CALLABLE void adj_vec_t(Type cmpx, Type cmpy, Type WP_THREAD& adj_cmpx, Type WP_THREAD& adj_cmpy, const vec_t<2, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_vec_t(
+    Type cmpx, Type cmpy, Type WP_THREAD& adj_cmpx, Type WP_THREAD& adj_cmpy, const vec_t<2, Type> WP_THREAD& adj_ret
+)
 {
     adj_cmpx += adj_ret.c[0];
     adj_cmpy += adj_ret.c[1];
@@ -1362,7 +1411,13 @@ inline CUDA_CALLABLE void adj_vec_t(Type cmpx, Type cmpy, Type WP_THREAD& adj_cm
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_vec_t(
-    Type cmpx, Type cmpy, Type cmpz, Type WP_THREAD& adj_cmpx, Type WP_THREAD& adj_cmpy, Type WP_THREAD& adj_cmpz, const vec_t<3, Type> WP_THREAD& adj_ret
+    Type cmpx,
+    Type cmpy,
+    Type cmpz,
+    Type WP_THREAD& adj_cmpx,
+    Type WP_THREAD& adj_cmpy,
+    Type WP_THREAD& adj_cmpz,
+    const vec_t<3, Type> WP_THREAD& adj_ret
 )
 {
     adj_cmpx += adj_ret.c[0];
@@ -1401,7 +1456,9 @@ inline CUDA_CALLABLE void adj_vec_t(Type s, Type WP_THREAD& adj_s, const vec_t<L
 // adjoint for the casting constructor
 template <unsigned Length, typename Type, typename OtherType>
 inline CUDA_CALLABLE void adj_vec_t(
-    const vec_t<Length, OtherType> WP_THREAD& other, vec_t<Length, OtherType> WP_THREAD& adj_other, const vec_t<Length, Type> WP_THREAD& adj_ret
+    const vec_t<Length, OtherType> WP_THREAD& other,
+    vec_t<Length, OtherType> WP_THREAD& adj_other,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
@@ -1427,8 +1484,13 @@ CUDA_CALLABLE inline void adj_vec_t(
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_mul(vec_t<Length, Type> a, Type s, vec_t<Length, Type> WP_THREAD& adj_a, Type WP_THREAD& adj_s, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_mul(
+    vec_t<Length, Type> a,
+    Type s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_s,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     for (unsigned i = 0; i < Length; ++i) {
         adj_a[i] += s * adj_ret[i];
@@ -1447,8 +1509,13 @@ adj_mul(vec_t<Length, Type> a, Type s, vec_t<Length, Type> WP_THREAD& adj_a, Typ
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_mul(Type s, vec_t<Length, Type> a, Type WP_THREAD& adj_s, vec_t<Length, Type> WP_THREAD& adj_a, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_mul(
+    Type s,
+    vec_t<Length, Type> a,
+    Type WP_THREAD& adj_s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     adj_mul(a, s, adj_a, adj_s, adj_ret);
 }
@@ -1467,8 +1534,13 @@ inline CUDA_CALLABLE void adj_cw_mul(
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_div(vec_t<Length, Type> a, Type s, vec_t<Length, Type> WP_THREAD& adj_a, Type WP_THREAD& adj_s, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_div(
+    vec_t<Length, Type> a,
+    Type s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_s,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
 
     adj_s -= dot(a, adj_ret) / (s * s);  // - a / s^2
@@ -1488,8 +1560,13 @@ adj_div(vec_t<Length, Type> a, Type s, vec_t<Length, Type> WP_THREAD& adj_a, Typ
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_div(Type s, vec_t<Length, Type> a, Type WP_THREAD& adj_s, vec_t<Length, Type> WP_THREAD& adj_a, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_div(
+    Type s,
+    vec_t<Length, Type> a,
+    Type WP_THREAD& adj_s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
 
     for (unsigned i = 0; i < Length; ++i) {
@@ -1510,7 +1587,11 @@ adj_div(Type s, vec_t<Length, Type> a, Type WP_THREAD& adj_s, vec_t<Length, Type
 
 template <unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_approx_div(
-    vec_t<Length, Type> a, Type s, vec_t<Length, Type> WP_THREAD& adj_a, Type WP_THREAD& adj_s, const vec_t<Length, Type> WP_THREAD& adj_ret
+    vec_t<Length, Type> a,
+    Type s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_s,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
 )
 {
     adj_s -= approx_div(dot(a, adj_ret), (s * s));
@@ -1522,7 +1603,11 @@ inline CUDA_CALLABLE void adj_approx_div(
 
 template <unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_approx_div(
-    Type s, vec_t<Length, Type> a, Type WP_THREAD& adj_s, vec_t<Length, Type> WP_THREAD& adj_a, const vec_t<Length, Type> WP_THREAD& adj_ret
+    Type s,
+    vec_t<Length, Type> a,
+    Type WP_THREAD& adj_s,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
@@ -1550,15 +1635,25 @@ inline CUDA_CALLABLE void adj_cw_div(
 // These forward to the existing 5-arg adj_div for vec/scalar which doesn't need ret.
 // The 6-arg adj_cw_div above is for vec/vec which needs ret for the gradient computation.
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_cw_div(vec_t<Length, Type> a, Type b, vec_t<Length, Type> WP_THREAD& adj_a, Type WP_THREAD& adj_b, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_cw_div(
+    vec_t<Length, Type> a,
+    Type b,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_b,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     adj_div(a, b, adj_a, adj_b, adj_ret);
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_cw_div(Type a, vec_t<Length, Type> b, Type WP_THREAD& adj_a, vec_t<Length, Type> WP_THREAD& adj_b, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_cw_div(
+    Type a,
+    vec_t<Length, Type> b,
+    Type WP_THREAD& adj_a,
+    vec_t<Length, Type> WP_THREAD& adj_b,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     adj_div(a, b, adj_a, adj_b, adj_ret);
 }
@@ -1577,8 +1672,13 @@ inline CUDA_CALLABLE void adj_add(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_add(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec_t<2, Type> WP_THREAD& adj_b, const vec_t<2, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_add(
+    vec_t<2, Type> a,
+    vec_t<2, Type> b,
+    vec_t<2, Type> WP_THREAD& adj_a,
+    vec_t<2, Type> WP_THREAD& adj_b,
+    const vec_t<2, Type> WP_THREAD& adj_ret
+)
 {
     adj_a.c[0] += adj_ret.c[0];
     adj_a.c[1] += adj_ret.c[1];
@@ -1587,8 +1687,13 @@ adj_add(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_add(vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec_t<3, Type> WP_THREAD& adj_b, const vec_t<3, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_add(
+    vec_t<3, Type> a,
+    vec_t<3, Type> b,
+    vec_t<3, Type> WP_THREAD& adj_a,
+    vec_t<3, Type> WP_THREAD& adj_b,
+    const vec_t<3, Type> WP_THREAD& adj_ret
+)
 {
     adj_a.c[0] += adj_ret.c[0];
     adj_a.c[1] += adj_ret.c[1];
@@ -1612,8 +1717,13 @@ inline CUDA_CALLABLE void adj_sub(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_sub(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec_t<2, Type> WP_THREAD& adj_b, const vec_t<2, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_sub(
+    vec_t<2, Type> a,
+    vec_t<2, Type> b,
+    vec_t<2, Type> WP_THREAD& adj_a,
+    vec_t<2, Type> WP_THREAD& adj_b,
+    const vec_t<2, Type> WP_THREAD& adj_ret
+)
 {
     adj_a.c[0] += adj_ret.c[0];
     adj_a.c[1] += adj_ret.c[1];
@@ -1622,8 +1732,13 @@ adj_sub(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_sub(vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec_t<3, Type> WP_THREAD& adj_b, const vec_t<3, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_sub(
+    vec_t<3, Type> a,
+    vec_t<3, Type> b,
+    vec_t<3, Type> WP_THREAD& adj_a,
+    vec_t<3, Type> WP_THREAD& adj_b,
+    const vec_t<3, Type> WP_THREAD& adj_ret
+)
 {
     adj_a.c[0] += adj_ret.c[0];
     adj_a.c[1] += adj_ret.c[1];
@@ -1647,16 +1762,26 @@ inline CUDA_CALLABLE void adj_mod(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_mod(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec_t<2, Type> WP_THREAD& adj_b, const vec_t<2, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_mod(
+    vec_t<2, Type> a,
+    vec_t<2, Type> b,
+    vec_t<2, Type> WP_THREAD& adj_a,
+    vec_t<2, Type> WP_THREAD& adj_b,
+    const vec_t<2, Type> WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: element-wise: adj_a[i] += adj_ret[i]; adj_b[i] -= floor(a[i] / b[i]) *
     // adj_ret[i]
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_mod(vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec_t<3, Type> WP_THREAD& adj_b, const vec_t<3, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_mod(
+    vec_t<3, Type> a,
+    vec_t<3, Type> b,
+    vec_t<3, Type> WP_THREAD& adj_a,
+    vec_t<3, Type> WP_THREAD& adj_b,
+    const vec_t<3, Type> WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: element-wise: adj_a[i] += adj_ret[i]; adj_b[i] -= floor(a[i] / b[i]) *
     // adj_ret[i]
@@ -1686,8 +1811,13 @@ inline CUDA_CALLABLE void adj_dot(
 
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_dot(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec_t<2, Type> WP_THREAD& adj_b, const Type adj_ret)
+inline CUDA_CALLABLE void adj_dot(
+    vec_t<2, Type> a,
+    vec_t<2, Type> b,
+    vec_t<2, Type> WP_THREAD& adj_a,
+    vec_t<2, Type> WP_THREAD& adj_b,
+    const Type adj_ret
+)
 {
     adj_a.c[0] += b.c[0] * adj_ret;
     adj_a.c[1] += b.c[1] * adj_ret;
@@ -1697,8 +1827,13 @@ adj_dot(vec_t<2, Type> a, vec_t<2, Type> b, vec_t<2, Type> WP_THREAD& adj_a, vec
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-adj_dot(vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec_t<3, Type> WP_THREAD& adj_b, const Type adj_ret)
+inline CUDA_CALLABLE void adj_dot(
+    vec_t<3, Type> a,
+    vec_t<3, Type> b,
+    vec_t<3, Type> WP_THREAD& adj_a,
+    vec_t<3, Type> WP_THREAD& adj_b,
+    const Type adj_ret
+)
 {
     adj_a.c[0] += b.c[0] * adj_ret;
     adj_a.c[1] += b.c[1] * adj_ret;
@@ -1711,8 +1846,13 @@ adj_dot(vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec
 
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_extract(const vec_t<Length, Type> WP_THREAD& a, int idx, vec_t<Length, Type> WP_THREAD& adj_a, int adj_idx, Type WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_extract(
+    const vec_t<Length, Type> WP_THREAD& a,
+    int idx,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    int adj_idx,
+    Type WP_THREAD& adj_ret
+)
 {
 #ifndef NDEBUG
     if (idx < -(int)Length || idx >= (int)Length) {
@@ -1754,7 +1894,8 @@ inline CUDA_CALLABLE void adj_extract(
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void adj_length(vec_t<Length, Type> a, Type ret, vec_t<Length, Type> WP_THREAD& adj_a, const Type adj_ret)
+inline CUDA_CALLABLE void
+adj_length(vec_t<Length, Type> a, Type ret, vec_t<Length, Type> WP_THREAD& adj_a, const Type adj_ret)
 {
     if (ret > Type(kEps)) {
         adj_a += div(a, ret) * adj_ret;
@@ -1787,7 +1928,10 @@ inline CUDA_CALLABLE void adj_length_sq(vec_t<Length, Type> a, vec_t<Length, Typ
 
 template <unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_normalize(
-    vec_t<Length, Type> a, vec_t<Length, Type> WP_THREAD& ret, vec_t<Length, Type> WP_THREAD& adj_a, const vec_t<Length, Type> WP_THREAD& adj_ret
+    vec_t<Length, Type> a,
+    vec_t<Length, Type> WP_THREAD& ret,
+    vec_t<Length, Type> WP_THREAD& adj_a,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
 )
 {
     Type d = length(a);
@@ -1810,7 +1954,11 @@ inline CUDA_CALLABLE void adj_normalize(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_cross(
-    vec_t<3, Type> a, vec_t<3, Type> b, vec_t<3, Type> WP_THREAD& adj_a, vec_t<3, Type> WP_THREAD& adj_b, const vec_t<3, Type> WP_THREAD& adj_ret
+    vec_t<3, Type> a,
+    vec_t<3, Type> b,
+    vec_t<3, Type> WP_THREAD& adj_a,
+    vec_t<3, Type> WP_THREAD& adj_b,
+    const vec_t<3, Type> WP_THREAD& adj_ret
 )
 {
     // todo: sign check
@@ -1847,22 +1995,27 @@ inline CUDA_CALLABLE void adj_max(
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const Type WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void
+adj_min(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const Type WP_THREAD& adj_ret)
 {
     unsigned i = argmin(v);
     adj_v[i] += adj_ret;
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const Type WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void
+adj_max(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const Type WP_THREAD& adj_ret)
 {
     unsigned i = argmax(v);
     adj_v[i] += adj_ret;
 }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void
-adj_abs(const vec_t<Length, Type> WP_THREAD& v, vec_t<Length, Type> WP_THREAD& adj_v, const vec_t<Length, Type> WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_abs(
+    const vec_t<Length, Type> WP_THREAD& v,
+    vec_t<Length, Type> WP_THREAD& adj_v,
+    const vec_t<Length, Type> WP_THREAD& adj_ret
+)
 {
     for (unsigned i = 0; i < Length; ++i) {
         if (v[i] < Type(0)) {
@@ -1972,7 +2125,8 @@ template <unsigned Length, typename Type> CUDA_CALLABLE inline int longest_axis(
 }
 
 template <unsigned Length, typename Type>
-CUDA_CALLABLE inline vec_t<Length, Type> lerp(const vec_t<Length, Type> WP_THREAD& a, const vec_t<Length, Type> WP_THREAD& b, Type t)
+CUDA_CALLABLE inline vec_t<Length, Type>
+lerp(const vec_t<Length, Type> WP_THREAD& a, const vec_t<Length, Type> WP_THREAD& b, Type t)
 {
     return a * (Type(1) - t) + b * t;
 }
@@ -1999,31 +2153,38 @@ CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, int8> WP_DEVICE* buf, con
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_add(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
 {
 }
 
@@ -2033,31 +2194,38 @@ CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, int8> WP_DEVICE* buf, con
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_and(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
 {
 }
 
@@ -2066,31 +2234,38 @@ CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, int8> WP_DEVICE* buf, cons
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_or(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
 {
 }
 
@@ -2099,44 +2274,59 @@ CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, int8> WP_DEVICE* buf, con
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, uint8> WP_DEVICE* buf, const vec_t<Length, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, int16> WP_DEVICE* buf, const vec_t<Length, int16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, uint16> WP_DEVICE* buf, const vec_t<Length, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, int32> WP_DEVICE* buf, const vec_t<Length, int32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, uint32> WP_DEVICE* buf, const vec_t<Length, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, int64> WP_DEVICE* buf, const vec_t<Length, int64> WP_THREAD& value)
 {
 }
 template <unsigned Length>
-CUDA_CALLABLE inline void adj_atomic_xor(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
+CUDA_CALLABLE inline void
+adj_atomic_xor(vec_t<Length, uint64> WP_DEVICE* buf, const vec_t<Length, uint64> WP_THREAD& value)
 {
 }
 
 
 // adjoints for some of the constructors, used in intersect.h
-inline CUDA_CALLABLE void adj_vec2(float x, float y, float WP_THREAD& adj_x, float WP_THREAD& adj_y, const vec2 WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void
+adj_vec2(float x, float y, float WP_THREAD& adj_x, float WP_THREAD& adj_y, const vec2 WP_THREAD& adj_ret)
 {
     adj_x += adj_ret[0];
     adj_y += adj_ret[1];
 }
 
-inline CUDA_CALLABLE void
-adj_vec3(float x, float y, float z, float WP_THREAD& adj_x, float WP_THREAD& adj_y, float WP_THREAD& adj_z, const vec3 WP_THREAD& adj_ret)
+inline CUDA_CALLABLE void adj_vec3(
+    float x,
+    float y,
+    float z,
+    float WP_THREAD& adj_x,
+    float WP_THREAD& adj_y,
+    float WP_THREAD& adj_z,
+    const vec3 WP_THREAD& adj_ret
+)
 {
     adj_x += adj_ret[0];
     adj_y += adj_ret[1];
@@ -2144,7 +2334,15 @@ adj_vec3(float x, float y, float z, float WP_THREAD& adj_x, float WP_THREAD& adj
 }
 
 inline CUDA_CALLABLE void adj_vec4(
-    float x, float y, float z, float w, float WP_THREAD& adj_x, float WP_THREAD& adj_y, float WP_THREAD& adj_z, float WP_THREAD& adj_w, const vec4 WP_THREAD& adj_ret
+    float x,
+    float y,
+    float z,
+    float w,
+    float WP_THREAD& adj_x,
+    float WP_THREAD& adj_y,
+    float WP_THREAD& adj_z,
+    float WP_THREAD& adj_w,
+    const vec4 WP_THREAD& adj_ret
 )
 {
     adj_x += adj_ret[0];
@@ -2153,10 +2351,19 @@ inline CUDA_CALLABLE void adj_vec4(
     adj_w += adj_ret[3];
 }
 
-inline CUDA_CALLABLE void adj_vec3(float s, float WP_THREAD& adj_s, const vec3 WP_THREAD& adj_ret) { adj_vec_t(s, adj_s, adj_ret); }
+inline CUDA_CALLABLE void adj_vec3(float s, float WP_THREAD& adj_s, const vec3 WP_THREAD& adj_ret)
+{
+    adj_vec_t(s, adj_s, adj_ret);
+}
 
-inline CUDA_CALLABLE void adj_vec4(float s, float WP_THREAD& adj_s, const vec4 WP_THREAD& adj_ret) { adj_vec_t(s, adj_s, adj_ret); }
+inline CUDA_CALLABLE void adj_vec4(float s, float WP_THREAD& adj_s, const vec4 WP_THREAD& adj_ret)
+{
+    adj_vec_t(s, adj_s, adj_ret);
+}
 
-template <unsigned Length, typename Type> CUDA_CALLABLE inline int len(const vec_t<Length, Type> WP_THREAD& x) { return Length; }
+template <unsigned Length, typename Type> CUDA_CALLABLE inline int len(const vec_t<Length, Type> WP_THREAD& x)
+{
+    return Length;
+}
 
 }  // namespace wp

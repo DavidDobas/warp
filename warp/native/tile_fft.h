@@ -261,7 +261,8 @@ inline CUDA_CALLABLE void cooperative_fft_radix2(vec_t<2, T> WP_TILE_SHARED* x, 
 // Power-of-two fft_size only; the Python dispatch raises a clear error for
 // other sizes and points at MathDx or the CPU path.
 template <int DirectionSign, typename Complex, typename Tile>
-inline CUDA_CALLABLE void tile_fft_gpu_impl(WP_TILE_ARENA_PARAM int batch, int ept, int shared_bytes, Tile WP_THREAD& Xinout)
+inline CUDA_CALLABLE void
+tile_fft_gpu_impl(WP_TILE_ARENA_PARAM int batch, int ept, int shared_bytes, Tile WP_THREAD& Xinout)
 {
     using T = typename fft_vec2_component<Complex>::type;
     const int fft_size = ept * WP_TILE_BLOCK_DIM;
@@ -310,7 +311,8 @@ inline CUDA_CALLABLE void tile_fft_gpu_impl(WP_TILE_ARENA_PARAM int batch, int e
 // `Complex data[Ept]` without a VLA and so the call has a stable type.
 
 template <int DirectionSign, typename Complex, int Ept, typename Fwd, typename Tile>
-inline CUDA_CALLABLE void tile_fft_entry(WP_TILE_ARENA_PARAM Fwd fun_forward, int shared_bytes, int batch, Tile WP_THREAD& Xinout)
+inline CUDA_CALLABLE void
+tile_fft_entry(WP_TILE_ARENA_PARAM Fwd fun_forward, int shared_bytes, int batch, Tile WP_THREAD& Xinout)
 {
     if constexpr (wp_is_null_func<Fwd>::value) {
 #if !defined(__CUDA_ARCH__)

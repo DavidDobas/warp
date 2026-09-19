@@ -167,7 +167,16 @@ inline CUDA_CALLABLE void multAtB(
 
 template <typename Type>
 inline CUDA_CALLABLE void quatToMat3(
-    const Type WP_THREAD* qV, Type WP_THREAD& m11, Type WP_THREAD& m12, Type WP_THREAD& m13, Type WP_THREAD& m21, Type WP_THREAD& m22, Type WP_THREAD& m23, Type WP_THREAD& m31, Type WP_THREAD& m32, Type WP_THREAD& m33
+    const Type WP_THREAD* qV,
+    Type WP_THREAD& m11,
+    Type WP_THREAD& m12,
+    Type WP_THREAD& m13,
+    Type WP_THREAD& m21,
+    Type WP_THREAD& m22,
+    Type WP_THREAD& m23,
+    Type WP_THREAD& m31,
+    Type WP_THREAD& m32,
+    Type WP_THREAD& m33
 )
 {
     Type w = qV[3];
@@ -197,7 +206,8 @@ inline CUDA_CALLABLE void quatToMat3(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void approximateGivensQuaternion(Type a11, Type a12, Type a22, Type WP_THREAD& ch, Type WP_THREAD& sh)
+inline CUDA_CALLABLE void
+approximateGivensQuaternion(Type a11, Type a12, Type a22, Type WP_THREAD& ch, Type WP_THREAD& sh)
 {
     /*
      * Given givens angle computed by approximateGivensAngles,
@@ -217,7 +227,16 @@ inline CUDA_CALLABLE void approximateGivensQuaternion(Type a11, Type a12, Type a
 
 template <typename Type>
 inline CUDA_CALLABLE void jacobiConjugation(
-    const int x, const int y, const int z, Type WP_THREAD& s11, Type WP_THREAD& s21, Type WP_THREAD& s22, Type WP_THREAD& s31, Type WP_THREAD& s32, Type WP_THREAD& s33, Type WP_THREAD* qV
+    const int x,
+    const int y,
+    const int z,
+    Type WP_THREAD& s11,
+    Type WP_THREAD& s21,
+    Type WP_THREAD& s22,
+    Type WP_THREAD& s31,
+    Type WP_THREAD& s32,
+    Type WP_THREAD& s33,
+    Type WP_THREAD* qV
 )
 {
     Type ch, sh;
@@ -346,7 +365,8 @@ void sortSingularValues(// matrix that we want to decompose
     condNegSwap(c, v32, v33);
 }
 
-template <typename Type> inline CUDA_CALLABLE void QRGivensQuaternion(Type a1, Type a2, Type WP_THREAD& ch, Type WP_THREAD& sh)
+template <typename Type>
+inline CUDA_CALLABLE void QRGivensQuaternion(Type a1, Type a2, Type WP_THREAD& ch, Type WP_THREAD& sh)
 {
     // a1 = pivot point on diagonal
     // a2 = lower triangular entry we want to annihilate
@@ -567,8 +587,12 @@ inline CUDA_CALLABLE void _svd_2( // input A
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-svd3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& U, vec_t<3, Type> WP_THREAD& sigma, mat_t<3, 3, Type> WP_THREAD& V)
+inline CUDA_CALLABLE void svd3(
+    const mat_t<3, 3, Type> WP_THREAD& A,
+    mat_t<3, 3, Type> WP_THREAD& U,
+    vec_t<3, Type> WP_THREAD& sigma,
+    mat_t<3, 3, Type> WP_THREAD& V
+)
 {
     Type s12, s13, s21, s23, s31, s32;
     _svd(
@@ -630,8 +654,12 @@ inline CUDA_CALLABLE void adj_svd3(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void
-svd2(const mat_t<2, 2, Type> WP_THREAD& A, mat_t<2, 2, Type> WP_THREAD& U, vec_t<2, Type> WP_THREAD& sigma, mat_t<2, 2, Type> WP_THREAD& V)
+inline CUDA_CALLABLE void svd2(
+    const mat_t<2, 2, Type> WP_THREAD& A,
+    mat_t<2, 2, Type> WP_THREAD& U,
+    vec_t<2, Type> WP_THREAD& sigma,
+    mat_t<2, 2, Type> WP_THREAD& V
+)
 {
     _svd_2(
         A.data[0][0], A.data[0][1], A.data[1][0], A.data[1][1],
@@ -696,7 +724,8 @@ inline CUDA_CALLABLE void adj_svd2(
 
 
 template <typename Type>
-inline CUDA_CALLABLE void qr3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, mat_t<3, 3, Type> WP_THREAD& R)
+inline CUDA_CALLABLE void
+qr3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, mat_t<3, 3, Type> WP_THREAD& R)
 {
     QRDecomposition(
         A.data[0][0], A.data[0][1], A.data[0][2], A.data[1][0], A.data[1][1], A.data[1][2], A.data[2][0], A.data[2][1],
@@ -732,7 +761,8 @@ inline CUDA_CALLABLE void adj_qr3(
 
 
 template <typename Type>
-inline CUDA_CALLABLE void eig3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, vec_t<3, Type> WP_THREAD& d)
+inline CUDA_CALLABLE void
+eig3(const mat_t<3, 3, Type> WP_THREAD& A, mat_t<3, 3, Type> WP_THREAD& Q, vec_t<3, Type> WP_THREAD& d)
 {
     Type qV[4];
     Type s11 = A.data[0][0];

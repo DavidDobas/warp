@@ -7,9 +7,10 @@
 // kernels. The host code builds them into Metal memory and mirrors them in a descriptor whose
 // pointers are GPU addresses; the descriptor's own GPU address is the object's id.
 
+#include "warp.h"
+
 #include "mesh.h"
 #include "metal.h"
-#include "warp.h"
 
 namespace wp {
 
@@ -20,7 +21,10 @@ inline int metal_context_ordinal(void* context) { return int(reinterpret_cast<in
 // Routes wp_alloc_host()/wp_free_host() on this thread to Metal memory for the scope's lifetime.
 struct ScopedMetalHostAlloc {
     int previous;
-    explicit ScopedMetalHostAlloc(int ordinal) : previous(wp_host_alloc_redirect_metal(ordinal)) { }
+    explicit ScopedMetalHostAlloc(int ordinal)
+        : previous(wp_host_alloc_redirect_metal(ordinal))
+    {
+    }
     ~ScopedMetalHostAlloc() { wp_host_alloc_redirect_metal(previous); }
 };
 

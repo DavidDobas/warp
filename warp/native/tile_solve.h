@@ -72,7 +72,8 @@ namespace partitioned_gemm {
 // thread, and WP_TILE_SYNC() is a no-op -- behaviour matches the prior
 // single-threaded scalar fallback.
 template <bool Upper, typename TileA, typename TileX, typename TileY>
-inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA WP_THREAD& A, TileX WP_THREAD& X, TileY WP_THREAD& Y)
+inline CUDA_CALLABLE void
+scalar_cholesky_forward_substitution(TileA WP_THREAD& A, TileX WP_THREAD& X, TileY WP_THREAD& Y)
 {
     using T = typename TileA::Type;
 
@@ -178,7 +179,8 @@ inline CUDA_CALLABLE void scalar_cholesky_solve(TileA WP_THREAD& A, TileX WP_THR
 
 
 template <typename Fwd, typename Bkwd, typename TileL, typename TileY, typename TileZ>
-TileZ WP_THREAD& tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL WP_THREAD& L, TileY WP_THREAD& y, TileZ WP_THREAD& z)
+TileZ WP_THREAD&
+tile_lower_solve(Fwd fun_forward, Bkwd fun_bkwd, TileL WP_THREAD& L, TileY WP_THREAD& y, TileZ WP_THREAD& z)
 {
     // Copy y to z
     z = y;
@@ -329,7 +331,12 @@ CUDA_CALLABLE void adj_tile_lower_solve(
 
 template <typename Fwd, typename TileL, typename TileY, typename AdjFwd, typename AdjTileL, typename AdjTileY>
 void adj_tile_lower_solve_inplace(
-    Fwd fun_forward, TileL WP_THREAD& L, TileY WP_THREAD& y, AdjFwd adj_fun_forward, AdjTileL WP_THREAD& adj_L, AdjTileY WP_THREAD& adj_y
+    Fwd fun_forward,
+    TileL WP_THREAD& L,
+    TileY WP_THREAD& y,
+    AdjFwd adj_fun_forward,
+    AdjTileL WP_THREAD& adj_L,
+    AdjTileY WP_THREAD& adj_y
 )
 {
     // MISSINGADJOINT: same math as adj_tile_lower_solve but operating in place on
@@ -410,7 +417,12 @@ void adj_tile_upper_solve(
 
 template <typename Fwd, typename TileU, typename TileZ, typename AdjFwd, typename AdjTileU, typename AdjTileZ>
 void adj_tile_upper_solve_inplace(
-    Fwd fun_forward, TileU WP_THREAD& U, TileZ WP_THREAD& z, AdjFwd adj_fun_forward, AdjTileU WP_THREAD& adj_U, AdjTileZ WP_THREAD& adj_z
+    Fwd fun_forward,
+    TileU WP_THREAD& U,
+    TileZ WP_THREAD& z,
+    AdjFwd adj_fun_forward,
+    AdjTileU WP_THREAD& adj_U,
+    AdjTileZ WP_THREAD& adj_z
 )
 {
     // MISSINGADJOINT: same math as adj_tile_upper_solve but operating in place on
@@ -492,7 +504,12 @@ template <
     typename AdjTileA,
     typename AdjTileY>
 void adj_tile_cholesky_solve_inplace(
-    Fwd fun_forward, TileA WP_THREAD& A, TileY WP_THREAD& Y, AdjFwd adj_fun_forward, AdjTileA WP_THREAD& adj_A, AdjTileY WP_THREAD& adj_Y
+    Fwd fun_forward,
+    TileA WP_THREAD& A,
+    TileY WP_THREAD& Y,
+    AdjFwd adj_fun_forward,
+    AdjTileA WP_THREAD& adj_A,
+    AdjTileY WP_THREAD& adj_Y
 )
 {
     // MISSINGADJOINT: same math as adj_tile_cholesky_solve operating in place

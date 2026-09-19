@@ -307,7 +307,9 @@ void hash_grid_update_device_impl(
         if (it == grids.end())
             return false;
         wp::ScopedMetalHostAlloc scope(ordinal);
-        hash_grid_update_host_impl<Type>(it->second.host_id, cell_width, &points_copy, has_groups ? &groups_copy : nullptr);
+        hash_grid_update_host_impl<Type>(
+            it->second.host_id, cell_width, &points_copy, has_groups ? &groups_copy : nullptr
+        );
         return metal_grid_update(it->second);
     };
     if (wp_metal_capture_host_op(ordinal, build))  // replayed in order by the graph

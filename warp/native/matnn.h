@@ -18,8 +18,14 @@ template <bool transpose> CUDA_CALLABLE inline int dense_index(int rows, int col
 
 
 template <bool t1, bool t2, bool add>
-CUDA_CALLABLE inline void
-dense_gemm_impl(int m, int n, int p, const float WP_DEVICE* __restrict__ A, const float WP_DEVICE* __restrict__ B, float WP_DEVICE* __restrict__ C)
+CUDA_CALLABLE inline void dense_gemm_impl(
+    int m,
+    int n,
+    int p,
+    const float WP_DEVICE* __restrict__ A,
+    const float WP_DEVICE* __restrict__ B,
+    float WP_DEVICE* __restrict__ C
+)
 {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; ++j) {
@@ -39,8 +45,16 @@ dense_gemm_impl(int m, int n, int p, const float WP_DEVICE* __restrict__ A, cons
 
 
 template <bool add = false>
-CUDA_CALLABLE inline void
-dense_gemm(int m, int n, int p, int t1, int t2, const array_t<float> WP_THREAD& A, const array_t<float> WP_THREAD& B, array_t<float> WP_THREAD& C)
+CUDA_CALLABLE inline void dense_gemm(
+    int m,
+    int n,
+    int p,
+    int t1,
+    int t2,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& B,
+    array_t<float> WP_THREAD& C
+)
 {
     if (t1 == 0 && t2 == 0)
         dense_gemm_impl<false, false, add>(m, n, p, A.data, B.data, C.data);
@@ -53,7 +67,9 @@ dense_gemm(int m, int n, int p, int t1, int t2, const array_t<float> WP_THREAD& 
 }
 
 
-void CUDA_CALLABLE inline dense_chol(int n, const array_t<float> WP_THREAD& A, float regularization, array_t<float> WP_THREAD& L)
+void CUDA_CALLABLE inline dense_chol(
+    int n, const array_t<float> WP_THREAD& A, float regularization, array_t<float> WP_THREAD& L
+)
 {
     for (int j = 0; j < n; ++j) {
         float s = A.data[dense_index(n, j, j)] + regularization;
@@ -82,7 +98,8 @@ void CUDA_CALLABLE inline dense_chol(int n, const array_t<float> WP_THREAD& A, f
 
 
 // Solves (L*L^T)x = b given the Cholesky factor L
-CUDA_CALLABLE inline void dense_subs(int n, const array_t<float> WP_THREAD& L, const array_t<float> WP_THREAD& b, array_t<float> WP_THREAD& x)
+CUDA_CALLABLE inline void
+dense_subs(int n, const array_t<float> WP_THREAD& L, const array_t<float> WP_THREAD& b, array_t<float> WP_THREAD& x)
 {
     // forward substitution
     for (int i = 0; i < n; ++i) {
@@ -107,8 +124,13 @@ CUDA_CALLABLE inline void dense_subs(int n, const array_t<float> WP_THREAD& L, c
     }
 }
 
-CUDA_CALLABLE inline void
-dense_solve(int n, const array_t<float> WP_THREAD& A, const array_t<float> WP_THREAD& L, const array_t<float> WP_THREAD& b, array_t<float> WP_THREAD& x)
+CUDA_CALLABLE inline void dense_solve(
+    int n,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& L,
+    const array_t<float> WP_THREAD& b,
+    array_t<float> WP_THREAD& x
+)
 {
     dense_subs(n, L, b, x);
 }

@@ -225,7 +225,8 @@ inline CUDA_CALLABLE auto tile_scan_exclusive_impl(WP_TILE_ARENA_PARAM Tile& t)
 // per fiber — comparable to the GPU warp-level shuffle path for moderate
 // block_dim. (See plan A8 step 4: a more efficient port is a follow-up.)
 
-template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto tile_scan_inclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
+inline auto tile_scan_inclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
     using T = typename Tile::Type;
     constexpr int N = Tile::Layout::Shape::size();
@@ -285,7 +286,8 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
     }
 }
 
-template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto tile_scan_exclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
+inline auto tile_scan_exclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
     using T = typename Tile::Type;
     constexpr int N = Tile::Layout::Shape::size();
@@ -340,16 +342,24 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
 
 #endif  // !defined(__CUDA_ARCH__)
 
-template <typename Tile> auto tile_scan_inclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t) { return tile_scan_inclusive_impl(WP_TILE_ARENA_ARG t); }
+template <typename Tile> auto tile_scan_inclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+{
+    return tile_scan_inclusive_impl(WP_TILE_ARENA_ARG t);
+}
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: adjoint of inclusive prefix sum is reverse-suffix sum of adj_ret
 }
 
-template <typename Tile> auto tile_scan_exclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t) { return tile_scan_exclusive_impl(WP_TILE_ARENA_ARG t); }
+template <typename Tile> auto tile_scan_exclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+{
+    return tile_scan_exclusive_impl(WP_TILE_ARENA_ARG t);
+}
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_exclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_exclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: adjoint of exclusive prefix sum is reverse-suffix sum of adj_ret
     // shifted by one
@@ -361,7 +371,8 @@ template <typename Tile> auto tile_scan_max_inclusive(WP_TILE_ARENA_PARAM Tile W
     return tile_scan_inclusive_impl<Tile, OpMax<typename Tile::Type>>(WP_TILE_ARENA_ARG t);
 }
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_max_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_max_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmax over [0, i]
 }
@@ -372,7 +383,8 @@ template <typename Tile> auto tile_scan_min_inclusive(WP_TILE_ARENA_PARAM Tile W
     return tile_scan_inclusive_impl<Tile, OpMin<typename Tile::Type>>(WP_TILE_ARENA_ARG t);
 }
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_min_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_min_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmin over [0, i]
 }

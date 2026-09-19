@@ -54,7 +54,10 @@ template <int N, typename Head, typename... Tail> struct tuple_get {
 
 // Specialization for the base case N == 0. Simply return the head of the tuple.
 template <typename Head, typename... Tail> struct tuple_get<0, Head, Tail...> {
-    static CUDA_CALLABLE inline const auto WP_THREAD& value(const tuple_t<Head, Tail...> WP_THREAD& t) { return t.head; }
+    static CUDA_CALLABLE inline const auto WP_THREAD& value(const tuple_t<Head, Tail...> WP_THREAD& t)
+    {
+        return t.head;
+    }
 };
 
 template <int Index, typename... Args> CUDA_CALLABLE inline auto extract(const tuple_t<Args...> WP_THREAD& t)
@@ -69,7 +72,8 @@ template <typename... Args> CUDA_CALLABLE inline void print(const tuple_t<Args..
     t.apply([&](auto a) { print(a); });
 }
 
-template <typename... Args> CUDA_CALLABLE inline void adj_print(const tuple_t<Args...> WP_THREAD& t, tuple_t<Args...> WP_THREAD& adj_t)
+template <typename... Args>
+CUDA_CALLABLE inline void adj_print(const tuple_t<Args...> WP_THREAD& t, tuple_t<Args...> WP_THREAD& adj_t)
 {
     adj_t.apply([&](auto a) { print(a); });
 }
@@ -77,7 +81,8 @@ template <typename... Args> CUDA_CALLABLE inline void adj_print(const tuple_t<Ar
 CUDA_CALLABLE inline tuple_t<> add(const tuple_t<> WP_THREAD& a, const tuple_t<> WP_THREAD& b) { return tuple_t<>(); }
 
 template <typename Head, typename... Tail>
-CUDA_CALLABLE inline tuple_t<Head, Tail...> add(const tuple_t<Head, Tail...> WP_THREAD& a, const tuple_t<Head, Tail...> WP_THREAD& b)
+CUDA_CALLABLE inline tuple_t<Head, Tail...>
+add(const tuple_t<Head, Tail...> WP_THREAD& a, const tuple_t<Head, Tail...> WP_THREAD& b)
 {
     tuple_t<Head, Tail...> out;
     out.head = add(a.head, b.head);
@@ -85,8 +90,13 @@ CUDA_CALLABLE inline tuple_t<Head, Tail...> add(const tuple_t<Head, Tail...> WP_
     return out;
 }
 
-CUDA_CALLABLE inline void
-adj_add(const tuple_t<> WP_THREAD& a, const tuple_t<> WP_THREAD& b, tuple_t<> WP_THREAD& adj_a, tuple_t<> WP_THREAD& adj_b, const tuple_t<> WP_THREAD& adj_ret)
+CUDA_CALLABLE inline void adj_add(
+    const tuple_t<> WP_THREAD& a,
+    const tuple_t<> WP_THREAD& b,
+    tuple_t<> WP_THREAD& adj_a,
+    tuple_t<> WP_THREAD& adj_b,
+    const tuple_t<> WP_THREAD& adj_ret
+)
 {
     // nop: base case for empty tuple recursion
 }

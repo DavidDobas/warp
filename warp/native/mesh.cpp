@@ -317,8 +317,8 @@ uint64_t wp_mesh_create_device(
         constructor_type = BVH_CONSTRUCTOR_SAH;
     MetalMirror<Mesh> m { ordinal,
                           wp_mesh_create_host(
-                              points, velocities, tris, num_points, num_tris, support_winding_number,
-                              constructor_type, groups, bvh_leaf_size
+                              points, velocities, tris, num_points, num_tris, support_winding_number, constructor_type,
+                              groups, bvh_leaf_size
                           ),
                           nullptr };
     if (!m.host_id)

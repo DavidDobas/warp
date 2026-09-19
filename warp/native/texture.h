@@ -527,7 +527,8 @@ inline float cpu_sample_2d_channel_at_level(const Texture WP_DEVICE* tex, int le
 }
 
 // Sample a single channel with trilinear interpolation (3D) at a specific mip level.
-inline float cpu_sample_3d_channel_at_level(const Texture WP_DEVICE* tex, int level, float u, float v, float w_coord, int channel)
+inline float
+cpu_sample_3d_channel_at_level(const Texture WP_DEVICE* tex, int level, float u, float v, float w_coord, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -780,7 +781,8 @@ template <> struct texture_sample_helper<vec2f> {
         return tex2D<float2>(tex.tex, u, v);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float2 sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
+    static CUDA_CALLABLE_DEVICE __noinline__ float2
+    sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
     {
         return tex3D<float2>(tex.tex, u, v, w);
     }
@@ -865,7 +867,8 @@ template <> struct texture_sample_helper<vec4f> {
         return tex2D<float4>(tex.tex, u, v);
     }
 
-    static CUDA_CALLABLE_DEVICE __noinline__ float4 sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
+    static CUDA_CALLABLE_DEVICE __noinline__ float4
+    sample_base_3d(const texture3d_t WP_THREAD& tex, float u, float v, float w)
     {
         return tex3D<float4>(tex.tex, u, v, w);
     }
@@ -989,7 +992,8 @@ CUDA_CALLABLE_DEVICE inline bool texture_handle_is_uniform(uint64 handle)
 }
 
 template <typename T>
-CUDA_CALLABLE_DEVICE __noinline__ T texture_sample_divergent(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
+CUDA_CALLABLE_DEVICE __noinline__ T
+texture_sample_divergent(const texture2d_t WP_THREAD& tex, float u, float v, float lod)
 {
     return texture_sample_helper<T>::sample_2d(tex, u, v, lod);
 }
@@ -1010,7 +1014,8 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture1d_t WP_THREAD
 }
 
 // 2D texture sampling with vec2 coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t WP_THREAD& tex, const vec2f WP_THREAD& uv, float lod)
+template <typename T>
+CUDA_CALLABLE T texture_sample(const texture2d_t WP_THREAD& tex, const vec2f WP_THREAD& uv, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1032,7 +1037,8 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture2d_t WP_THREAD
 }
 
 // 3D texture sampling with vec3 coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, const vec3f WP_THREAD& uvw, float lod)
+template <typename T>
+CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, const vec3f WP_THREAD& uvw, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1043,7 +1049,8 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD
 }
 
 // 3D texture sampling with separate u, v, w coordinates
-template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
+template <typename T>
+CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD& tex, float u, float v, float w, float lod)
 {
     texture_assert_sampleable(tex.dtype);
 #if defined(WP_WORKAROUND_CUDA_TEXTURE_CUBIN)
@@ -1056,7 +1063,13 @@ template <typename T> CUDA_CALLABLE T texture_sample(const texture3d_t WP_THREAD
 // Adjoint stubs for texture sampling
 template <typename T>
 CUDA_CALLABLE void adj_texture_sample(
-    const texture1d_t WP_THREAD& tex, float u, float lod, texture1d_t WP_THREAD& adj_tex, float WP_THREAD& adj_u, float WP_THREAD& adj_lod, const T WP_THREAD& adj_ret
+    const texture1d_t WP_THREAD& tex,
+    float u,
+    float lod,
+    texture1d_t WP_THREAD& adj_tex,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_lod,
+    const T WP_THREAD& adj_ret
 )
 {
     // MISSINGADJOINT: differentiable for linear interpolation;
@@ -1197,6 +1210,6 @@ CUDA_CALLABLE inline void adj_atomic_add(texture3d_t WP_DEVICE* p, const texture
 {
     // No-op: textures are not differentiable
 }
-  // !__METAL_VERSION__
+// !__METAL_VERSION__
 
 }  // namespace wp
