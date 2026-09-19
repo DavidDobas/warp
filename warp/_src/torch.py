@@ -59,6 +59,9 @@ def device_to_torch(warp_device: warp.DeviceLike) -> str:
         RuntimeError: The Warp device is not compatible with PyTorch.
     """
     device = warp.get_device(warp_device)
+    if device.is_metal:
+        # unified memory: Torch aliases Metal arrays as CPU tensors
+        return "cpu"
     if device.is_cpu or device.is_primary:
         return str(device)
     elif device.is_cuda and device.is_uva:
@@ -306,6 +309,10 @@ def from_torch(
 
     else:
         ptr = t.data_ptr()
+        device = device_from_torch(t.device)
+        if device.is_cpu:
+            # a CPU tensor may alias Metal memory (unified); recover the owning device by pointer
+            device = warp._src.context.runtime.device_for_host_pointer(ptr)
         capacity = 0
         if ptr:
             # A view's data pointer includes its storage offset. Warp capacity
@@ -321,7 +328,7 @@ def from_torch(
             shape=shape,
             strides=strides,
             capacity=capacity,
-            device=device_from_torch(t.device),
+            device=device,
             copy=False,
             grad=grad,
             requires_grad=requires_grad,
@@ -378,6 +385,15 @@ def to_torch(a: warp.array, requires_grad: bool | None = None):
         t._warp_array = a
         return t
 
+    if a.device.is_metal:
+        # unified memory: the tensor aliases the Metal array as CPU memory (synchronize before reading)
+        t = torch.as_tensor(a._metal_host_view())
+        t.requires_grad = requires_grad
+        if requires_grad and a.requires_grad:
+            t.grad = torch.as_tensor(a.grad._metal_host_view())
+            t.grad._warp_grad_array = a.grad
+        t._warp_array = a  # keep the Metal allocation alive as long as the tensor
+        return t
     if a.device.is_cpu:
         # Torch has an issue wrapping CPU objects
         # that support the __array_interface__ protocol

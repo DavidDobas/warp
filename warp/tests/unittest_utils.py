@@ -151,6 +151,13 @@ def get_cpu_test_devices():
     return []
 
 
+def get_metal_test_devices():
+    """Return a list containing the first Metal (Apple GPU) device when available."""
+    if wp.is_metal_available():
+        return [wp.get_device("metal:0")]
+    return []
+
+
 def get_test_devices(mode: str | None = None):
     """Return devices based on the selected mode.
 
@@ -171,11 +178,13 @@ def get_test_devices(mode: str | None = None):
     if mode == "basic":
         # only run on CPU and first GPU device
         devices.extend(get_cpu_test_devices())
+        devices.extend(get_metal_test_devices())
         if wp.is_cuda_available():
             devices.append(wp.get_device("cuda:0"))
     elif mode == "unique" or mode == "unique_or_2x":
         # run on CPU and a subset of GPUs
         devices.extend(get_cpu_test_devices())
+        devices.extend(get_metal_test_devices())
         devices.extend(get_selected_cuda_test_devices(mode))
     elif mode == "all":
         # run on all devices
@@ -275,6 +284,13 @@ def get_selected_cuda_test_devices_with_mempool(mode: str | None = None):
 
 
 class StreamCapture:
+    _active = []  # captures begun but not ended; closed by the test wrapper if a test raises mid-capture
+
+    @classmethod
+    def end_all(cls):
+        while cls._active:
+            cls._active[-1].end()
+
     def __init__(self, stream_name):
         self.stream_name = stream_name  # 'stdout' or 'stderr'
         self.saved = None
@@ -304,6 +320,7 @@ class StreamCapture:
         # Redirect the stream
         os.dup2(self.tempfile.fileno(), self.saved.fileno())
         setattr(sys, self.stream_name, self.tempfile)
+        StreamCapture._active.append(self)
 
     def end(self):
         # The following sleep doesn't seem to fix the test_print failure on Windows
@@ -318,6 +335,8 @@ class StreamCapture:
         # Restore the original stream
         os.dup2(self.target, self.saved.fileno())
         os.close(self.target)
+        if self in StreamCapture._active:
+            StreamCapture._active.remove(self)
 
         # Read the captured output
         self.tempfile.seek(0)
@@ -507,7 +526,13 @@ def create_test_func(func, device, check_output, device_check=None, enable_cpu_b
                     func(self, device, **kwargs)
             else:
                 func(self, device, **kwargs)
+        except RuntimeError as e:
+            # features a backend lacks (e.g. float64 on Metal) are skips, not errors
+            if "not supported on Metal" in str(e):
+                raise unittest.SkipTest(str(e)) from None
+            raise
         finally:
+            StreamCapture.end_all()  # a test that raised mid-capture must not leave stdout redirected
             wp.config.enable_cpu_blocks = previous_enable_cpu_blocks
 
     return test_func

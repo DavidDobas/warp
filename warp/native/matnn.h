@@ -18,8 +18,14 @@ template <bool transpose> CUDA_CALLABLE inline int dense_index(int rows, int col
 
 
 template <bool t1, bool t2, bool add>
-CUDA_CALLABLE inline void
-dense_gemm_impl(int m, int n, int p, const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C)
+CUDA_CALLABLE inline void dense_gemm_impl(
+    int m,
+    int n,
+    int p,
+    const float WP_DEVICE* __restrict__ A,
+    const float WP_DEVICE* __restrict__ B,
+    float WP_DEVICE* __restrict__ C
+)
 {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; ++j) {
@@ -39,8 +45,16 @@ dense_gemm_impl(int m, int n, int p, const float* __restrict__ A, const float* _
 
 
 template <bool add = false>
-CUDA_CALLABLE inline void
-dense_gemm(int m, int n, int p, int t1, int t2, const array_t<float>& A, const array_t<float>& B, array_t<float>& C)
+CUDA_CALLABLE inline void dense_gemm(
+    int m,
+    int n,
+    int p,
+    int t1,
+    int t2,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& B,
+    array_t<float> WP_THREAD& C
+)
 {
     if (t1 == 0 && t2 == 0)
         dense_gemm_impl<false, false, add>(m, n, p, A.data, B.data, C.data);
@@ -53,7 +67,9 @@ dense_gemm(int m, int n, int p, int t1, int t2, const array_t<float>& A, const a
 }
 
 
-void CUDA_CALLABLE inline dense_chol(int n, const array_t<float>& A, float regularization, array_t<float>& L)
+void CUDA_CALLABLE inline dense_chol(
+    int n, const array_t<float> WP_THREAD& A, float regularization, array_t<float> WP_THREAD& L
+)
 {
     for (int j = 0; j < n; ++j) {
         float s = A.data[dense_index(n, j, j)] + regularization;
@@ -82,7 +98,8 @@ void CUDA_CALLABLE inline dense_chol(int n, const array_t<float>& A, float regul
 
 
 // Solves (L*L^T)x = b given the Cholesky factor L
-CUDA_CALLABLE inline void dense_subs(int n, const array_t<float>& L, const array_t<float>& b, array_t<float>& x)
+CUDA_CALLABLE inline void
+dense_subs(int n, const array_t<float> WP_THREAD& L, const array_t<float> WP_THREAD& b, array_t<float> WP_THREAD& x)
 {
     // forward substitution
     for (int i = 0; i < n; ++i) {
@@ -107,8 +124,13 @@ CUDA_CALLABLE inline void dense_subs(int n, const array_t<float>& L, const array
     }
 }
 
-CUDA_CALLABLE inline void
-dense_solve(int n, const array_t<float>& A, const array_t<float>& L, const array_t<float>& b, array_t<float>& x)
+CUDA_CALLABLE inline void dense_solve(
+    int n,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& L,
+    const array_t<float> WP_THREAD& b,
+    array_t<float> WP_THREAD& x
+)
 {
     dense_subs(n, L, b, x);
 }
@@ -138,17 +160,17 @@ CUDA_CALLABLE inline void adj_dense_gemm(
     int p,
     int t1,
     int t2,
-    const array_t<float>& A,
-    const array_t<float>& B,
-    array_t<float>& C,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& B,
+    array_t<float> WP_THREAD& C,
     int adj_m,
     int adj_n,
     int adj_p,
     int adj_t1,
     int adj_t2,
-    array_t<float>& adj_A,
-    array_t<float>& adj_B,
-    const array_t<float>& adj_C
+    array_t<float> WP_THREAD& adj_A,
+    array_t<float> WP_THREAD& adj_B,
+    const array_t<float> WP_THREAD& adj_C
 )
 {
 
@@ -168,13 +190,13 @@ CUDA_CALLABLE inline void adj_dense_gemm(
 
 CUDA_CALLABLE inline void adj_dense_chol(
     int n,
-    const array_t<float>& A,
+    const array_t<float> WP_THREAD& A,
     float regularization,
-    array_t<float>& L,
+    array_t<float> WP_THREAD& L,
     int adj_n,
-    const array_t<float>& adj_A,
+    const array_t<float> WP_THREAD& adj_A,
     float adj_regularization,
-    array_t<float>& adj_L
+    array_t<float> WP_THREAD& adj_L
 )
 {
     // nop, use dense_solve to differentiate through (A^-1)b = x
@@ -182,13 +204,13 @@ CUDA_CALLABLE inline void adj_dense_chol(
 
 CUDA_CALLABLE inline void adj_dense_subs(
     int n,
-    const array_t<float>& L,
-    const array_t<float>& b,
-    array_t<float>& x,
+    const array_t<float> WP_THREAD& L,
+    const array_t<float> WP_THREAD& b,
+    array_t<float> WP_THREAD& x,
     int adj_n,
-    const array_t<float>& adj_L,
-    const array_t<float>& adj_b,
-    array_t<float>& adj_x
+    const array_t<float> WP_THREAD& adj_L,
+    const array_t<float> WP_THREAD& adj_b,
+    array_t<float> WP_THREAD& adj_x
 )
 {
     // nop, use dense_solve to differentiate through (A^-1)b = x
@@ -197,15 +219,15 @@ CUDA_CALLABLE inline void adj_dense_subs(
 
 CUDA_CALLABLE inline void adj_dense_solve(
     int n,
-    const array_t<float>& A,
-    const array_t<float>& L,
-    const array_t<float>& b,
-    const array_t<float>& x,
+    const array_t<float> WP_THREAD& A,
+    const array_t<float> WP_THREAD& L,
+    const array_t<float> WP_THREAD& b,
+    const array_t<float> WP_THREAD& x,
     int adj_n,
-    array_t<float>& adj_A,
-    array_t<float>& adj_L,
-    array_t<float>& adj_b,
-    const array_t<float>& adj_x
+    array_t<float> WP_THREAD& adj_A,
+    array_t<float> WP_THREAD& adj_L,
+    array_t<float> WP_THREAD& adj_b,
+    const array_t<float> WP_THREAD& adj_x
 )
 {
     // see https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pwp, section 2.3.1

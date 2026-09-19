@@ -66,7 +66,7 @@ template <typename T> struct fft_vec2_component<vec_t<2, T>> {
 // is computed incrementally from the previous step. The cooperative GPU path
 // uses a different (closed-form) bit-reverse since this one is inherently
 // serial.
-template <typename T> inline CUDA_CALLABLE void fft_bit_reverse_permute(vec_t<2, T>* x, int n)
+template <typename T> inline CUDA_CALLABLE void fft_bit_reverse_permute(vec_t<2, T> WP_THREAD* x, int n)
 {
     int j = 0;
     for (int i = 1; i < n; ++i) {
@@ -88,7 +88,7 @@ template <typename T> inline CUDA_CALLABLE void fft_bit_reverse_permute(vec_t<2,
 // direction_sign selects forward (-1) or inverse (+1).
 // Twiddles accumulate via w *= wm to amortize trig calls; this is inherently
 // serial across butterflies in a stage and would not survive parallelization.
-template <typename T> inline CUDA_CALLABLE void fft_radix2_inplace(vec_t<2, T>* x, int n, int direction_sign)
+template <typename T> inline CUDA_CALLABLE void fft_radix2_inplace(vec_t<2, T> WP_THREAD* x, int n, int direction_sign)
 {
     fft_bit_reverse_permute<T>(x, n);
 
@@ -131,7 +131,7 @@ template <typename T> inline CUDA_CALLABLE void fft_radix2_inplace(vec_t<2, T>* 
 #define WP_FFT_CPU_MAX_DFT_SIZE 4096
 
 // Naive O(N^2) DFT fallback for non-power-of-two sizes (CPU only).
-template <typename T> inline CUDA_CALLABLE void fft_dft_inplace(vec_t<2, T>* x, int n, int direction_sign)
+template <typename T> inline CUDA_CALLABLE void fft_dft_inplace(vec_t<2, T> WP_THREAD* x, int n, int direction_sign)
 {
     assert(n <= WP_FFT_CPU_MAX_DFT_SIZE);
 
@@ -163,7 +163,7 @@ template <typename T> inline CUDA_CALLABLE void fft_dft_inplace(vec_t<2, T>* x, 
 }
 
 // Single-batch in-place FFT dispatcher used by the CPU implementation.
-template <typename T> inline CUDA_CALLABLE void fft_inplace(vec_t<2, T>* x, int n, int direction_sign)
+template <typename T> inline CUDA_CALLABLE void fft_inplace(vec_t<2, T> WP_THREAD* x, int n, int direction_sign)
 {
     if (fft_log2_pow2(n) >= 0) {
         fft_radix2_inplace<T>(x, n, direction_sign);
@@ -175,7 +175,7 @@ template <typename T> inline CUDA_CALLABLE void fft_inplace(vec_t<2, T>* x, int 
 // CPU entry point — block_dim==1, contiguous register-tile data.
 // direction_sign: -1 = forward, +1 = inverse (both unnormalized).
 template <int DirectionSign, typename Complex>
-inline CUDA_CALLABLE void tile_fft_cpu_impl(int batch, int fft_size, Complex* data)
+inline CUDA_CALLABLE void tile_fft_cpu_impl(int batch, int fft_size, Complex WP_THREAD* data)
 {
     using T = typename fft_vec2_component<Complex>::type;
     for (int b = 0; b < batch; ++b) {
@@ -205,7 +205,7 @@ inline CUDA_CALLABLE int fft_bitrev(int i, int log_n)
 // Twiddles are recomputed per butterfly because the incremental w *= wm
 // accumulator used on CPU is inherently serial.
 template <typename T>
-inline CUDA_CALLABLE void cooperative_fft_radix2(vec_t<2, T>* x, int n, int log_n, int direction_sign)
+inline CUDA_CALLABLE void cooperative_fft_radix2(vec_t<2, T> WP_TILE_SHARED* x, int n, int log_n, int direction_sign)
 {
     // Bit-reverse permutation — thread t handles indices i where i % BLOCK_DIM == t.
     // The `i < j` filter ensures each pair is swapped exactly once.
@@ -261,15 +261,16 @@ inline CUDA_CALLABLE void cooperative_fft_radix2(vec_t<2, T>* x, int n, int log_
 // Power-of-two fft_size only; the Python dispatch raises a clear error for
 // other sizes and points at MathDx or the CPU path.
 template <int DirectionSign, typename Complex, typename Tile>
-inline CUDA_CALLABLE void tile_fft_gpu_impl(int batch, int ept, int shared_bytes, Tile& Xinout)
+inline CUDA_CALLABLE void
+tile_fft_gpu_impl(WP_TILE_ARENA_PARAM int batch, int ept, int shared_bytes, Tile WP_THREAD& Xinout)
 {
     using T = typename fft_vec2_component<Complex>::type;
     const int fft_size = ept * WP_TILE_BLOCK_DIM;
     const int log_n = fft_log2_pow2(fft_size);
     assert(log_n >= 0);  // dispatch should have rejected non-pow-2
 
-    char* scratch_bytes = (char*)wp::tile_shared_storage_t::alloc(shared_bytes);
-    Complex* scratch = reinterpret_cast<Complex*>(scratch_bytes);
+    char WP_TILE_SHARED* scratch_bytes = (char WP_TILE_SHARED*)WP_TILE_ALLOC(shared_bytes);
+    Complex WP_TILE_SHARED* scratch = (Complex WP_TILE_SHARED*)scratch_bytes;
 
     for (int b = 0; b < batch; ++b) {
         // Scatter strided register layout to contiguous shared memory.
@@ -283,7 +284,7 @@ inline CUDA_CALLABLE void tile_fft_gpu_impl(int batch, int ept, int shared_bytes
         }
         WP_TILE_SYNC();
 
-        cooperative_fft_radix2<T>(reinterpret_cast<vec_t<2, T>*>(scratch), fft_size, log_n, DirectionSign);
+        cooperative_fft_radix2<T>((vec_t<2, T> WP_TILE_SHARED*)scratch, fft_size, log_n, DirectionSign);
 
         for (int r_in = 0; r_in < ept; ++r_in) {
             const int reg = b * ept + r_in;
@@ -293,7 +294,7 @@ inline CUDA_CALLABLE void tile_fft_gpu_impl(int batch, int ept, int shared_bytes
         WP_TILE_SYNC();
     }
 
-    wp::tile_shared_storage_t::alloc(-shared_bytes);
+    WP_TILE_ALLOC(-shared_bytes);
 }
 
 // =============================================================================
@@ -310,7 +311,8 @@ inline CUDA_CALLABLE void tile_fft_gpu_impl(int batch, int ept, int shared_bytes
 // `Complex data[Ept]` without a VLA and so the call has a stable type.
 
 template <int DirectionSign, typename Complex, int Ept, typename Fwd, typename Tile>
-inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int batch, Tile& Xinout)
+inline CUDA_CALLABLE void
+tile_fft_entry(WP_TILE_ARENA_PARAM Fwd fun_forward, int shared_bytes, int batch, Tile WP_THREAD& Xinout)
 {
     if constexpr (wp_is_null_func<Fwd>::value) {
 #if !defined(__CUDA_ARCH__)
@@ -320,27 +322,27 @@ inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int 
         } else {
             // Register tiles are distributed across CPU fibers, so scatter to
             // one shared buffer and use the cooperative butterfly path.
-            tile_fft_gpu_impl<DirectionSign, Complex>(batch, Ept, shared_bytes, Xinout);
+            tile_fft_gpu_impl<DirectionSign, Complex>(WP_TILE_ARENA_ARG batch, Ept, shared_bytes, Xinout);
         }
 #else
         // GPU cooperative on a shared-memory scratch.
-        tile_fft_gpu_impl<DirectionSign, Complex>(batch, Ept, shared_bytes, Xinout);
+        tile_fft_gpu_impl<DirectionSign, Complex>(WP_TILE_ARENA_ARG batch, Ept, shared_bytes, Xinout);
 #endif
     } else {
         // GPU cuFFTDx LTO — call the per-batch LTO function with a per-thread
         // register staging buffer, exactly the original macro body.
-        char* buffer = (char*)wp::tile_shared_storage_t::alloc(shared_bytes);
+        char WP_TILE_SHARED* buffer = (char WP_TILE_SHARED*)WP_TILE_ALLOC(shared_bytes);
         // TODO(lcambier): use a properly overaligned complex type that matches
         // cuFFTDx's expectation and remove the need for alignas(16).
         alignas(16) Complex data[Ept];
         for (int b = 0; b < batch; ++b) {
-            Complex* inout = Xinout.data + b * Ept;
+            Complex WP_THREAD* inout = Xinout.data + b * Ept;
             memcpy(data, inout, sizeof(Complex) * Ept);
             fun_forward(data, buffer);
             memcpy(inout, data, sizeof(Complex) * Ept);
             WP_TILE_SYNC();
         }
-        wp::tile_shared_storage_t::alloc(-shared_bytes);
+        WP_TILE_ALLOC(-shared_bytes);
     }
 }
 
@@ -355,11 +357,11 @@ inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int 
 // The Python dispatch passes a literal `0` for both when no LTO is generated.
 
 #define tile_fft(function_name, backward_function_name, dtype, shared_memory_size, batch_size, ept, Xinout) \
-     wp::tile_fft_entry<-1, dtype, (int)(ept)>( \
+     wp::tile_fft_entry<-1, dtype, (int)(ept)>(WP_TILE_ARENA_ARG \
          function_name, (int)(shared_memory_size), (int)(batch_size), Xinout)
 
 #define tile_ifft(function_name, backward_function_name, dtype, shared_memory_size, batch_size, ept, Xinout) \
-     wp::tile_fft_entry<+1, dtype, (int)(ept)>( \
+     wp::tile_fft_entry<+1, dtype, (int)(ept)>(WP_TILE_ARENA_ARG \
          function_name, (int)(shared_memory_size), (int)(batch_size), Xinout)
 
 // Adjoint of FFT is IFFT (unnormalized) on the output gradient — the +1
@@ -368,7 +370,7 @@ inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int 
     function_name, backward_function_name, dtype, shared_memory_size, batch_size, ept, Xinout, adj_function_name,      \
     adj_backward_function_name, adj_dtype, adj_shared_memory_size, adj_batch_size, adj_ept, adj_Xinout                 \
 ) \
-     wp::tile_fft_entry<+1, dtype, (int)(ept)>( \
+     wp::tile_fft_entry<+1, dtype, (int)(ept)>(WP_TILE_ARENA_ARG \
          backward_function_name, (int)(shared_memory_size), (int)(batch_size), adj_Xinout)
 
 // Adjoint of IFFT is FFT (unnormalized) on the output gradient — the -1
@@ -377,5 +379,5 @@ inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int 
     function_name, backward_function_name, dtype, shared_memory_size, batch_size, ept, Xinout, adj_function_name,      \
     adj_backward_function_name, adj_dtype, adj_shared_memory_size, adj_batch_size, adj_ept, adj_Xinout                 \
 ) \
-     wp::tile_fft_entry<-1, dtype, (int)(ept)>( \
+     wp::tile_fft_entry<-1, dtype, (int)(ept)>(WP_TILE_ARENA_ARG \
          backward_function_name, (int)(shared_memory_size), (int)(batch_size), adj_Xinout)

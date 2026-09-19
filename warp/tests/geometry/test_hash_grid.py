@@ -564,7 +564,9 @@ def test_hashgrid_saveable_capture_unsupported(test, device):
     points = wp.array([[0.0, 0.0, 0.0]], dtype=wp.vec3, device=device)
     grid = wp.HashGrid(16, 16, 16, device=device)
 
-    with test.assertRaisesRegex(NotImplementedError, "HashGrid serialization is not yet supported"):
+    with test.assertRaisesRegex(
+        NotImplementedError, "HashGrid serialization is not yet supported|not supported on Metal devices"
+    ):
         with wp.ScopedCapture(device=device, apic=True, force_module_load=False):
             grid.build(points, 1.0)
 

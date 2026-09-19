@@ -33,7 +33,7 @@ on platforms with NVIDIA CUDA support. The following table summarizes platform s
     +---------------------+--------------+----------------------+--------------------+---------------------+
     | **Linux**           | ``aarch64``  | Jetson / Server      | Supported ✅       | CUDA                |
     +---------------------+--------------+----------------------+--------------------+---------------------+
-    | **macOS**           | ``arm64``    | Apple Silicon        | Supported ✅       | CPU Only            |
+    | **macOS**           | ``arm64``    | Apple Silicon        | Supported ✅       | Metal (from source) |
     +---------------------+--------------+----------------------+--------------------+---------------------+
     | **macOS**           | ``x86-64``   | Intel-based Mac      | Discontinued       | None                |
     +---------------------+--------------+----------------------+--------------------+---------------------+

@@ -1092,9 +1092,12 @@ class KernelHooks:
         det_launch_meta: DeterministicMeta | None = None,
         forward_smem_shortfall: str | None = None,
         backward_smem_shortfall: str | None = None,
+        metal_unsupported: str | None = None,
     ):
         self.forward = forward
         self.backward = backward
+        # builtins without a Metal implementation reached by the kernel; launching raises (see invoke_metal)
+        self.metal_unsupported = metal_unsupported
 
         self.forward_smem_bytes = forward_smem_bytes
         self.backward_smem_bytes = backward_smem_bytes
@@ -2995,6 +2998,31 @@ def _verify_library_version(lib, library_name: str, version_symbol: str, expecte
 # other modules.  The module hash is computed in the constructor and can be retrieved
 # using get_hash().  In addition, the ModuleHasher takes care of filtering out
 # duplicate kernels for codegen (see get_unique_kernels()).
+@functools.cache
+def native_headers_digest() -> bytes:
+    """Digest of the native headers that generated kernel code is compiled against.
+
+    Part of every module hash, so that cached kernels are not reused after the headers change.
+    The Warp version does not capture this: the headers change while developing the native
+    library, and a package that overlays Warp with another set of headers (as the Metal backend
+    can be shipped) shares the version, and therefore the kernel cache directory, with the stock
+    package. Metal modules are cached as source with the headers inlined, so a stale entry
+    would silently keep running the old library code.
+    """
+    native_dir = os.path.join(warp_home, "native")
+    digest = hashlib.sha256()
+    for directory in (native_dir, os.path.join(native_dir, "nanovdb")):
+        try:
+            names = sorted(name for name in os.listdir(directory) if name.endswith(".h"))
+        except OSError:
+            continue
+        for name in names:
+            with open(os.path.join(directory, name), "rb") as f:
+                digest.update(name.encode("utf-8"))
+                digest.update(f.read())
+    return digest.digest()
+
+
 class ModuleHasher:
     def __init__(self, kernels, options):
         # Hashing another block-size variant can change the shared Kernel.hash
@@ -3053,6 +3081,9 @@ class ModuleHasher:
         for opt in sorted(options.keys()):
             s = f"{opt}:{options[opt]}"
             ch.update(bytes(s, "utf-8"))
+
+        # the native headers the kernels compile against (see native_headers_digest())
+        ch.update(native_headers_digest())
 
         # Note: cuda_output defaults to None in the options dict and is not
         # resolved before hashing, so modules with different cuda_output
@@ -3278,12 +3309,13 @@ class ModuleHasher:
 
 
 class ModuleBuilder:
-    def __init__(self, module, options, hasher=None):
+    def __init__(self, module, options, hasher=None, device="cpu"):
         self.functions = {}
         self.structs = {}
         self.native_types = {}
         self.options = options
         self.module = module
+        self.device = device  # codegen target: "cpu", "cuda" or "metal"
         self.deferred_functions = []
         self.fatbins = {}  # map from <some identifier> to fatbins, to add at link time
         self.ltoirs = {}  # map from lto symbol to lto binary
@@ -3545,7 +3577,7 @@ class ModuleBuilder:
         source = ""
         for func in functions:
             if func.native_snippet is None:
-                source += warp._src.codegen.codegen_func(
+                func_source = warp._src.codegen.codegen_func(
                     func.adj,
                     c_func_name=func.native_func,
                     device=device,
@@ -3554,6 +3586,11 @@ class ModuleBuilder:
                     reverse_only=reverse_only,
                     inline_hint=func.inline_hint,
                 )
+                if device == "metal" and self._metal_unsupported_reason(func_source):
+                    # Metal has no float64; drop the function so the rest of the module still compiles.
+                    self.metal_skipped.add(func.native_func)
+                    continue
+                source += func_source
             else:
                 source += warp._src.codegen.codegen_snippet(
                     func.adj,
@@ -3566,8 +3603,19 @@ class ModuleBuilder:
                 )
         return source
 
+    def _metal_unsupported_reason(self, source: str) -> str | None:
+        """Why a generated function or kernel cannot be compiled for Metal, or None."""
+        code = re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.S)  # comments echo the Python source
+        if re.search(r"\bfloat64\b|\bdouble\b", code):  # whole tokens: not names that merely contain them
+            return "float64"
+        for name in self.metal_skipped:
+            if re.search(rf"\b{re.escape(name)}\b", code):
+                return f"{name} (float64)"
+        return None
+
     def codegen(self, device):
         source = ""
+        self.metal_skipped: set[str] = set()  # native names of functions dropped for Metal
         constant_params_ctype = None
 
         if device != "cpu":
@@ -3645,10 +3693,16 @@ class ModuleBuilder:
         for struct in self.structs.keys():
             # avoid emitting duplicates
             if struct.hash not in visited_structs:
-                source += warp._src.codegen.codegen_struct(
+                struct_source = warp._src.codegen.codegen_struct(
                     struct,
                     include_tile_helpers=struct.hash in tile_helper_structs,
                 )
+                if device == "metal" and ("float64" in struct_source or self._metal_unsupported_reason(struct_source)):
+                    # no float64 on Metal; structs nesting a dropped struct are dropped with it, and
+                    # functions and kernels that use them are dropped by name below
+                    self.metal_skipped.add(struct.native_name)
+                    struct_source = ""
+                source += struct_source
                 visited_structs.add(struct.hash)
 
         if constant_params_ctype is not None:
@@ -3684,6 +3738,7 @@ class ModuleBuilder:
 
         # Generate adjoints: custom grads first, then other functions
         # This ensures custom grads are defined before any auto-adjoints that call them
+        # (Metal kernels are forward-only, so no adjoints are generated for that target)
         source += self._codegen_functions(custom_grad_functions + other_functions, device, reverse_only=True)
 
         # Pass 3: Forward functions that use wp.grad()
@@ -3691,12 +3746,20 @@ class ModuleBuilder:
         source += self._codegen_functions(grad_functions, device, forward_only=True)
 
         for kernel in self.kernels:
-            source += warp._src.codegen.codegen_kernel(kernel, device=device, options=self.options)
-            source += warp._src.codegen.codegen_module(kernel, device=device, options=self.options)
+            kernel_source = warp._src.codegen.codegen_kernel(kernel, device=device, options=self.options)
+            kernel_source += warp._src.codegen.codegen_module(kernel, device=device, options=self.options)
+            if device == "metal":
+                reason = self._metal_unsupported_reason(kernel_source)
+                if reason:
+                    # same marker as codegen_module writes for unsupported builtins: launching raises
+                    kernel_source = f"// wp_metal_unsupported {kernel.get_mangled_name()}: {reason}\n"
+            source += kernel_source
 
         # Detect whether this module uses bfloat16; if not, define WP_NO_BFLOAT16
         # to skip compiling bfloat16 overloads in builtin.h (significant LLVM speedup).
         type_defines = "" if "bfloat16" in source else "#define WP_NO_BFLOAT16\n"
+        if device == "metal" and self.options.get("verify_fp"):
+            type_defines += "#define WP_VERIFY_FP\n"  # CPU/CUDA pass this as a compiler flag
 
         # add headers
         #
@@ -3704,7 +3767,7 @@ class ModuleBuilder:
         # Warp's macros (CUDA_CALLABLE and friends) and so the CPU and CUDA backends agree.
         # Codegen-only cast macros follow the preamble so they do not rewrite ordinary C++
         # function-style casts in external headers.
-        if device == "cpu":
+        if device in ("cpu", "metal"):
             extra_preamble = self.options.get("extra_cpu_preamble", "")
             module_header = warp._src.codegen.cpu_module_header.format(block_dim=self.options["block_dim"])
         else:
@@ -3712,6 +3775,11 @@ class ModuleBuilder:
             module_header = warp._src.codegen.cuda_module_header.format(block_dim=self.options["block_dim"])
 
         source = type_defines + module_header + extra_preamble + warp._src.codegen.codegen_cast_macros + source
+
+        if device == "metal":
+            # Metal compiles from an in-memory string without include paths
+            source = warp._src.build.expand_includes(source)
+            source = warp._src.build.metal_rewrite_printf(source)  # shader logging has no %s
 
         return source
 
@@ -3752,6 +3820,10 @@ class ModuleExec:
         self.meta = meta
         self.block_dim = block_dim
         self.det_launch_meta_map = det_launch_meta_map if det_launch_meta_map is not None else {}
+        # Metal: kernel name -> builtins it reaches that have no Metal implementation
+        self.metal_unsupported: dict[str, str] = {}
+        self.metal_backward_unsupported: set[str] = set()  # kernels whose adjoint cannot run on Metal (tiles)
+        self.metal_backward_error: str | None = None  # compile error that forced a forward-only build
         # Compute capability the loaded binary was actually compiled for (None for
         # CPU). Cluster classification must use this frozen target, not the current
         # global config, which can change after the module is loaded.
@@ -3765,6 +3837,8 @@ class ModuleExec:
                     # use CUDA context guard to avoid side effects during garbage collection
                     with self.device.context_guard:
                         runtime.core.wp_cuda_unload_module(self.device.context, self.handle)
+                elif self.device.is_metal:
+                    runtime.core.wp_metal_unload_library(self.handle)
                 else:
                     runtime.llvm.wp_unload_obj(self.handle.encode("utf-8"))
             except (TypeError, AttributeError):
@@ -3914,6 +3988,30 @@ class ModuleExec:
                 det_launch_meta=self.det_launch_meta_map.get(name),
                 forward_smem_shortfall=forward_smem_shortfall,
                 backward_smem_shortfall=backward_smem_shortfall,
+            )
+
+        elif self.device.is_metal:
+            unsupported = self.metal_unsupported.get(name)
+            forward = (
+                None
+                if unsupported
+                else runtime.core.wp_metal_get_kernel(self.handle, (name + "_metal_forward").encode("utf-8"))
+            )
+            if not forward and not unsupported:
+                raise RuntimeError(
+                    f"Failed to load kernel '{kernel.key}' on device '{self.device}': {runtime.get_error_string()}"
+                )
+            backward = None
+            backward_name = warp._src.codegen.cuda_kernel_backward_name(kernel)
+            if options["enable_backward"] and not unsupported and name not in self.metal_backward_unsupported:
+                backward = runtime.core.wp_metal_get_kernel(self.handle, (name + "_metal_backward").encode("utf-8"))
+            hooks = KernelHooks(
+                forward,
+                backward,
+                forward_smem_bytes=self.meta.get(warp._src.codegen.cuda_kernel_forward_name(kernel) + "_smem_bytes", 0),
+                backward_smem_bytes=self.meta.get(backward_name + "_smem_bytes", 0),
+                det_launch_meta=self.det_launch_meta_map.get(name),
+                metal_unsupported=unsupported,
             )
 
         else:
@@ -4487,6 +4585,10 @@ class Module:
         """
         module_name_short = self.get_module_identifier(block_dim=block_dim)
 
+        if device and device.is_metal:
+            # Metal libraries are compiled from source when the module is loaded.
+            return f"{module_name_short}.metal"
+
         if device and device.is_cpu:
             resolved_flags = _resolve_cpu_compiler_flags(
                 self.options["cpu_compiler_flags"], warp.config.cpu_compiler_flags
@@ -4529,12 +4631,14 @@ class Module:
 
         return output_name
 
-    def _get_meta_name(self, block_dim: int | None = None) -> str:
+    def _get_meta_name(self, block_dim: int | None = None, device: Device | None = None) -> str:
         """Get the filename to use for the module metadata file.
 
-        This is only the filename. It should be used to form a path.
+        This is only the filename. It should be used to form a path. Metal builds size their
+        threadgroup scratch differently from the CPU/CUDA builds, so they keep their own file.
         """
-        return f"{self.get_module_identifier(block_dim=block_dim)}.meta"
+        ext = ".metal.meta" if device is not None and device.is_metal else ".meta"
+        return f"{self.get_module_identifier(block_dim=block_dim)}{ext}"
 
     @staticmethod
     def _write_meta(output_meta_path: str | os.PathLike, meta: dict) -> None:
@@ -4550,7 +4654,9 @@ class Module:
             self.failed_builds[(device.context, active_block_dim)] = error
 
     @synchronized(_codegen_lock)
-    def _run_codegen(self, options: dict, is_cpu: bool) -> tuple[str, str, dict, list, list]:
+    def _run_codegen(
+        self, options: dict, target: str | None = None, *, is_cpu: bool | None = None
+    ) -> tuple[str, str, dict, list, list]:
         """Run the Python-side codegen window.
 
         Returns ``(source, ext, meta, ltoirs, fatbins)``: the emitted C++/CUDA
@@ -4563,17 +4669,20 @@ class Module:
         Clang invocation runs after this returns, so N modules still compile
         in parallel -- only the cheap codegen window serialises.
         """
+        if target is None:
+            target = "cpu" if is_cpu else "cuda"  # ``is_cpu`` is the upstream signature
+
+        if target == "metal":
+            # deterministic gradient scatter (deterministic.h) is not ported to Metal yet
+            options = options | {"deterministic": warp.config.DeterministicMode.NOT_GUARANTEED}
         builder = ModuleBuilder(
             self,
             options,
             hasher=self.hashers.get(options["block_dim"], None),
+            device=target,
         )
-        if is_cpu:
-            ext = "cpp"
-            source = builder.codegen("cpu")
-        else:
-            ext = "cu"
-            source = builder.codegen("cuda")
+        ext = {"cpu": "cpp", "cuda": "cu", "metal": "metal"}[target]
+        source = builder.codegen(target)
         meta = builder.build_meta()
         ltoirs, fatbins = builder.get_link_inputs()
         return source, ext, meta, ltoirs, fatbins
@@ -4612,8 +4721,12 @@ class Module:
         if output_arch is None:
             output_arch = self._get_compile_arch(device)  # Will remain at None if device is CPU
 
-        # output_arch is None for CPU targets, set to a SM architecture for CUDA
-        is_cpu = output_arch is None
+        # output_arch is None for CPU and Metal targets, set to a SM architecture for CUDA
+        if device is not None and device.is_metal:
+            target = "metal"
+        else:
+            target = "cpu" if output_arch is None else "cuda"
+        is_cpu = target != "cuda"
 
         options = options | {"output_arch": output_arch}
 
@@ -4678,7 +4791,7 @@ class Module:
             warp.config.cache_kernels
             and not options.get("verify_autograd_array_access", False)
             and os.path.exists(os.path.join(output_dir, output_name))
-            and os.path.exists(os.path.join(output_dir, self._get_meta_name(block_dim=active_block_dim)))
+            and os.path.exists(os.path.join(output_dir, self._get_meta_name(block_dim=active_block_dim, device=device)))
         ):
             return False
 
@@ -4693,12 +4806,12 @@ class Module:
         # failing kernel and continuing would leave the module claiming
         # kernels its binary does not contain.
         try:
-            source_str, source_code_ext, meta, ltoir_values, fatbin_values = self._run_codegen(options, is_cpu)
+            source_str, source_code_ext, meta, ltoir_values, fatbin_values = self._run_codegen(options, target)
         except Exception as e:
-            self._record_build_failure(device, is_cpu, active_block_dim, e)
+            self._record_build_failure(device, target == "cpu", active_block_dim, e)
             raise
 
-        meta_path = os.path.join(output_dir, self._get_meta_name(block_dim=active_block_dim))
+        meta_path = os.path.join(output_dir, self._get_meta_name(block_dim=active_block_dim, device=device))
 
         build_dir = os.path.normpath(output_dir) + f"_p{os.getpid()}_t{threading.get_ident()}"
 
@@ -4737,13 +4850,15 @@ class Module:
             try:
                 _check_and_raise_long_path_error(e)
             except Exception as reported:
-                self._record_build_failure(device, is_cpu, active_block_dim, reported)
+                self._record_build_failure(device, target == "cpu", active_block_dim, reported)
                 raise
 
         output_path = os.path.join(build_dir, output_name)
 
         try:
-            if is_cpu:
+            if target == "metal":
+                pass  # the generated source is the cached artifact; it is compiled at load time
+            elif is_cpu:
                 # build object code
                 with warp.ScopedTimer("Compile x86", active=warp.config.log_level <= warp.LOG_DEBUG):
                     warp._src.build.build_cpu(
@@ -4797,17 +4912,17 @@ class Module:
                 try:
                     _check_and_raise_long_path_error(e)
                 except Exception as reported:
-                    self._record_build_failure(device, is_cpu, active_block_dim, reported)
+                    self._record_build_failure(device, target == "cpu", active_block_dim, reported)
                     raise
 
-            self._record_build_failure(device, is_cpu, active_block_dim, e)
+            self._record_build_failure(device, target == "cpu", active_block_dim, e)
 
             raise (e)
 
         # ------------------------------------------------------------
         # write meta data (already produced by ``_run_codegen`` above)
 
-        output_meta_path = os.path.join(build_dir, self._get_meta_name(block_dim=active_block_dim))
+        output_meta_path = os.path.join(build_dir, self._get_meta_name(block_dim=active_block_dim, device=device))
 
         self._write_meta(output_meta_path, meta)
 
@@ -4938,7 +5053,7 @@ class Module:
                 output_arch = self._get_compile_arch(device)
 
                 module_dir = os.path.join(warp.config.kernel_cache_dir, module_name_short)
-                meta_path = os.path.join(module_dir, self._get_meta_name(block_dim=active_block_dim))
+                meta_path = os.path.join(module_dir, self._get_meta_name(block_dim=active_block_dim, device=device))
                 binary_path = os.path.join(module_dir, output_name)
 
                 try:
@@ -4984,6 +5099,59 @@ class Module:
                     self.hashers[active_block_dim].kernel_hashes,
                 )
                 self.execs[(None, active_block_dim)] = module_exec
+
+            elif device.is_metal:
+                with open(binary_path, encoding="utf-8") as source_file:
+                    source = source_file.read()
+                handle = runtime.core.wp_metal_load_library(device.metal_ordinal, source.encode("utf-8"))
+                backward_error = None
+                if not handle and options["enable_backward"]:
+                    # an adjoint that does not compile on Metal must not take the forward kernels with it:
+                    # rebuild forward-only and refuse backward launches of this module with the reason
+                    backward_error = runtime.get_error_string()
+                    # codegen names the source after the module, so replace the cached file in place
+                    os.remove(binary_path)
+                    self._compile(
+                        device,
+                        module_dir,
+                        output_name,
+                        output_arch,
+                        options=options | {"enable_backward": False, "metal_forward_only": True},
+                    )
+                    with open(binary_path, encoding="utf-8") as source_file:
+                        source = source_file.read()
+                    handle = runtime.core.wp_metal_load_library(device.metal_ordinal, source.encode("utf-8"))
+                if not handle:
+                    module_load_timer.extra_msg = " (error)"
+                    raise Exception(
+                        f"Failed to compile Metal module '{self.name}' ({module_load_diagnostics}):\n"
+                        f"{runtime.get_error_string()}"
+                    )
+                # markers written by codegen_kernel for kernels that reach unsupported builtins
+                metal_unsupported = dict(re.findall(r"^// wp_metal_unsupported (\S+): (.*)$", source, re.M))
+                metal_backward_unsupported = set(re.findall(r"^// wp_metal_backward_unsupported (\S+)$", source, re.M))
+                if backward_error is not None:
+                    warp._src.logger.log_warning(
+                        f"Backward kernels of module '{self.name}' are not available on Metal (forward-only build used):\n"
+                        f"{backward_error[:2000]}"
+                    )
+                    metal_backward_unsupported = {
+                        k.get_mangled_name() for k in self.kernels.values() if k.hash is not None
+                    }
+                module_exec = ModuleExec(
+                    handle,
+                    module_hash,
+                    device,
+                    meta,
+                    active_block_dim,
+                    output_arch,
+                    det_launch_meta_map,
+                    self.hashers[active_block_dim].kernel_hashes,
+                )
+                module_exec.metal_unsupported = metal_unsupported
+                module_exec.metal_backward_unsupported = metal_backward_unsupported
+                module_exec.metal_backward_error = backward_error  # set when the adjoints failed to compile
+                self.execs[(device.context, active_block_dim)] = module_exec
 
             elif device.is_cuda:
                 cuda_module = warp._src.build.load_cuda(binary_path, device)
@@ -5217,6 +5385,30 @@ class CpuPinnedAllocator:
 
     def deallocate(self, ptr, size_in_bytes):
         runtime.core.wp_free_pinned(ptr)
+
+
+class MetalDefaultAllocator:
+    """Allocates shared-storage Metal buffers; the returned pointers are host-accessible (unified memory)."""
+
+    deallocate_requires_context_guard = False
+    memory_kind = MemoryKind.HOST
+
+    def __init__(self, device):
+        if not device.is_metal:
+            raise ValueError(f"MetalDefaultAllocator requires a Metal device, got '{device}'")
+        self.device = device
+
+    def allocate(self, size_in_bytes):
+        ptr = runtime.core.wp_alloc_metal(self.device.metal_ordinal, size_in_bytes)
+        if not ptr:
+            raise RuntimeError(
+                f"Failed to allocate {size_in_bytes} bytes on device '{self.device}': {runtime.get_error_string()}"
+            )
+        _set_alloc_tag_if_tracking(ptr)
+        return ptr
+
+    def deallocate(self, ptr, size_in_bytes):
+        runtime.core.wp_free_metal(self.device.metal_ordinal, ptr)
 
 
 class CudaDefaultAllocator:
@@ -5700,11 +5892,12 @@ class Device:
             ``domain``, ``bus``, and ``device`` are all hexadecimal values. ``None`` for CPU devices.
     """
 
-    def __init__(self, runtime, alias, ordinal=-1, is_primary=False, context=None):
+    def __init__(self, runtime, alias, ordinal=-1, is_primary=False, context=None, metal_ordinal=None):
         self.runtime = runtime
         self.alias = alias
         self.ordinal = ordinal
         self.is_primary = is_primary
+        self.metal_ordinal = metal_ordinal
 
         # context can be None to avoid acquiring primary contexts until the device is used
         self._context = context
@@ -5748,8 +5941,11 @@ class Device:
             self.memset = runtime.core.wp_memset_host
             self.memtile = runtime.core.wp_memtile_host
 
-            self.default_allocator = CpuDefaultAllocator(self)
-            self.pinned_allocator = CpuPinnedAllocator(self)
+            if metal_ordinal is not None:
+                self._init_metal()
+            else:
+                self.default_allocator = CpuDefaultAllocator(self)
+                self.pinned_allocator = CpuPinnedAllocator(self)
 
         elif ordinal >= 0 and ordinal < runtime.core.wp_cuda_device_get_count():
             # CUDA device
@@ -5826,6 +6022,54 @@ class Device:
         else:
             raise RuntimeError(f"Invalid device ordinal ({ordinal})'")
 
+    def _init_metal(self):
+        """Specialize a CPU-like device as an Apple GPU: unified memory, GPU kernel execution."""
+        core = self.runtime.core
+        ordinal = self.metal_ordinal
+        self.name = core.wp_metal_device_get_name(ordinal).decode()
+        self.max_shared_memory_per_block = core.wp_metal_device_get_max_threadgroup_memory(ordinal)
+        self.sm_count = core.wp_metal_device_get_core_count(ordinal) or 8  # GPU cores stand in for SMs
+        self.is_uva = True
+        # No CUDA context; native wp_*_device() entry points decode this as the Metal ordinal (metal_host.h).
+        self._context = ordinal + 1
+        self.default_allocator = MetalDefaultAllocator(self)
+        self.pinned_allocator = self.default_allocator
+        # Memory operations run on the GPU, ordered with kernel launches.
+        self.memset = self._metal_op(core.wp_metal_memset)
+        self.memtile = self._metal_op(core.wp_metal_memtile)
+
+    def _metal_op(self, native_op):
+        def run(*args):
+            if native_op(self.metal_ordinal, *args) != 0:
+                raise RuntimeError(f"Metal error on device {self}: {self.runtime.get_error_string()}")
+
+        return run
+
+    def metal_synchronize(self):
+        """Wait for all outstanding GPU work on this Metal device, raising on GPU errors."""
+        if self.runtime.core.wp_metal_synchronize(self.metal_ordinal) != 0:
+            raise RuntimeError(f"Metal error on device {self}: {self.runtime.get_error_string()}")
+
+    def metal_import_host_memory(self, ptr: int, size: int) -> bool:
+        """Make ``size`` bytes of host memory at ``ptr`` addressable by kernels on this Metal device.
+
+        Unified memory lets Metal kernels use NumPy or Torch memory in place; the pages are wrapped
+        without copying. Returns True when :meth:`metal_release_host_memory` must be called later.
+        """
+        code = self.runtime.core.wp_metal_import_host_memory(self.metal_ordinal, ptr, size)
+        if code == 0:
+            raise RuntimeError(f"Metal error on device {self}: {self.runtime.get_error_string()}")
+        return code == 2
+
+    def metal_release_host_memory(self, ptr: int, size: int):
+        self.runtime.core.wp_metal_release_host_memory(self.metal_ordinal, ptr, size)
+
+    def metal_record_host_call(self, fn, *args) -> bool:
+        """Record a native host function call into the Metal graph being captured; False if not capturing."""
+        values = (ctypes.c_uint64 * max(len(args), 1))(*[int(a) & 0xFFFFFFFFFFFFFFFF for a in args])
+        address = ctypes.cast(fn, ctypes.c_void_p).value
+        return bool(self.runtime.core.wp_metal_capture_host_call(self.metal_ordinal, address, values, len(args)))
+
     def get_allocator(self, pinned: bool = False):
         """Get the memory allocator for this device.
 
@@ -5859,12 +6103,17 @@ class Device:
     @property
     def is_cpu(self) -> bool:
         """A boolean indicating whether the device is a CPU device."""
-        return self.ordinal < 0
+        return self.ordinal < 0 and self.metal_ordinal is None
 
     @property
     def is_cuda(self) -> bool:
         """A boolean indicating whether the device is a CUDA device."""
         return self.ordinal >= 0
+
+    @property
+    def is_metal(self) -> bool:
+        """A boolean indicating whether the device is an Apple GPU (Metal) device."""
+        return self.metal_ordinal is not None
 
     @property
     def is_capturing(self) -> bool:
@@ -5885,6 +6134,8 @@ class Device:
         # behave identically on CPU and CUDA. Match the capture's target device so a CUDA
         # capture (e.g. a deferred one, which also sets the global runtime._apic_capture) does
         # not make the CPU device report as capturing.
+        if self.is_metal:
+            return runtime._metal_graph is not None and runtime._metal_graph.device == self
         return _get_apic_capture_for_device(self) is not None
 
     @property
@@ -6020,6 +6271,8 @@ class Device:
         elif isinstance(other, str):
             if other == "cuda":
                 return self == self.runtime.get_current_cuda_device()
+            elif other == "metal":
+                return self.is_metal and self is self.runtime.metal_devices[0]
             else:
                 return other == self.alias
         else:
@@ -6125,7 +6378,7 @@ class Device:
             The compute capability version (e.g., 75 for ``sm_75``) to use for compilation,
             or ``None`` for CPU devices which don't use CUDA compilation.
         """
-        if self.is_cpu:
+        if not self.is_cuda:
             return None
 
         _validate_cuda_device_arch(self.arch, self.runtime.toolkit_version, self.alias)
@@ -6274,6 +6527,7 @@ class Graph:
 
         # APIC loaded graph (from .wrp file)
         self._native_graph: ctypes.c_void_p | None = None  # APICGraph*
+        self.metal_graph: int | None = None  # native Metal graph handle
         self._params: dict = {}  # name -> {"size": int}
 
     def __del__(self):
@@ -6281,6 +6535,8 @@ class Graph:
             # Clean up APIC capture state
             if hasattr(self, "_apic_capture") and self._apic_capture is not None:
                 self._apic_capture.destroy()
+            if getattr(self, "metal_graph", None):
+                runtime.core.wp_metal_graph_destroy(self.device.metal_ordinal, self.metal_graph)
         except (TypeError, AttributeError):
             pass
 
@@ -6486,6 +6742,16 @@ class Runtime:
         # Verify the core library version before exercising any other native ABI.
         _verify_library_version(self.core, "warp", "wp_version", warp.config.version)
 
+        if not os.path.exists(llvm_lib):
+            # An overlay package (warp-metal) ships only the core library next to its own modules;
+            # the LLVM helper library then comes from the ``warp`` package it overlays.
+            import warp as _warp_pkg  # noqa: PLC0415
+
+            candidate = os.path.join(
+                os.path.dirname(os.path.abspath(_warp_pkg.__file__)), "bin", os.path.basename(llvm_lib)
+            )
+            if os.path.exists(candidate):
+                llvm_lib = candidate
         if os.path.exists(llvm_lib):
             self.llvm = self.load_dll(llvm_lib)
 
@@ -6559,6 +6825,7 @@ class Runtime:
         # APIC capture state (set during capture_begin, cleared at capture_end)
         self._apic_capture = None
         self._apic_graph = None
+        self._metal_graph: Graph | None = None  # graph being captured on a Metal device
 
         # setup c-types for warp.dll
         try:
@@ -6653,6 +6920,115 @@ class Runtime:
 
             self.core.wp_memtile_host.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
             self.core.wp_memtile_host.restype = None
+
+            # Metal (Apple GPU) runtime; stubbed out on other platforms
+            self.core.wp_is_metal_enabled.argtypes = []
+            self.core.wp_is_metal_enabled.restype = ctypes.c_int
+            self.core.wp_metal_device_get_count.argtypes = []
+            self.core.wp_metal_device_get_count.restype = ctypes.c_int
+            self.core.wp_metal_device_get_name.argtypes = [ctypes.c_int]
+            self.core.wp_metal_device_get_name.restype = ctypes.c_char_p
+            self.core.wp_metal_device_get_max_threadgroup_memory.argtypes = [ctypes.c_int]
+            self.core.wp_metal_device_get_max_threadgroup_memory.restype = ctypes.c_int
+            self.core.wp_metal_device_get_max_threads_per_threadgroup.argtypes = [ctypes.c_int]
+            self.core.wp_metal_device_get_max_threads_per_threadgroup.restype = ctypes.c_int
+            self.core.wp_metal_device_get_core_count.argtypes = [ctypes.c_int]
+            self.core.wp_metal_device_get_core_count.restype = ctypes.c_int
+            self.core.wp_alloc_metal.argtypes = [ctypes.c_int, ctypes.c_size_t]
+            self.core.wp_alloc_metal.restype = ctypes.c_void_p
+            self.core.wp_free_metal.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self.core.wp_free_metal.restype = None
+            self.core.wp_metal_gpu_address.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self.core.wp_metal_gpu_address.restype = ctypes.c_uint64
+            self.core.wp_metal_capture_host_call.argtypes = [
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.c_int,
+            ]
+            self.core.wp_metal_capture_host_call.restype = ctypes.c_int
+            self.core.wp_metal_owns_pointer.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self.core.wp_metal_owns_pointer.restype = ctypes.c_int
+            self.core.wp_metal_import_host_memory.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+            self.core.wp_metal_import_host_memory.restype = ctypes.c_int
+            self.core.wp_metal_release_host_memory.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+            self.core.wp_metal_release_host_memory.restype = None
+            self.core.wp_metal_capture_begin.argtypes = [ctypes.c_int]
+            self.core.wp_metal_capture_begin.restype = ctypes.c_int
+            self.core.wp_metal_capture_end.argtypes = [ctypes.c_int]
+            self.core.wp_metal_capture_end.restype = ctypes.c_void_p
+            self.core.wp_metal_graph_launch.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self.core.wp_metal_graph_launch.restype = ctypes.c_int
+            self.core.wp_metal_graph_destroy.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self.core.wp_metal_graph_destroy.restype = None
+            self.core.wp_metal_profile_report.argtypes = []
+            self.core.wp_metal_profile_report.restype = ctypes.c_char_p
+            self.core.wp_metal_load_library.argtypes = [ctypes.c_int, ctypes.c_char_p]
+            self.core.wp_metal_load_library.restype = ctypes.c_void_p
+            self.core.wp_metal_unload_library.argtypes = [ctypes.c_void_p]
+            self.core.wp_metal_unload_library.restype = None
+            self.core.wp_metal_get_kernel.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            self.core.wp_metal_capture_push.argtypes = [ctypes.c_int]
+            self.core.wp_metal_capture_push.restype = ctypes.c_int
+            self.core.wp_metal_capture_pop.argtypes = [ctypes.c_int]
+            self.core.wp_metal_capture_pop.restype = ctypes.c_void_p
+            self.core.wp_metal_capture_conditional.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            self.core.wp_metal_capture_conditional.restype = ctypes.c_int
+            self.core.wp_texture_create_metal.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_bool,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            self.core.wp_texture_create_metal.restype = ctypes.c_uint64
+            self.core.wp_texture_destroy_metal.argtypes = [ctypes.c_uint64]
+            self.core.wp_texture_destroy_metal.restype = None
+            self.core.wp_metal_get_kernel.restype = ctypes.c_void_p
+            self.core.wp_metal_launch_kernel.argtypes = [
+                ctypes.c_int,  # device ordinal
+                ctypes.c_void_p,  # kernel (pipeline state)
+                ctypes.c_size_t,  # number of threads
+                ctypes.c_int,  # threads per threadgroup
+                ctypes.c_void_p,  # launch bounds
+                ctypes.c_size_t,
+                ctypes.c_void_p,  # kernel argument struct
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),  # byte offsets of pointer fields in the argument struct
+                ctypes.c_int,
+                ctypes.c_size_t,  # threadgroup memory bytes
+            ]
+            self.core.wp_metal_launch_kernel.restype = ctypes.c_int
+            self.core.wp_metal_synchronize.argtypes = [ctypes.c_int]
+            self.core.wp_metal_synchronize.restype = ctypes.c_int
+            self.core.wp_metal_memset.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
+            self.core.wp_metal_memset.restype = ctypes.c_int
+            self.core.wp_metal_memtile.argtypes = [
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+            ]
+            self.core.wp_metal_memtile.restype = ctypes.c_int
+            self.core.wp_metal_memcpy.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+            self.core.wp_metal_memcpy.restype = ctypes.c_int
             self.core.wp_memtile_device.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -8322,6 +8698,15 @@ class Runtime:
         self.device_map["cpu"] = self.cpu_device
         self.context_map[None] = self.cpu_device
 
+        # register Metal (Apple GPU) devices
+        self.metal_devices = []
+        if self.core.wp_is_metal_enabled():
+            for i in range(self.core.wp_metal_device_get_count()):
+                device = Device(self, f"metal:{i}", metal_ordinal=i)
+                self.metal_devices.append(device)
+                self.device_map[device.alias] = device
+                self.context_map[device.context] = device
+
         self.is_cuda_enabled = bool(self.core.wp_is_cuda_enabled())
         self.is_cuda_compatibility_enabled = bool(self.core.wp_is_cuda_compatibility_enabled())
 
@@ -8413,7 +8798,7 @@ class Runtime:
             except ValueError:
                 pass  # no eligible NVRTC-supported arch ≥ default, retain existing
         else:
-            self.set_default_device("cpu")
+            self.set_default_device("metal:0" if self.metal_devices else "cpu")
             if self.nvrtc_supported_archs:
                 # NVRTC available but no devices/driver — enable offline compilation
                 self.default_ptx_arch = warp.config.ptx_target_arch if warp.config.ptx_target_arch is not None else 75
@@ -8467,6 +8852,10 @@ class Runtime:
             alias_str = f'"{self.cpu_device.alias}"'
             name_str = f'"{self.cpu_device.name}"'
             greeting.append(f"     {alias_str:10s} : {name_str}")
+            for metal_device in self.metal_devices:
+                alias_str = f'"{metal_device.alias}"'
+                name_str = f'"{metal_device.name}"'
+                greeting.append(f"     {alias_str:10s} : {name_str} (Metal)")
             for cuda_device in self.cuda_devices:
                 alias_str = f'"{cuda_device.alias}"'
                 if cuda_device.is_primary:
@@ -8593,6 +8982,14 @@ class Runtime:
         if self.llvm is None:
             return None
         return self._get_or_create_pch_dir()
+
+    def device_for_host_pointer(self, ptr: int) -> Device:
+        """Return the Metal device whose memory contains ``ptr``, else the CPU device."""
+        if ptr:
+            for device in self.metal_devices:
+                if self.core.wp_metal_owns_pointer(device.metal_ordinal, ptr):  # not imported foreign pages
+                    return device
+        return self.cpu_device
 
     def get_error_string(self):
         return self.core.wp_get_error_string().decode("utf-8")
@@ -8725,6 +9122,8 @@ class Runtime:
             return device
         elif ident == "cuda":
             return self.get_current_cuda_device()
+        elif ident == "metal" and self.metal_devices:
+            return self.metal_devices[0]
 
         raise ValueError(f"Invalid device identifier: {ident}")
 
@@ -8939,8 +9338,8 @@ def get_devices() -> list[Device]:
     devices = []
     if is_cpu_available():
         devices.append(runtime.cpu_device)
-    for cuda_device in runtime.cuda_devices:
-        devices.append(cuda_device)
+    devices.extend(runtime.metal_devices)
+    devices.extend(runtime.cuda_devices)
     return devices
 
 
@@ -8950,6 +9349,14 @@ def get_cuda_device_count() -> int:
     init()
 
     return len(runtime.cuda_devices)
+
+
+def is_metal_available() -> bool:
+    """Check whether at least one Metal (Apple GPU) device is available."""
+
+    init()
+
+    return len(runtime.metal_devices) > 0
 
 
 def get_cuda_device(ordinal: int | None = None) -> Device:
@@ -10518,6 +10925,12 @@ def event_from_ipc_handle(handle, device: DeviceLike = None) -> Event:
 #  to a c-type that can be passed to a kernel
 def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
     device = runtime.get_device(device)
+    if (
+        device.is_metal
+        and value is not None
+        and (warp._src.types.is_array(arg_type) or isinstance(arg_type, warp._src.codegen.Struct))
+    ):
+        _metal_import_host_value(value, device)
 
     if warp._src.types.is_array(arg_type):
         if value is None:
@@ -10861,6 +11274,162 @@ def invoke(kernel, hooks, params: Sequence[Any], adjoint: bool):
 
         kernel._invoke_cache[cache_key] = (ArgsStruct, AdjArgsStruct, fields, adj_fields)
         hooks.backward(ctypes.byref(params[0]), ctypes.byref(args), ctypes.byref(adj_args))
+
+
+def _metal_pointer_offsets(struct_type, base=0):
+    """Byte offsets of every array data/grad pointer inside a ctypes kernel-argument struct.
+
+    The Metal runtime rewrites these host pointers to GPU addresses before a launch.
+    """
+    offsets = []
+    for name, field_type in struct_type._fields_:
+        offset = base + getattr(struct_type, name).offset
+        if issubclass(field_type, warp._src.types.array_t):
+            offsets.append(offset + warp._src.types.array_t.data.offset)
+            offsets.append(offset + warp._src.types.array_t.grad.offset)
+        elif issubclass(field_type, warp._src.types.indexedarray_t):
+            inner = warp._src.types.indexedarray_t.data.offset
+            offsets.append(offset + inner + warp._src.types.array_t.data.offset)
+            offsets.append(offset + inner + warp._src.types.array_t.grad.offset)
+            for i in range(warp._src.types.ARRAY_MAX_DIMS):
+                offsets.append(
+                    offset + warp._src.types.indexedarray_t.indices.offset + i * ctypes.sizeof(ctypes.c_void_p)
+                )
+        elif issubclass(field_type, warp._src.types.fabricarray_t):
+            raise NotImplementedError(f"{field_type.__name__} kernel arguments are not supported on Metal devices")
+        elif issubclass(field_type, ctypes.Structure):
+            offsets.extend(_metal_pointer_offsets(field_type, offset))
+        elif issubclass(field_type, ctypes.Array) and issubclass(field_type._type_, ctypes.Structure):
+            for i in range(field_type._length_):
+                offsets.extend(_metal_pointer_offsets(field_type._type_, offset + i * ctypes.sizeof(field_type._type_)))
+    return offsets
+
+
+def invoke_metal(kernel, hooks, params: Sequence[Any], device: Device, block_dim: int, adjoint: bool = False):
+    """Dispatch a forward or backward kernel on a Metal device."""
+    if hooks.metal_unsupported:
+        raise RuntimeError(
+            f"Kernel '{kernel.key}' uses builtins that are not supported on Metal yet: {hooks.metal_unsupported}"
+        )
+    bounds = params[0]
+    host_arrays = device.__dict__.pop("_metal_host_memory_pending", False)
+    args, adj_args = _build_cpu_args_structs(kernel, hooks, params, adjoint=adjoint)
+    if adjoint:
+        # the backward entry point reads both structs from one buffer (wp_bwd_args_<kernel>)
+        combined_type = getattr(kernel, "_metal_bwd_args_type", None)
+        if combined_type is None or combined_type._fields_[0][1] is not type(args):
+            combined_type = type(
+                "wp_bwd_args", (ctypes.Structure,), {"_fields_": [("args", type(args)), ("adj_args", type(adj_args))]}
+            )
+            kernel._metal_bwd_args_type = combined_type
+        args = combined_type(args, adj_args)
+    args_type = type(args)
+    offsets = getattr(args_type, "_metal_pointer_offsets", None)
+    if offsets is None:
+        offsets = (ctypes.c_size_t * len(_metal_pointer_offsets(args_type)))(*_metal_pointer_offsets(args_type))
+        args_type._metal_pointer_offsets = offsets
+
+    if runtime.core.wp_metal_launch_kernel(
+        device.metal_ordinal,
+        hooks.backward if adjoint else hooks.forward,
+        bounds.size,
+        block_dim,  # the module was compiled for this threadgroup size (WP_TILE_BLOCK_DIM)
+        ctypes.byref(bounds),
+        ctypes.sizeof(bounds),
+        ctypes.byref(args),
+        ctypes.sizeof(args),
+        offsets,
+        len(offsets),
+        hooks.backward_smem_bytes if adjoint else hooks.forward_smem_bytes,
+    ):
+        message = runtime.get_error_string()
+
+        def foreign_arrays(label, value):
+            if warp._src.types.is_array(value):
+                return [f"'{label}' is on device '{value.device}'"] if value.device != device else []
+            if isinstance(value, warp._src.codegen.StructInstance):
+                return [f for n in value._cls.vars for f in foreign_arrays(f"{label}.{n}", getattr(value, n))]
+            return []
+
+        foreign = [
+            f for arg, value in zip(kernel.adj.args, params[1:], strict=False) for f in foreign_arrays(arg.label, value)
+        ]
+        if foreign:
+            message += " (" + ", ".join(foreign) + ")"
+        else:
+            message += (
+                " (arguments: "
+                + ", ".join(f"{a.label}={type(v).__name__}" for a, v in zip(kernel.adj.args, params[1:], strict=False))
+                + ")"
+            )
+        raise RuntimeError(f"Failed to launch kernel '{kernel.key}' on device '{device}': {message}")
+    if host_arrays and not device.is_capturing:
+        # host code expects CPU arrays to be up to date as soon as the launch returns
+        device.metal_synchronize()
+
+
+def _array_extent_bytes(a) -> int:
+    """Bytes spanned by an array's elements from its base pointer (strided views included)."""
+    if a.capacity:
+        return a.capacity
+    item = warp._src.types.type_size_in_bytes(a.dtype)
+    return sum((n - 1) * s for n, s in zip(a.shape, a.strides, strict=True) if n > 0) + item
+
+
+def _metal_import_host_value(value, device: Device):
+    """Make a CPU-resident kernel argument (Warp CPU array, NumPy array, Torch tensor, struct members)
+    addressable by ``device`` in place: unified memory lets Metal kernels use host memory directly.
+
+    Imports live as long as the argument object; ``invoke_metal`` synchronizes after launches that used
+    host memory so host code sees the results as soon as the launch returns.
+    """
+    if isinstance(value, warp._src.types.array):
+        if value.device is None or not value.device.is_cpu or not value.ptr:
+            return
+        device._metal_host_memory_pending = True
+        if value.__dict__.get("_metal_import") is None:
+            size = _array_extent_bytes(value)
+            registered = device.metal_import_host_memory(value.ptr, size)
+            value._metal_import = (device, value.ptr, size) if registered else False  # released in array.__del__
+        if value.grad is not None:
+            _metal_import_host_value(value.grad, device)
+    elif isinstance(value, warp._src.codegen.StructInstance):
+        for name in value._cls.vars:
+            _metal_import_host_value(getattr(value, name), device)
+    elif hasattr(value, "__cuda_array_interface__"):
+        return
+    elif hasattr(value, "__array_interface__") or hasattr(value, "__array__"):
+        # NumPy arrays, and Torch CPU tensors through __array__() (a view sharing the tensor's memory)
+        try:
+            interface = (
+                value.__array_interface__
+                if hasattr(value, "__array_interface__")
+                else value.__array__().__array_interface__
+            )
+        except (AttributeError, TypeError, RuntimeError):
+            return
+        ptr = interface["data"][0]
+        if not ptr:
+            return
+        device._metal_host_memory_pending = True
+        if getattr(value, "_wp_metal_import", None) is None:
+            size = (
+                int(np.prod(interface["shape"]) * np.dtype(interface["typestr"]).itemsize)
+                if interface.get("strides") is None
+                else (
+                    sum((n - 1) * s for n, s in zip(interface["shape"], interface["strides"], strict=True) if n > 0)
+                    + np.dtype(interface["typestr"]).itemsize
+                )
+            )
+            if device.metal_import_host_memory(ptr, size):
+                try:
+                    weakref.finalize(value, device.metal_release_host_memory, ptr, size)
+                except TypeError:
+                    pass  # not weak-referenceable: the import stays for the process lifetime
+            try:
+                value._wp_metal_import = True
+            except (AttributeError, TypeError):
+                pass
 
 
 def invoke_cpu_blocks(kernel, hooks, params: Sequence[Any], adjoint: bool):
@@ -11229,7 +11798,9 @@ class Launch:
             stream: The stream to launch on.
         """
         apic_capture = _get_apic_capture_for_device(self.device)
-        if self.device.is_cpu:
+        if self.device.is_metal:
+            invoke_metal(self.kernel, self.hooks, self.params, self.device, self.block_dim, self.adjoint)
+        elif self.device.is_cpu:
             if apic_capture is not None:
                 # Under an active APIC CPU capture, record the launch so it
                 # replays from the byte stream. fwd_args is required to emit
@@ -11471,6 +12042,9 @@ def _resolve_launch_block_dim(device: Device, block_dim: int | None) -> int:
     if isinstance(block_dim, _ResolvedBlockDim):
         return int(block_dim)
 
+    if device.is_metal and os.environ.get("WP_METAL_BLOCK_DIM1"):  # diagnostic: per-thread tiles
+        return 1
+
     default = 1 if device.is_cpu else 256
     if block_dim is None or block_dim <= 0:
         return default
@@ -11695,6 +12269,33 @@ def launch(
                 adjoint=adjoint,
                 module_exec=module_exec,
             )
+
+        elif device.is_metal:
+            if adjoint and hooks.backward is None:
+                if module_exec.metal_backward_error:
+                    # a defect, not a missing feature: keep it an error (the test harness skips the latter)
+                    raise RuntimeError(
+                        f"The adjoint of module '{kernel.module.name}' failed to compile for device '{device}', so "
+                        f"'{kernel.key}' has no backward kernel:\n{module_exec.metal_backward_error[:2000]}"
+                    )
+                raise RuntimeError(
+                    f"No backward kernel for '{kernel.key}' on device '{device}': tile adjoints are not supported "
+                    "on Metal yet, and modules built with enable_backward=False have none"
+                )
+            if record_cmd:
+                return Launch(
+                    kernel=kernel,
+                    hooks=hooks,
+                    params=params,
+                    params_addr=None,
+                    bounds=bounds,
+                    device=device,
+                    block_dim=block_dim,
+                    adjoint=adjoint,
+                    fwd_args=fwd_args,
+                    adj_args=adj_args,
+                )
+            invoke_metal(kernel, hooks, params, device, block_dim, adjoint)
 
         # run kernel
         elif device.is_cpu:
@@ -12209,6 +12810,9 @@ def synchronize():
     or memory copies have completed.
     """
 
+    for device in runtime.metal_devices:
+        device.metal_synchronize()
+
     if is_cuda_driver_initialized():
         # save the original context to avoid side effects
         saved_context = runtime.core.wp_cuda_context_get_current()
@@ -12242,6 +12846,8 @@ def synchronize_device(device: DeviceLike = None):
             raise RuntimeError(f"Cannot synchronize device {device} while graph capture is active")
 
         runtime.core.wp_cuda_context_synchronize(device.context)
+    elif device.is_metal:
+        device.metal_synchronize()
 
 
 def synchronize_stream(stream_or_device: Stream | DeviceLike | None = None):
@@ -12864,7 +13470,7 @@ def load_aot_module(
         else:
             output_arch = arch
 
-        meta_path = os.path.join(module_dir, module_object._get_meta_name())
+        meta_path = os.path.join(module_dir, module_object._get_meta_name(device=d))
 
         # Determine candidate binaries to try
         tried_paths = []
@@ -13059,8 +13665,20 @@ def capture_begin(
         device = runtime.get_device(device)
 
     # Reject nested captures
-    if runtime._apic_capture is not None:
+    if runtime._apic_capture is not None or runtime._metal_graph is not None:
         raise RuntimeError("Graph capture already in progress")
+
+    # ---- Metal capture path: dispatches are recorded natively and replayed by capture_launch ----
+    if device.is_metal:
+        if force_module_load:
+            force_load(device)
+        if runtime.core.wp_metal_capture_begin(device.metal_ordinal) != 0:
+            raise RuntimeError(runtime.get_error_string())
+        if apic:
+            runtime.core.wp_metal_capture_end(device.metal_ordinal)  # discard the capture just begun
+            raise NotImplementedError("Saveable (APIC) graph capture is not supported on Metal devices yet")
+        runtime._metal_graph = Graph(device)
+        return
 
     # ---- CPU capture path ----
     if device.is_cpu:
@@ -13157,6 +13775,14 @@ def capture_end(device: DeviceLike = None, stream: Stream | None = None) -> Grap
     Returns:
         A :class:`Graph` object that can be launched with :func:`~warp.capture_launch()`
     """
+
+    if runtime._metal_graph is not None:
+        graph = runtime._metal_graph
+        runtime._metal_graph = None
+        graph.metal_graph = runtime.core.wp_metal_capture_end(graph.device.metal_ordinal)
+        if not graph.metal_graph:
+            raise RuntimeError(f"Metal graph capture failed: {runtime.get_error_string()}")
+        return graph
 
     # ---- CPU capture path ----
     if runtime._apic_graph is not None and runtime._apic_graph.device.is_cpu:
@@ -13352,6 +13978,20 @@ def capture_resume(
 condition_host = None
 
 
+def _read_condition(condition: warp.array[int], device: Device, stream: Stream | None) -> bool:
+    """Reads a one-element int condition array back to the host."""
+    if device.is_cuda:
+        global condition_host
+        if condition_host is None:
+            condition_host = warp.empty(1, dtype=int, device="cpu", pinned=True)
+        warp.copy(condition_host, condition, stream=stream)
+        warp.synchronize_stream(stream)
+        return bool(ctypes.cast(condition_host.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
+    if device.is_metal:
+        device.metal_synchronize()
+    return bool(ctypes.cast(condition.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
+
+
 def _apic_capture_branch(callback, **kwargs):
     """Run ``callback`` with the APIC byte stream redirected into a fresh
     sub-stream. Returns the branch body (an opaque void* owned by C++,
@@ -13425,6 +14065,50 @@ def _apic_record_capture_while(condition, while_body, **kwargs):
     )
 
 
+def _metal_capture_branch(device: Device, body, kwargs):
+    """Capture a conditional branch body into a nested Metal graph; returns (handle, owned)."""
+    if body is None:
+        return None, False
+    if isinstance(body, Graph):
+        if body.metal_graph is None:
+            raise TypeError("Branch graphs must be Metal graphs")
+        return body.metal_graph, False
+    if not isinstance(body, Callable):
+        raise TypeError("Branches must be a Callable or a Graph")
+    if runtime.core.wp_metal_capture_push(device.metal_ordinal) != 0:
+        raise RuntimeError(runtime.get_error_string())
+    try:
+        body(**kwargs)
+    except BaseException:
+        # close the branch recording so the enclosing capture (and the device) stay usable
+        handle = runtime.core.wp_metal_capture_pop(device.metal_ordinal)
+        if handle:
+            runtime.core.wp_metal_graph_destroy(device.metal_ordinal, handle)
+        raise
+    handle = runtime.core.wp_metal_capture_pop(device.metal_ordinal)
+    if not handle:
+        raise RuntimeError(runtime.get_error_string())
+    return handle, True
+
+
+def _metal_capture_conditional(device: Device, is_loop: bool, condition, on_true, on_false, kwargs):
+    g_true, own_true = _metal_capture_branch(device, on_true, kwargs)
+    g_false, own_false = _metal_capture_branch(device, on_false, kwargs)
+    if (
+        runtime.core.wp_metal_capture_conditional(
+            device.metal_ordinal,
+            int(is_loop),
+            ctypes.c_void_p(condition.ptr),
+            g_true,
+            g_false,
+            int(own_true),
+            int(own_false),
+        )
+        != 0
+    ):
+        raise RuntimeError(runtime.get_error_string())
+
+
 def capture_if(
     condition: warp.array[int],
     on_true: Callable | Graph | None = None,
@@ -13478,18 +14162,12 @@ def capture_if(
         _apic_record_capture_if(condition, on_true, on_false, **kwargs)
         return
 
+    if device.is_metal and device.is_capturing:
+        _metal_capture_conditional(device, False, condition, on_true, on_false, kwargs)
+        return
     if graph is None:
         # if no graph is active, just execute the correct branch directly
-        if device.is_cuda:
-            # use a pinned buffer for condition readback to host
-            global condition_host
-            if condition_host is None:
-                condition_host = warp.empty(1, dtype=int, device="cpu", pinned=True)
-            warp.copy(condition_host, condition, stream=stream)
-            warp.synchronize_stream(stream)
-            condition_value = bool(ctypes.cast(condition_host.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
-        else:
-            condition_value = bool(ctypes.cast(condition.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
+        condition_value = _read_condition(condition, device, stream)
 
         if condition_value:
             if on_true is not None:
@@ -13703,19 +14381,13 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
         _apic_record_capture_while(condition, while_body, **kwargs)
         return
 
+    if device.is_metal and device.is_capturing:
+        _metal_capture_conditional(device, True, condition, while_body, None, kwargs)
+        return
     if graph is None:
         # since no graph is active, just execute the kernels directly
         while True:
-            if device.is_cuda:
-                # use a pinned buffer for condition readback to host
-                global condition_host
-                if condition_host is None:
-                    condition_host = warp.empty(1, dtype=int, device="cpu", pinned=True)
-                warp.copy(condition_host, condition, stream=stream)
-                warp.synchronize_stream(stream)
-                condition_value = bool(ctypes.cast(condition_host.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
-            else:
-                condition_value = bool(ctypes.cast(condition.ptr, ctypes.POINTER(ctypes.c_int32)).contents)
+            condition_value = _read_condition(condition, device, stream)
 
             if condition_value:
                 if isinstance(while_body, Callable):
@@ -13867,6 +14539,11 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
           :func:`~warp.capture_load()`.
         stream: A :class:`Stream` to launch the graph on (CUDA only)
     """
+
+    if graph.metal_graph:
+        if runtime.core.wp_metal_graph_launch(graph.device.metal_ordinal, graph.metal_graph) != 0:
+            raise RuntimeError(f"Metal graph launch failed: {runtime.get_error_string()}")
+        return
 
     # ---- APIC loaded graph path ----
     if graph._native_graph is not None:
@@ -14290,6 +14967,13 @@ def copy(
     if count == 0:
         return
 
+    # Metal arrays are host-accessible, but outstanding GPU work must finish before the host touches them
+    # (copies within one Metal device run on the GPU instead, see below)
+    if src.device != dest.device:
+        for device in (src.device, dest.device):
+            if device.is_metal:
+                device.metal_synchronize()
+
     # figure out the stream for the copy
     if stream is None:
         if dest.device.is_cuda:
@@ -14333,7 +15017,7 @@ def copy(
             # FIXME: We can't use a temporary CPU allocation during graph capture,
             # because launching the graph will crash after the allocation is
             # garbage-collected.
-            if src.device.is_cpu and stream.is_capturing:
+            if src.device.is_cpu and stream is not None and stream.is_capturing:
                 raise RuntimeError("Failed to allocate a CPU staging buffer during graph capture")
             # This involves an allocation and a kernel launch, which must run on the source device.
             if src.device.is_cuda and stream != src.device.stream:
@@ -14349,7 +15033,7 @@ def copy(
             # FIXME: We can't use a temporary CPU allocation during graph capture,
             # because launching the graph will crash after the allocation is
             # garbage-collected.
-            if dest.device.is_cpu and stream.is_capturing:
+            if dest.device.is_cpu and stream is not None and stream.is_capturing:
                 raise RuntimeError("Failed to allocate a CPU staging buffer during graph capture")
             # The allocation must run on the destination device
             if dest.device.is_cuda and stream != dest.device.stream:
@@ -14421,6 +15105,8 @@ def copy(
                 result = runtime.core.wp_memcpy_h2d(
                     dest.device.context, dst_ptr, src_ptr, bytes_to_copy, stream.cuda_stream
                 )
+        elif dest.device.is_metal and src.device == dest.device:
+            result = runtime.core.wp_metal_memcpy(dest.device.metal_ordinal, dst_ptr, src_ptr, bytes_to_copy) == 0
         else:
             if src.device.is_cuda:
                 result = runtime.core.wp_memcpy_d2h(
@@ -14530,6 +15216,8 @@ def copy(
                     "(strided / indexed / fabric); copy the underlying contiguous arrays first or "
                     "move the copy outside the capture."
                 )
+            if dest.device.is_metal:
+                dest.device.metal_synchronize()  # strided copies run on the host
             result = runtime.core.wp_array_copy_host(dst_ptr, src_ptr, dst_type, src_type, src_elem_size)
 
         if not result:

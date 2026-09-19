@@ -196,8 +196,24 @@ int wp_is_fast_math_enabled()
 #endif
 }
 
+static thread_local int g_host_alloc_metal_ordinal = -1;
+
+int wp_host_alloc_redirect_metal(int ordinal)
+{
+    int previous = g_host_alloc_metal_ordinal;
+    g_host_alloc_metal_ordinal = ordinal;
+    return previous;
+}
+
 void* wp_alloc_host(size_t s, const char* tag)
 {
+    if (g_host_alloc_metal_ordinal >= 0) {
+        void* metal_ptr = wp_alloc_metal(g_host_alloc_metal_ordinal, s);
+        if (g_alloc_tracker.enabled && metal_ptr && tag)
+            g_alloc_tracker.set_tag(metal_ptr, tag);
+        return metal_ptr;
+    }
+
     // increase CPU array alignment for compatibility with other libs, e.g., JAX, XLA, Eigen.
     size_t alignment = 64;
 
@@ -218,6 +234,10 @@ void* wp_alloc_host(size_t s, const char* tag)
 
 void wp_free_host(void* ptr)
 {
+    if (g_host_alloc_metal_ordinal >= 0) {
+        wp_free_metal(g_host_alloc_metal_ordinal, ptr);
+        return;
+    }
     if (g_alloc_tracker.enabled && ptr)
         g_alloc_tracker.record_free(ptr);
 #if defined(_MSC_VER)

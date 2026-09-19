@@ -1071,7 +1071,7 @@ def test_ref_parameter_struct_field_forwarding(test, device):
 
 
 @wp.func_native(
-    "*(int32_t*)ptr = 42;",
+    "*(WP_THREAD int32_t*)ptr = 42;",
 )
 def set_via_ptr(ptr: wp.uint64): ...
 
@@ -1091,7 +1091,7 @@ def test_address_of_local(test, device):
 
 
 @wp.func_native(
-    "*(float*)ptr = *(float*)ptr + 1.0f;",
+    "*(WP_DEVICE float*)ptr = *(WP_DEVICE float*)ptr + 1.0f;",
 )
 def increment_via_ptr(ptr: wp.uint64): ...
 

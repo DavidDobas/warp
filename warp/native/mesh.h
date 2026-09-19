@@ -19,17 +19,17 @@ struct Mesh {
 
     array_t<int> indices;
 
-    vec3* lowers;
-    vec3* uppers;
+    vec3 WP_DEVICE* lowers;
+    vec3 WP_DEVICE* uppers;
 
-    SolidAngleProps* solid_angle_props;
+    SolidAngleProps WP_DEVICE* solid_angle_props;
 
     int num_points;
     int num_tris;
 
     BVH bvh;
 
-    void* context;
+    void WP_THREAD* context;
     float average_edge_length;
 
     inline CUDA_CALLABLE Mesh(int id = 0)
@@ -51,7 +51,7 @@ struct Mesh {
         array_t<int> indices,
         int num_points,
         int num_tris,
-        void* context = nullptr
+        void WP_THREAD* context = nullptr
     )
         : points(points)
         , velocities(velocities)
@@ -68,26 +68,26 @@ struct Mesh {
     }
 };
 
-CUDA_CALLABLE inline Mesh mesh_get(uint64_t id) { return *(Mesh*)(id); }
+CUDA_CALLABLE inline Mesh mesh_get(uint64_t id) { return *(Mesh WP_DEVICE*)(id); }
 
 // Return the id of the mesh's internal BVH so it can be queried directly with the bvh_query_* builtins.
 // The id is simply the address of the embedded BVH (bvh_get() casts it straight back to a BVH*).
-CUDA_CALLABLE inline uint64_t mesh_get_bvh(uint64_t id) { return (uint64_t)&(((Mesh*)id)->bvh); }
+CUDA_CALLABLE inline uint64_t mesh_get_bvh(uint64_t id) { return (uint64_t)&(((Mesh WP_DEVICE*)id)->bvh); }
 
 CUDA_CALLABLE inline int mesh_get_group_root(uint64_t id, int group_id)
 {
-    Mesh* mesh = (Mesh*)(id);
-    return bvh_get_group_root((uint64_t)&mesh->bvh, group_id);
+    return bvh_get_group_root(mesh_get_bvh(id), group_id);
 }
 
 
-CUDA_CALLABLE inline Mesh& operator+=(Mesh& a, const Mesh& b)
+CUDA_CALLABLE inline Mesh WP_THREAD& operator+=(Mesh WP_THREAD& a, const Mesh WP_THREAD& b)
 {
     // dummy operator needed for adj_select involving meshes
     return a;
 }
 
-CUDA_CALLABLE inline float distance_to_aabb_sq(const vec3& p, const vec3& lower, const vec3& upper)
+CUDA_CALLABLE inline float
+distance_to_aabb_sq(const vec3 WP_THREAD& p, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     const float dx = min(upper[0], max(lower[0], p[0])) - p[0];
     const float dy = min(upper[1], max(lower[1], p[1])) - p[1];
@@ -95,7 +95,8 @@ CUDA_CALLABLE inline float distance_to_aabb_sq(const vec3& p, const vec3& lower,
     return dx * dx + dy * dy + dz * dz;
 }
 
-CUDA_CALLABLE inline float furthest_distance_to_aabb_sq(const vec3& p, const vec3& lower, const vec3& upper)
+CUDA_CALLABLE inline float
+furthest_distance_to_aabb_sq(const vec3 WP_THREAD& p, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     // X-axis
     float dist_lower_x = fabs(p[0] - lower[0]);
@@ -117,10 +118,11 @@ CUDA_CALLABLE inline float furthest_distance_to_aabb_sq(const vec3& p, const vec
 }
 
 CUDA_CALLABLE inline int
-mesh_query_ray_count_intersections(uint64_t id, const vec3& start, const vec3& dir, int root = -1);
-CUDA_CALLABLE inline float mesh_query_inside_ray_tracing(uint64_t id, const vec3& p);
-CUDA_CALLABLE inline float
-mesh_query_inside_parity(uint64_t id, const vec3& p, const vec3 base_dir, int n_sample, float perturbation_scale);
+mesh_query_ray_count_intersections(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, int root = -1);
+CUDA_CALLABLE inline float mesh_query_inside_ray_tracing(uint64_t id, const vec3 WP_THREAD& p);
+CUDA_CALLABLE inline float mesh_query_inside_parity(
+    uint64_t id, const vec3 WP_THREAD& p, const vec3 base_dir, int n_sample, float perturbation_scale
+);
 
 // Shared shrinking-radius closest-point traversal behind mesh_query_point,
 // mesh_query_point_sign_parity, mesh_query_point_no_sign, and
@@ -133,7 +135,12 @@ mesh_query_inside_parity(uint64_t id, const vec3& p, const vec3 base_dir, int n_
 // closest (non-sliver) triangle, or max_dist_sq when none is closer; outputs
 // are only valid in the former case.
 CUDA_CALLABLE inline float mesh_query_point_core(
-    const Mesh& mesh, const vec3& point, const float max_dist_sq, int& min_face, float& min_v, float& min_w
+    const Mesh WP_THREAD& mesh,
+    const vec3 WP_THREAD& point,
+    const float max_dist_sq,
+    int WP_THREAD& min_face,
+    float WP_THREAD& min_v,
+    float WP_THREAD& min_w
 )
 {
     float min_dist_sq = max_dist_sq;
@@ -150,7 +157,8 @@ CUDA_CALLABLE inline float mesh_query_point_core(
         const BVHPackedNodeHalf root_lower = bvh_load_node(mesh.bvh.node_lowers, root_index);
         const BVHPackedNodeHalf root_upper = bvh_load_node(mesh.bvh.node_uppers, root_index);
         const float root_dist_sq = distance_to_aabb_sq(
-            point, reinterpret_cast<const vec3&>(root_lower), reinterpret_cast<const vec3&>(root_upper)
+            point, reinterpret_cast<const vec3 WP_THREAD&>(root_lower),
+            reinterpret_cast<const vec3 WP_THREAD&>(root_upper)
         );
         if (root_dist_sq <= min_dist_sq) {
             node = bvh_query_node_pack(root_lower, root_upper);
@@ -219,10 +227,12 @@ CUDA_CALLABLE inline float mesh_query_point_core(
             const BVHPackedNodeHalf right_upper = bvh_load_node(mesh.bvh.node_uppers, right_index);
 
             const float left_dist_sq = distance_to_aabb_sq(
-                point, reinterpret_cast<const vec3&>(left_lower), reinterpret_cast<const vec3&>(left_upper)
+                point, reinterpret_cast<const vec3 WP_THREAD&>(left_lower),
+                reinterpret_cast<const vec3 WP_THREAD&>(left_upper)
             );
             const float right_dist_sq = distance_to_aabb_sq(
-                point, reinterpret_cast<const vec3&>(right_lower), reinterpret_cast<const vec3&>(right_upper)
+                point, reinterpret_cast<const vec3 WP_THREAD&>(right_lower),
+                reinterpret_cast<const vec3 WP_THREAD&>(right_upper)
             );
 
             // visit the nearer child first (ties go right)
@@ -251,8 +261,15 @@ CUDA_CALLABLE inline float mesh_query_point_core(
 }
 
 // returns true if there is a point (strictly) < distance max_dist
-CUDA_CALLABLE inline bool
-mesh_query_point(uint64_t id, const vec3& point, float max_dist, float& inside, int& face, float& u, float& v)
+CUDA_CALLABLE inline bool mesh_query_point(
+    uint64_t id,
+    const vec3 WP_THREAD& point,
+    float max_dist,
+    float WP_THREAD& inside,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v
+)
 {
     Mesh mesh = mesh_get(id);
 
@@ -280,12 +297,12 @@ mesh_query_point(uint64_t id, const vec3& point, float max_dist, float& inside, 
 // returns true if there is a point (strictly) < distance max_dist
 CUDA_CALLABLE inline bool mesh_query_point_sign_parity(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    float& inside,
-    int& face,
-    float& u,
-    float& v,
+    float WP_THREAD& inside,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
     int n_sample = 1,
     float perturbation_scale = 0.1f
 )
@@ -314,8 +331,14 @@ CUDA_CALLABLE inline bool mesh_query_point_sign_parity(
 }
 
 // returns true if there is a point (strictly) < distance max_dist
-CUDA_CALLABLE inline bool
-mesh_query_point_no_sign(uint64_t id, const vec3& point, float max_dist, int& face, float& u, float& v)
+CUDA_CALLABLE inline bool mesh_query_point_no_sign(
+    uint64_t id,
+    const vec3 WP_THREAD& point,
+    float max_dist,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v
+)
 {
     Mesh mesh = mesh_get(id);
 
@@ -338,8 +361,14 @@ mesh_query_point_no_sign(uint64_t id, const vec3& point, float max_dist, int& fa
 }
 
 // returns true if there is a point (strictly) > distance min_dist
-CUDA_CALLABLE inline bool
-mesh_query_furthest_point_no_sign(uint64_t id, const vec3& point, float min_dist, int& face, float& u, float& v)
+CUDA_CALLABLE inline bool mesh_query_furthest_point_no_sign(
+    uint64_t id,
+    const vec3 WP_THREAD& point,
+    float min_dist,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v
+)
 {
     Mesh mesh = mesh_get(id);
 
@@ -457,12 +486,12 @@ mesh_query_furthest_point_no_sign(uint64_t id, const vec3& point, float min_dist
 // returns true if there is a point (strictly) < distance max_dist
 CUDA_CALLABLE inline bool mesh_query_point_sign_normal(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    float& inside,
-    int& face,
-    float& u,
-    float& v,
+    float WP_THREAD& inside,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
     const float epsilon = 1e-3f
 )
 {
@@ -637,7 +666,7 @@ CUDA_CALLABLE inline bool mesh_query_point_sign_normal(
     }
 }
 
-CUDA_CALLABLE inline float solid_angle_iterative(uint64_t id, const vec3& p, const float accuracy_sq)
+CUDA_CALLABLE inline float solid_angle_iterative(uint64_t id, const vec3 WP_THREAD& p, const float accuracy_sq)
 {
     Mesh mesh = mesh_get(id);
 
@@ -667,7 +696,9 @@ CUDA_CALLABLE inline float solid_angle_iterative(uint64_t id, const vec3& p, con
                 int i = bvh_load_int(mesh.indices, primitive_index * 3 + 0);
                 int j = bvh_load_int(mesh.indices, primitive_index * 3 + 1);
                 int k = bvh_load_int(mesh.indices, primitive_index * 3 + 2);
-                angle[count - 1] += robust_solid_angle(mesh.points[i], mesh.points[j], mesh.points[k], p);
+                angle[count - 1] += robust_solid_angle(
+                    bvh_load_vec3(mesh.points, i), bvh_load_vec3(mesh.points, j), bvh_load_vec3(mesh.points, k), p
+                );
                 // printf("Leaf %d, got %f\n", leaf_index, my_data[count - 1]);
             }
             count--;
@@ -709,7 +740,7 @@ CUDA_CALLABLE inline float solid_angle_iterative(uint64_t id, const vec3& p, con
     return angle[0];
 }
 
-CUDA_CALLABLE inline float mesh_query_winding_number(uint64_t id, const vec3& p, const float accuracy)
+CUDA_CALLABLE inline float mesh_query_winding_number(uint64_t id, const vec3 WP_THREAD& p, const float accuracy)
 {
     float angle = solid_angle_iterative(id, p, accuracy * accuracy);
     return angle * 0.07957747154;  // divided by 4 PI
@@ -718,12 +749,12 @@ CUDA_CALLABLE inline float mesh_query_winding_number(uint64_t id, const vec3& p,
 // returns true if there is a point (strictly) < distance max_dist
 CUDA_CALLABLE inline bool mesh_query_point_sign_winding_number(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    float& inside,
-    int& face,
-    float& u,
-    float& v,
+    float WP_THREAD& inside,
+    int WP_THREAD& face,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
     const float accuracy,
     const float winding_number_threshold
 )
@@ -756,20 +787,21 @@ CUDA_CALLABLE inline bool mesh_query_point_sign_winding_number(
     }
 }
 
+#if 1  // adjoints (Metal backward kernels use them too)
 CUDA_CALLABLE inline void adj_mesh_query_point_no_sign(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const int& face,
-    const float& u,
-    const float& v,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    bool WP_THREAD& adj_ret
 )
 {
     Mesh mesh = mesh_get(id);
@@ -792,18 +824,18 @@ CUDA_CALLABLE inline void adj_mesh_query_point_no_sign(
 
 CUDA_CALLABLE inline void adj_mesh_query_furthest_point_no_sign(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float min_dist,
-    const int& face,
-    const float& u,
-    const float& v,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_min_dist,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_min_dist,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    bool WP_THREAD& adj_ret
 )
 {
     Mesh mesh = mesh_get(id);
@@ -826,24 +858,24 @@ CUDA_CALLABLE inline void adj_mesh_query_furthest_point_no_sign(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_parity(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const float& inside,
-    const int& face,
-    const float& u,
-    const float& v,
+    const float WP_THREAD& inside,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     int n_sample,
     float perturbation_scale,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_inside,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    int& adj_n_sample,
-    float& adj_perturbation_scale,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_inside,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    int WP_THREAD& adj_n_sample,
+    float WP_THREAD& adj_perturbation_scale,
+    bool WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_no_sign(
@@ -853,22 +885,22 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_parity(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_normal(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const float& inside,
-    const int& face,
-    const float& u,
-    const float& v,
+    const float WP_THREAD& inside,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     const float epsilon,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_inside,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    float& adj_epsilon,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_inside,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_epsilon,
+    bool WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_no_sign(
@@ -878,24 +910,24 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_normal(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_winding_number(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const float& inside,
-    const int& face,
-    const float& u,
-    const float& v,
+    const float WP_THREAD& inside,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     const float accuracy,
     const float winding_number_threshold,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_inside,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    float& adj_accuracy,
-    float& adj_winding_number_threshold,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_inside,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_accuracy,
+    float WP_THREAD& adj_winding_number_threshold,
+    bool WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_no_sign(
@@ -903,6 +935,7 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_winding_number(
     );
 }
 
+#endif
 
 // Stores the result of querying the closest point on a mesh.
 struct mesh_query_point_t {
@@ -916,7 +949,7 @@ struct mesh_query_point_t {
     }
 
     // Required for adjoint computations.
-    CUDA_CALLABLE inline mesh_query_point_t& operator+=(const mesh_query_point_t& other)
+    CUDA_CALLABLE inline mesh_query_point_t WP_THREAD& operator+=(const mesh_query_point_t WP_THREAD& other)
     {
         result |= other.result;  // Use OR for bool accumulation
         sign += other.sign;
@@ -933,23 +966,23 @@ struct mesh_query_point_t {
     float v;
 };
 
-
+#if 1  // adjoints (Metal backward kernels use them too)
 CUDA_CALLABLE inline void adj_mesh_query_point(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const float& inside,
-    const int& face,
-    const float& u,
-    const float& v,
+    const float WP_THREAD& inside,
+    const int WP_THREAD& face,
+    const float WP_THREAD& u,
+    const float WP_THREAD& v,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_inside,
-    int& adj_face,
-    float& adj_u,
-    float& adj_v,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_inside,
+    int WP_THREAD& adj_face,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    bool WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_no_sign(
@@ -959,13 +992,13 @@ CUDA_CALLABLE inline void adj_mesh_query_point(
 
 CUDA_CALLABLE inline void adj_mesh_query_point(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point(
@@ -974,7 +1007,9 @@ CUDA_CALLABLE inline void adj_mesh_query_point(
     );
 }
 
-CUDA_CALLABLE inline mesh_query_point_t mesh_query_point(uint64_t id, const vec3& point, float max_dist)
+#endif
+
+CUDA_CALLABLE inline mesh_query_point_t mesh_query_point(uint64_t id, const vec3 WP_THREAD& point, float max_dist)
 {
     mesh_query_point_t query;
     query.result = mesh_query_point(id, point, max_dist, query.sign, query.face, query.u, query.v);
@@ -983,7 +1018,7 @@ CUDA_CALLABLE inline mesh_query_point_t mesh_query_point(uint64_t id, const vec3
 
 
 CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_sign_parity(
-    uint64_t id, const vec3& point, float max_dist, int n_sample = 1, float perturbation_scale = 0.1f
+    uint64_t id, const vec3 WP_THREAD& point, float max_dist, int n_sample = 1, float perturbation_scale = 0.1f
 )
 {
     mesh_query_point_t query;
@@ -993,7 +1028,8 @@ CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_sign_parity(
     return query;
 }
 
-CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_no_sign(uint64_t id, const vec3& point, float max_dist)
+CUDA_CALLABLE inline mesh_query_point_t
+mesh_query_point_no_sign(uint64_t id, const vec3 WP_THREAD& point, float max_dist)
 {
     mesh_query_point_t query;
     query.sign = 0.0;
@@ -1002,7 +1038,7 @@ CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_no_sign(uint64_t id, co
 }
 
 CUDA_CALLABLE inline mesh_query_point_t
-mesh_query_furthest_point_no_sign(uint64_t id, const vec3& point, float min_dist)
+mesh_query_furthest_point_no_sign(uint64_t id, const vec3 WP_THREAD& point, float min_dist)
 {
     mesh_query_point_t query;
     query.sign = 0.0;
@@ -1011,7 +1047,7 @@ mesh_query_furthest_point_no_sign(uint64_t id, const vec3& point, float min_dist
 }
 
 CUDA_CALLABLE inline mesh_query_point_t
-mesh_query_point_sign_normal(uint64_t id, const vec3& point, float max_dist, const float epsilon = 1e-3f)
+mesh_query_point_sign_normal(uint64_t id, const vec3 WP_THREAD& point, float max_dist, const float epsilon = 1e-3f)
 {
     mesh_query_point_t query;
     query.result = mesh_query_point_sign_normal(id, point, max_dist, query.sign, query.face, query.u, query.v, epsilon);
@@ -1019,7 +1055,7 @@ mesh_query_point_sign_normal(uint64_t id, const vec3& point, float max_dist, con
 }
 
 CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_sign_winding_number(
-    uint64_t id, const vec3& point, float max_dist, float accuracy, float winding_number_threshold
+    uint64_t id, const vec3 WP_THREAD& point, float max_dist, float accuracy, float winding_number_threshold
 )
 {
     mesh_query_point_t query;
@@ -1029,19 +1065,20 @@ CUDA_CALLABLE inline mesh_query_point_t mesh_query_point_sign_winding_number(
     return query;
 }
 
+#if 1  // adjoints (Metal backward kernels use them too)
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_parity(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
     int n_sample,
     float perturbation_scale,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    int& adj_n_sample,
-    float& adj_perturbation_scale,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    int WP_THREAD& adj_n_sample,
+    float WP_THREAD& adj_perturbation_scale,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_sign_parity(
@@ -1053,13 +1090,13 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_parity(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_no_sign(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_no_sign(
@@ -1070,13 +1107,13 @@ CUDA_CALLABLE inline void adj_mesh_query_point_no_sign(
 
 CUDA_CALLABLE inline void adj_mesh_query_furthest_point_no_sign(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float min_dist,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_min_dist,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_min_dist,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_furthest_point_no_sign(
@@ -1087,15 +1124,15 @@ CUDA_CALLABLE inline void adj_mesh_query_furthest_point_no_sign(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_normal(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
     float epsilon,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_epsilon,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_epsilon,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_sign_normal(
@@ -1106,17 +1143,17 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_normal(
 
 CUDA_CALLABLE inline void adj_mesh_query_point_sign_winding_number(
     uint64_t id,
-    const vec3& point,
+    const vec3 WP_THREAD& point,
     float max_dist,
     float accuracy,
     float winding_number_threshold,
-    const mesh_query_point_t& ret,
+    const mesh_query_point_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_point,
-    float& adj_max_dist,
-    float& adj_accuracy,
-    float& adj_winding_number_threshold,
-    mesh_query_point_t& adj_ret
+    vec3 WP_THREAD& adj_point,
+    float WP_THREAD& adj_max_dist,
+    float WP_THREAD& adj_accuracy,
+    float WP_THREAD& adj_winding_number_threshold,
+    mesh_query_point_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_point_sign_winding_number(
@@ -1126,7 +1163,9 @@ CUDA_CALLABLE inline void adj_mesh_query_point_sign_winding_number(
     );
 }
 
-CUDA_CALLABLE inline vec3 mesh_query_ray_safe_dir(const vec3& dir)
+#endif
+
+CUDA_CALLABLE inline vec3 mesh_query_ray_safe_dir(const vec3 WP_THREAD& dir)
 {
     vec3 ray_dir = dir;
     if (ray_dir[0] == 0.0f)
@@ -1138,19 +1177,19 @@ CUDA_CALLABLE inline vec3 mesh_query_ray_safe_dir(const vec3& dir)
     return ray_dir;
 }
 
-CUDA_CALLABLE inline bool mesh_query_ray_use_fast_aabb(const vec3& dir)
+CUDA_CALLABLE inline bool mesh_query_ray_use_fast_aabb(const vec3 WP_THREAD& dir)
 {
     return dir[0] != 0.0f && dir[1] != 0.0f && dir[2] != 0.0f;
 }
 
 CUDA_CALLABLE inline bool mesh_query_ray_intersect_aabb(
-    const vec3& start,
-    const vec3& dir,
-    const vec3& rcp_dir,
+    const vec3 WP_THREAD& start,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& rcp_dir,
     bool fast_aabb,
-    const vec3& lower,
-    const vec3& upper,
-    float& t
+    const vec3 WP_THREAD& lower,
+    const vec3 WP_THREAD& upper,
+    float WP_THREAD& t
 )
 {
     if (fast_aabb)
@@ -1161,15 +1200,15 @@ CUDA_CALLABLE inline bool mesh_query_ray_intersect_aabb(
 
 CUDA_CALLABLE inline bool mesh_query_ray(
     uint64_t id,
-    const vec3& start,
-    const vec3& dir,
+    const vec3 WP_THREAD& start,
+    const vec3 WP_THREAD& dir,
     float max_t,
-    float& t,
-    float& u,
-    float& v,
-    float& sign,
-    vec3& normal,
-    int& face,
+    float WP_THREAD& t,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
+    float WP_THREAD& sign,
+    vec3 WP_THREAD& normal,
+    int WP_THREAD& face,
     int root = -1
 )
 {
@@ -1285,7 +1324,7 @@ CUDA_CALLABLE inline bool mesh_query_ray(
 }
 
 CUDA_CALLABLE inline bool
-mesh_query_ray_anyhit(uint64_t id, const vec3& start, const vec3& dir, float max_t, int root = -1)
+mesh_query_ray_anyhit(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, float max_t, int root = -1)
 {
     Mesh mesh = mesh_get(id);
 
@@ -1367,7 +1406,8 @@ mesh_query_ray_anyhit(uint64_t id, const vec3& start, const vec3& dir, float max
     }
 }
 
-CUDA_CALLABLE inline int mesh_query_ray_count_intersections(uint64_t id, const vec3& start, const vec3& dir, int root)
+CUDA_CALLABLE inline int
+mesh_query_ray_count_intersections(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, int root)
 {
     Mesh mesh = mesh_get(id);
 
@@ -1425,7 +1465,7 @@ CUDA_CALLABLE inline int mesh_query_ray_count_intersections(uint64_t id, const v
     return num_hit;
 }
 
-template <typename T> CUDA_CALLABLE inline void _swap(T& a, T& b)
+template <typename T> CUDA_CALLABLE inline void _swap(T WP_THREAD& a, T WP_THREAD& b)
 {
     T t = a;
     a = b;
@@ -1434,15 +1474,15 @@ template <typename T> CUDA_CALLABLE inline void _swap(T& a, T& b)
 
 CUDA_CALLABLE inline bool mesh_query_ray_ordered(
     uint64_t id,
-    const vec3& start,
-    const vec3& dir,
+    const vec3 WP_THREAD& start,
+    const vec3 WP_THREAD& dir,
     float max_t,
-    float& t,
-    float& u,
-    float& v,
-    float& sign,
-    vec3& normal,
-    int& face,
+    float WP_THREAD& t,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
+    float WP_THREAD& sign,
+    vec3 WP_THREAD& normal,
+    int WP_THREAD& face,
     int root = -1
 )
 {
@@ -1562,28 +1602,28 @@ CUDA_CALLABLE inline bool mesh_query_ray_ordered(
 
 CUDA_CALLABLE inline void adj_mesh_query_ray(
     uint64_t id,
-    const vec3& start,
-    const vec3& dir,
+    const vec3 WP_THREAD& start,
+    const vec3 WP_THREAD& dir,
     float max_t,
     float t,
     float u,
     float v,
     float sign,
-    const vec3& n,
+    const vec3 WP_THREAD& n,
     int face,
     int root,
     uint64_t adj_id,
-    vec3& adj_start,
-    vec3& adj_dir,
-    float& adj_max_t,
-    float& adj_t,
-    float& adj_u,
-    float& adj_v,
-    float& adj_sign,
-    vec3& adj_n,
-    int& adj_face,
-    int& adj_root,
-    bool& adj_ret
+    vec3 WP_THREAD& adj_start,
+    vec3 WP_THREAD& adj_dir,
+    float WP_THREAD& adj_max_t,
+    float WP_THREAD& adj_t,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_sign,
+    vec3 WP_THREAD& adj_n,
+    int WP_THREAD& adj_face,
+    int WP_THREAD& adj_root,
+    bool WP_THREAD& adj_ret
 )
 {
 
@@ -1620,7 +1660,7 @@ struct mesh_query_ray_t {
     }
 
     // Required for adjoint computations.
-    CUDA_CALLABLE inline mesh_query_ray_t& operator+=(const mesh_query_ray_t& other)
+    CUDA_CALLABLE inline mesh_query_ray_t WP_THREAD& operator+=(const mesh_query_ray_t WP_THREAD& other)
     {
         result |= other.result;  // Use OR for bool accumulation
         sign += other.sign;
@@ -1642,7 +1682,7 @@ struct mesh_query_ray_t {
 };
 
 CUDA_CALLABLE inline mesh_query_ray_t
-mesh_query_ray(uint64_t id, const vec3& start, const vec3& dir, float max_t, int root)
+mesh_query_ray(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, float max_t, int root)
 {
     mesh_query_ray_t query;
     query.result
@@ -1652,17 +1692,17 @@ mesh_query_ray(uint64_t id, const vec3& start, const vec3& dir, float max_t, int
 
 CUDA_CALLABLE inline void adj_mesh_query_ray(
     uint64_t id,
-    const vec3& start,
-    const vec3& dir,
+    const vec3 WP_THREAD& start,
+    const vec3 WP_THREAD& dir,
     float max_t,
     int root,
-    const mesh_query_ray_t& ret,
+    const mesh_query_ray_t WP_THREAD& ret,
     uint64_t adj_id,
-    vec3& adj_start,
-    vec3& adj_dir,
-    float& adj_max_t,
-    int& adj_root,
-    mesh_query_ray_t& adj_ret
+    vec3 WP_THREAD& adj_start,
+    vec3 WP_THREAD& adj_dir,
+    float WP_THREAD& adj_max_t,
+    int WP_THREAD& adj_root,
+    mesh_query_ray_t WP_THREAD& adj_ret
 )
 {
     adj_mesh_query_ray(
@@ -1677,8 +1717,9 @@ CUDA_CALLABLE inline void adj_mesh_query_ray(
 // eager-child-loading overhead of the near-far mesh_query_ray traversal is not
 // worth paying. This function uses the classic push-both-children approach,
 // which has half the BVH node loads per inner step.
-CUDA_CALLABLE inline bool
-mesh_query_ray_closest_sign(const Mesh& mesh, const vec3& start, const vec3& dir, float& out_sign)
+CUDA_CALLABLE inline bool mesh_query_ray_closest_sign(
+    const Mesh WP_THREAD& mesh, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, float WP_THREAD& out_sign
+)
 {
     int stack[BVH_QUERY_STACK_SIZE];
     int stack_size = 0;
@@ -1733,7 +1774,7 @@ mesh_query_ray_closest_sign(const Mesh& mesh, const vec3& start, const vec3& dir
 }
 
 // determine if a point is inside (ret < 0 ) or outside the mesh (ret > 0) using ray tracing
-CUDA_CALLABLE inline float mesh_query_inside_ray_tracing(uint64_t id, const vec3& p)
+CUDA_CALLABLE inline float mesh_query_inside_ray_tracing(uint64_t id, const vec3 WP_THREAD& p)
 {
     Mesh mesh = mesh_get(id);
 
@@ -1754,8 +1795,9 @@ CUDA_CALLABLE inline float mesh_query_inside_ray_tracing(uint64_t id, const vec3
 
 
 // determine if a point is inside (ret < 0 ) or outside the mesh (ret > 0)
-CUDA_CALLABLE inline float
-mesh_query_inside_parity(uint64_t id, const vec3& p, const vec3 base_dir, int n_sample, float perturbation_scale)
+CUDA_CALLABLE inline float mesh_query_inside_parity(
+    uint64_t id, const vec3 WP_THREAD& p, const vec3 base_dir, int n_sample, float perturbation_scale
+)
 {
     int vote = 0;
 
@@ -1810,7 +1852,10 @@ struct mesh_query_aabb_t {
     }
 
     // Required for adjoint computations.
-    CUDA_CALLABLE inline mesh_query_aabb_t& operator+=(const mesh_query_aabb_t& other) { return *this; }
+    CUDA_CALLABLE inline mesh_query_aabb_t WP_THREAD& operator+=(const mesh_query_aabb_t WP_THREAD& other)
+    {
+        return *this;
+    }
 
     // Mesh Id
     Mesh mesh;
@@ -1868,7 +1913,8 @@ CUDA_CALLABLE inline int* mesh_query_shared_stack()
 // (read only on the kind-erased paths; statically-typed iterators are selected
 // at Warp codegen time via the Python return type).
 template <bool IsSphere>
-CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_impl(uint64_t id, const vec3& a, const vec3& b, float radius)
+CUDA_CALLABLE inline mesh_query_aabb_t
+mesh_query_impl(uint64_t id, const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, float radius)
 {
     mesh_query_aabb_t query;
     query.face = -1;
@@ -1896,7 +1942,8 @@ CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_impl(uint64_t id, const vec3& 
     return query;
 }
 
-CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
+CUDA_CALLABLE inline mesh_query_aabb_t
+mesh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     return mesh_query_impl<false>(id, lower, upper, 0.0f);
 }
@@ -1904,17 +1951,19 @@ CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_aabb(uint64_t id, const vec3& 
 // Sphere query: iterate triangles that intersect the sphere. The broad phase keeps triangles whose AABB is
 // within `radius` of `center` (exact sphere-AABB test); the narrow phase keeps only those whose closest
 // point to `center` is within `radius`.
-CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_sphere(uint64_t id, const vec3& center, float radius)
+CUDA_CALLABLE inline mesh_query_aabb_t mesh_query_sphere(uint64_t id, const vec3 WP_THREAD& center, float radius)
 {
     return mesh_query_impl<true>(id, center, center, radius);
 }
 
 // Sphere per-primitive test: broad-phase sphere test against the cached triangle AABB,
 // then an exact closest-point narrow phase (with a fallback for degenerate faces).
-CUDA_CALLABLE inline bool mesh_query_prim_test(const mesh_query_aabb_t& query, const Mesh& mesh, int primitive_index)
+CUDA_CALLABLE inline bool
+mesh_query_prim_test(const mesh_query_aabb_t WP_THREAD& query, const Mesh WP_THREAD& mesh, int primitive_index)
 {
     if (!intersect_sphere_aabb(
-            query.input_lower, query.radius_sq, mesh.lowers[primitive_index], mesh.uppers[primitive_index]
+            query.input_lower, query.radius_sq, bvh_load_vec3(mesh.lowers, primitive_index),
+            bvh_load_vec3(mesh.uppers, primitive_index)
         ))
         return false;
 
@@ -1925,7 +1974,7 @@ CUDA_CALLABLE inline bool mesh_query_prim_test(const mesh_query_aabb_t& query, c
     vec3 b = mesh.points[j];
     vec3 c = mesh.points[k];
 
-    const vec3& center = query.input_lower;
+    const vec3 WP_THREAD& center = query.input_lower;
     vec3 cp;
     // Guard against degenerate (zero-area) faces to avoid NaN from closest_point_to_triangle.
     vec3 ab = b - a, ac = c - a;
@@ -1960,8 +2009,15 @@ CUDA_CALLABLE inline bool mesh_query_prim_test(const mesh_query_aabb_t& query, c
 }
 
 // Stub
-CUDA_CALLABLE inline void
-adj_mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper, uint64_t, vec3&, vec3&, mesh_query_aabb_t&)
+CUDA_CALLABLE inline void adj_mesh_query_aabb(
+    uint64_t id,
+    const vec3 WP_THREAD& lower,
+    const vec3 WP_THREAD& upper,
+    uint64_t,
+    vec3 WP_THREAD&,
+    vec3 WP_THREAD&,
+    mesh_query_aabb_t WP_THREAD&
+)
 {
 }
 
@@ -1978,14 +2034,16 @@ adj_mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper, uint64_t,
 // ---------------------------------------------------------------------------
 
 struct AabbNodeTest {
-    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t& q, const vec3& lo, const vec3& hi) const
+    CUDA_CALLABLE bool
+    operator()(const mesh_query_aabb_t WP_THREAD& q, const vec3 WP_THREAD& lo, const vec3 WP_THREAD& hi) const
     {
         return intersect_aabb_aabb(q.input_lower, q.input_upper, lo, hi);
     }
 };
 
 struct SphereNodeTest {
-    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t& q, const vec3& lo, const vec3& hi) const
+    CUDA_CALLABLE bool
+    operator()(const mesh_query_aabb_t WP_THREAD& q, const vec3 WP_THREAD& lo, const vec3 WP_THREAD& hi) const
     {
         return intersect_sphere_aabb(q.input_lower, q.radius_sq, lo, hi);
     }
@@ -1993,7 +2051,7 @@ struct SphereNodeTest {
 
 // Broad-phase AABB primitive test: check the triangle's cached AABB only.
 struct AabbPrimitiveTest {
-    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t& q, const Mesh& m, int pi) const
+    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t WP_THREAD& q, const Mesh WP_THREAD& m, int pi) const
     {
         const vec3 face_lower = bvh_load_vec3(m.lowers, pi);
         const vec3 face_upper = bvh_load_vec3(m.uppers, pi);
@@ -2004,7 +2062,7 @@ struct AabbPrimitiveTest {
 // Sphere primitive test: delegates to mesh_query_prim_test which handles
 // the degenerate-face guard and the closest-point narrow phase.
 struct SpherePrimitiveTest {
-    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t& q, const Mesh& m, int pi) const
+    CUDA_CALLABLE bool operator()(const mesh_query_aabb_t WP_THREAD& q, const Mesh WP_THREAD& m, int pi) const
     {
         return mesh_query_prim_test(q, m, pi);
     }
@@ -2017,7 +2075,7 @@ struct SpherePrimitiveTest {
 // on singleton-leaf trees, e.g. the cuBQL mesh default). The sphere iterator keeps
 // the test - it is its narrow phase.
 template <typename NodeTest, typename PrimitiveTest, bool TEST_SINGLETON = true>
-CUDA_CALLABLE inline bool mesh_query_next_impl(mesh_query_aabb_t& query, int& index)
+CUDA_CALLABLE inline bool mesh_query_next_impl(mesh_query_aabb_t WP_THREAD& query, int WP_THREAD& index)
 {
     Mesh mesh = query.mesh;
 
@@ -2042,7 +2100,9 @@ CUDA_CALLABLE inline bool mesh_query_next_impl(mesh_query_aabb_t& query, int& in
         BVHPackedNodeHalf node_lower = bvh_load_node(mesh.bvh.node_lowers, node_index);
         BVHPackedNodeHalf node_upper = bvh_load_node(mesh.bvh.node_uppers, node_index);
 
-        if (!NodeTest {}(query, reinterpret_cast<vec3&>(node_lower), reinterpret_cast<vec3&>(node_upper)))
+        if (!NodeTest {}(
+                query, reinterpret_cast<vec3 WP_THREAD&>(node_lower), reinterpret_cast<vec3 WP_THREAD&>(node_upper)
+            ))
             continue;
 
         const int left_index = node_lower.i;
@@ -2082,13 +2142,13 @@ CUDA_CALLABLE inline bool mesh_query_next_impl(mesh_query_aabb_t& query, int& in
 // (the alias) and by mesh_query_next when the query object is MeshQueryAABB.
 // AabbPrimitiveTest always passes after AabbNodeTest on singleton leaves
 // (leaf AABB == primitive AABB), so the compiler folds it to a single test.
-CUDA_CALLABLE inline bool mesh_query_aabb_next(mesh_query_aabb_t& query, int& index)
+CUDA_CALLABLE inline bool mesh_query_aabb_next(mesh_query_aabb_t WP_THREAD& query, int WP_THREAD& index)
 {
     return mesh_query_next_impl<AabbNodeTest, AabbPrimitiveTest, false>(query, index);
 }
 
 // Sphere iterator -- called from mesh_query_next when the query object is _MeshQuerySphere.
-CUDA_CALLABLE inline bool mesh_query_sphere_next(mesh_query_aabb_t& query, int& index)
+CUDA_CALLABLE inline bool mesh_query_sphere_next(mesh_query_aabb_t WP_THREAD& query, int WP_THREAD& index)
 {
     return mesh_query_next_impl<SphereNodeTest, SpherePrimitiveTest>(query, index);
 }
@@ -2098,23 +2158,23 @@ CUDA_CALLABLE inline bool mesh_query_sphere_next(mesh_query_aabb_t& query, int& 
 // annotated with the parent type), so it dispatches on the kind stored at
 // construction (radius_sq alone cannot distinguish a zero-radius sphere query from
 // an AABB query). The statically-typed iterators above never route through here.
-CUDA_CALLABLE inline bool mesh_query_next_dynamic(mesh_query_aabb_t& query, int& index)
+CUDA_CALLABLE inline bool mesh_query_next_dynamic(mesh_query_aabb_t WP_THREAD& query, int WP_THREAD& index)
 {
     if (query.kind == MeshQueryKind::SPHERE)
         return mesh_query_sphere_next(query, index);
     return mesh_query_aabb_next(query, index);
 }
 
-CUDA_CALLABLE inline int iter_next(mesh_query_aabb_t& query) { return query.face; }
+CUDA_CALLABLE inline int iter_next(mesh_query_aabb_t WP_THREAD& query) { return query.face; }
 
-CUDA_CALLABLE inline bool iter_cmp(mesh_query_aabb_t& query)
+CUDA_CALLABLE inline bool iter_cmp(mesh_query_aabb_t WP_THREAD& query)
 {
     // The for-loop protocol shares one iter_cmp across all query kinds, so it must
     // dispatch on the stored kind.
     return mesh_query_next_dynamic(query, query.face);
 }
 
-CUDA_CALLABLE inline mesh_query_aabb_t iter_reverse(const mesh_query_aabb_t& query)
+CUDA_CALLABLE inline mesh_query_aabb_t iter_reverse(const mesh_query_aabb_t WP_THREAD& query)
 {
     // can't reverse BVH queries, users should not rely on neighbor ordering
     return query;
@@ -2166,11 +2226,11 @@ CUDA_CALLABLE inline void adj_mesh_eval_position(
     int tri,
     float u,
     float v,
-    uint64_t& adj_id,
-    int& adj_tri,
-    float& adj_u,
-    float& adj_v,
-    const vec3& adj_ret
+    uint64_t WP_THREAD& adj_id,
+    int WP_THREAD& adj_tri,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    const vec3 WP_THREAD& adj_ret
 )
 {
     Mesh mesh = mesh_get(id);
@@ -2197,11 +2257,11 @@ CUDA_CALLABLE inline void adj_mesh_eval_velocity(
     int tri,
     float u,
     float v,
-    uint64_t& adj_id,
-    int& adj_tri,
-    float& adj_u,
-    float& adj_v,
-    const vec3& adj_ret
+    uint64_t WP_THREAD& adj_id,
+    int WP_THREAD& adj_tri,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    const vec3 WP_THREAD& adj_ret
 )
 {
     Mesh mesh = mesh_get(id);
@@ -2243,8 +2303,9 @@ CUDA_CALLABLE inline vec3 mesh_eval_face_normal(uint64_t id, int tri)
     return normalize(cross(q - p, r - p));
 }
 
-CUDA_CALLABLE inline void
-adj_mesh_eval_face_normal(uint64_t id, int tri, uint64_t& adj_id, int& adj_tri, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_mesh_eval_face_normal(
+    uint64_t id, int tri, uint64_t WP_THREAD& adj_id, int WP_THREAD& adj_tri, const vec3 WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: backprop through normalize(cross(q-p, r-p)) to
     // mesh.points.grad slots for the three face vertex indices
@@ -2259,7 +2320,9 @@ CUDA_CALLABLE inline vec3 mesh_get_point(uint64_t id, int index)
 
 #if FP_CHECK
     if (index >= mesh.num_tris * 3) {
-        printf("mesh_get_point (%llu, %d) out of bounds at %s:%d\n", id, index, __FILE__, __LINE__);
+        printf(
+            "mesh_get_point (%lu, %d) out of bounds at %s:%d\n", (unsigned long)id, index, __FILE__, __LINE__
+        );  // Metal has no long long
         assert(0);
     }
 #endif
@@ -2268,8 +2331,9 @@ CUDA_CALLABLE inline vec3 mesh_get_point(uint64_t id, int index)
     return mesh.points[i];
 }
 
-CUDA_CALLABLE inline void
-adj_mesh_get_point(uint64_t id, int index, uint64_t& adj_id, int& adj_index, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_mesh_get_point(
+    uint64_t id, int index, uint64_t WP_THREAD& adj_id, int WP_THREAD& adj_index, const vec3 WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: atomic-add adj_ret into mesh.points.grad[index] when the gradient
     // buffer is allocated
@@ -2284,7 +2348,9 @@ CUDA_CALLABLE inline vec3 mesh_get_velocity(uint64_t id, int index)
 
 #if FP_CHECK
     if (index >= mesh.num_tris * 3) {
-        printf("mesh_get_velocity (%llu, %d) out of bounds at %s:%d\n", id, index, __FILE__, __LINE__);
+        printf(
+            "mesh_get_velocity (%lu, %d) out of bounds at %s:%d\n", (unsigned long)id, index, __FILE__, __LINE__
+        );  // Metal has no long long
         assert(0);
     }
 #endif
@@ -2293,8 +2359,9 @@ CUDA_CALLABLE inline vec3 mesh_get_velocity(uint64_t id, int index)
     return mesh.velocities[i];
 }
 
-CUDA_CALLABLE inline void
-adj_mesh_get_velocity(uint64_t id, int index, uint64_t& adj_id, int& adj_index, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_mesh_get_velocity(
+    uint64_t id, int index, uint64_t WP_THREAD& adj_id, int WP_THREAD& adj_index, const vec3 WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: atomic-add adj_ret into mesh.velocities.grad[index] when the
     // gradient buffer is allocated
@@ -2312,9 +2379,9 @@ CUDA_CALLABLE inline int mesh_get_index(uint64_t id, int face_vertex_index)
     return mesh.indices[face_vertex_index];
 }
 
-CUDA_CALLABLE bool mesh_get_descriptor(uint64_t id, Mesh& mesh);
-CUDA_CALLABLE bool mesh_set_descriptor(uint64_t id, const Mesh& mesh);
-CUDA_CALLABLE void mesh_add_descriptor(uint64_t id, const Mesh& mesh);
+CUDA_CALLABLE bool mesh_get_descriptor(uint64_t id, Mesh WP_THREAD& mesh);
+CUDA_CALLABLE bool mesh_set_descriptor(uint64_t id, const Mesh WP_THREAD& mesh);
+CUDA_CALLABLE void mesh_add_descriptor(uint64_t id, const Mesh WP_THREAD& mesh);
 CUDA_CALLABLE void mesh_rem_descriptor(uint64_t id);
 
 }  // namespace wp

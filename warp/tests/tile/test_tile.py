@@ -1670,7 +1670,7 @@ def test_tile_random_generators_default_and_bounded_ranges(test, device):
 
     wp.launch_tiled(test_rand_kernel, dim=[M, N], inputs=[seed, x, y], block_dim=TILE_DIM, device=device)
 
-    if wp.get_device(device).is_cuda or wp.config.enable_cpu_blocks:
+    if not wp.get_device(device).is_cpu or wp.config.enable_cpu_blocks:
         x_true = np.array(
             [
                 [798497746, 1803297529, -955788638, 17806966],
@@ -1717,7 +1717,7 @@ def test_tile_random_generators_default_and_bounded_ranges(test, device):
 
     wp.launch_tiled(test_rand_range_kernel, dim=[M, N], inputs=[seed, x, y], block_dim=TILE_DIM, device=device)
 
-    if wp.get_device(device).is_cuda or wp.config.enable_cpu_blocks:
+    if not wp.get_device(device).is_cpu or wp.config.enable_cpu_blocks:
         x_true = np.array([[1, 4, 3, 1], [-2, -2, 1, 1], [1, -2, -2, -4], [3, 0, 3, -1]], dtype=int)
         y_true = np.array(
             [

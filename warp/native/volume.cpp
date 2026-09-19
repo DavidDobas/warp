@@ -7,6 +7,10 @@
 #include "volume_builder.h"
 #include "volume_impl.h"
 
+#if defined(__APPLE__)
+#include "metal_host.h"
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -421,6 +425,14 @@ void volume_rem_descriptor(uint64_t id) { g_volume_descriptors.erase(id); }
 
 void volume_copy_live_metadata(const VolumeDesc* volume, pnanovdb_grid_t& grid_data, pnanovdb_tree_t& tree_data)
 {
+#if defined(__APPLE__)
+    // Metal volumes live in unified memory: wait for kernels that may still rebuild the grid, then read it
+    // in place (the context of a Metal volume is not a CUDA context).
+    if (volume->context && wp_metal_synchronize(wp::metal_context_ordinal(volume->context)) != 0)
+        return;
+    std::memcpy(&grid_data, volume->buffer, sizeof(pnanovdb_grid_t));
+    std::memcpy(&tree_data, static_cast<pnanovdb_grid_t*>(volume->buffer) + 1, sizeof(pnanovdb_tree_t));
+#else
     if (volume->context) {
         ContextGuard guard(volume->context);
         void* stream = wp_cuda_stream_get_current();
@@ -434,6 +446,7 @@ void volume_copy_live_metadata(const VolumeDesc* volume, pnanovdb_grid_t& grid_d
         std::memcpy(&grid_data, volume->buffer, sizeof(pnanovdb_grid_t));
         std::memcpy(&tree_data, static_cast<pnanovdb_grid_t*>(volume->buffer) + 1, sizeof(pnanovdb_tree_t));
     }
+#endif
 }
 
 void volume_mark_rebuildable(uint64_t id, const VolumeRebuildCapacities& capacities)
@@ -609,6 +622,49 @@ uint64_t wp_volume_create_host(void* buf, uint64_t size, bool copy, bool owner)
     return id;
 }
 
+#if defined(__APPLE__)
+// Metal: volumes are built by the host implementation into Metal memory (unified, so the host can
+// read the grid) and registered under the buffer's GPU address, which is what kernels dereference.
+#include "metal_host.h"
+
+static uint64_t metal_volume_rekey(void* context, uint64_t host_id)
+{
+    if (!host_id)
+        return 0;
+    const VolumeDesc* desc;
+    if (!volume_get_descriptor(host_id, desc))
+        return 0;
+    VolumeDesc moved = *desc;
+    moved.context = context;
+    const uint64_t id = wp_metal_gpu_address(wp::metal_context_ordinal(context), moved.buffer);
+    volume_rem_descriptor(host_id);
+    if (!id)
+        return 0;
+    volume_add_descriptor(id, std::move(moved));
+    return id;
+}
+
+uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool copy, bool owner)
+{
+    const int ordinal = wp::metal_context_ordinal(context);
+    wp_metal_synchronize(ordinal);  // the source buffer may still be written by kernels
+    wp::ScopedMetalHostAlloc scope(ordinal);
+    return metal_volume_rekey(context, wp_volume_create_host(buf, size, copy, owner));
+}
+
+void wp_volume_destroy_device(uint64_t id)
+{
+    const VolumeDesc* volume;
+    if (!volume_get_descriptor(id, volume))
+        return;
+    const int ordinal = wp::metal_context_ordinal(volume->context);
+    wp_metal_synchronize(ordinal);
+    wp::ScopedMetalHostAlloc scope(ordinal);
+    if (volume->owner)
+        wp_free_host(volume->buffer);
+    volume_rem_descriptor(id);
+}
+#else
 // NB: buf must be a pointer on the same device
 uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool copy, bool owner)
 {
@@ -669,6 +725,7 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
 
     return id;
 }
+#endif  // __APPLE__
 
 template <typename BuildT>
 uint64_t volume_create_rebuildable_device(
@@ -1164,6 +1221,7 @@ void wp_volume_rebuild_from_active_voxels_host(
     );
 }
 
+#if !defined(__APPLE__)
 void wp_volume_destroy_device(uint64_t id)
 {
     const VolumeDesc* volume;
@@ -1175,6 +1233,7 @@ void wp_volume_destroy_device(uint64_t id)
         volume_rem_descriptor(id);
     }
 }
+#endif  // !__APPLE__
 
 #if WP_ENABLE_CUDA
 
@@ -1441,6 +1500,172 @@ void wp_volume_get_voxels_device(uint64_t id, void* buf)
         pnanovdb_coord_t* voxel_coords = static_cast<pnanovdb_coord_t*>(buf);
         launch_get_voxel_coords(volume->context, leaf_count, voxel_count, voxel_coords, volume->as_pnano());
     }
+}
+
+#elif defined(__APPLE__)
+// Metal: the host builders work on unified memory; results are re-keyed under GPU addresses.
+namespace {
+struct MetalVolumeScope {
+    int ordinal;
+    wp::ScopedMetalHostAlloc scope;
+    explicit MetalVolumeScope(void* context)
+        : ordinal(wp::metal_context_ordinal(context))
+        , scope(ordinal)
+    {
+        wp_metal_synchronize(ordinal);  // inputs may still be written by kernels
+    }
+};
+void* metal_volume_context(uint64_t id)
+{
+    const VolumeDesc* volume;
+    return volume_get_descriptor(id, volume) ? volume->context : nullptr;
+}
+}  // namespace
+
+uint64_t wp_volume_from_tiles_device(
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(context);
+    return metal_volume_rekey(
+        context,
+        wp_volume_from_tiles_host(
+            points, num_points, point_mask, transform, translation, points_in_world_space, value_ptr, value_size,
+            value_type, rebuildable, max_tiles, max_lower_nodes, max_upper_nodes, status
+        )
+    );
+}
+
+uint64_t wp_volume_index_from_tiles_device(
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_tiles,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(context);
+    return metal_volume_rekey(
+        context,
+        wp_volume_index_from_tiles_host(
+            points, num_points, point_mask, transform, translation, points_in_world_space, rebuildable, max_tiles,
+            max_lower_nodes, max_upper_nodes, status
+        )
+    );
+}
+
+uint64_t wp_volume_from_active_voxels_device(
+    void* context,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    bool rebuildable,
+    uint32_t max_active_voxels,
+    uint32_t max_leaf_nodes,
+    uint32_t max_lower_nodes,
+    uint32_t max_upper_nodes,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(context);
+    return metal_volume_rekey(
+        context,
+        wp_volume_from_active_voxels_host(
+            points, num_points, point_mask, transform, translation, points_in_world_space, rebuildable,
+            max_active_voxels, max_leaf_nodes, max_lower_nodes, max_upper_nodes, status
+        )
+    );
+}
+
+void wp_volume_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    const void* value_ptr,
+    uint32_t value_size,
+    const char* value_type,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(metal_volume_context(id));
+    wp_volume_rebuild_from_tiles_host(
+        id, points, num_points, point_mask, transform, translation, points_in_world_space, value_ptr, value_size,
+        value_type, status
+    );
+}
+
+void wp_volume_index_rebuild_from_tiles_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(metal_volume_context(id));
+    wp_volume_index_rebuild_from_tiles_host(
+        id, points, num_points, point_mask, transform, translation, points_in_world_space, status
+    );
+}
+
+void wp_volume_rebuild_from_active_voxels_device(
+    uint64_t id,
+    void* points,
+    int num_points,
+    const int32_t* point_mask,
+    float transform[9],
+    float translation[3],
+    bool points_in_world_space,
+    uint32_t* status
+)
+{
+    MetalVolumeScope scope(metal_volume_context(id));
+    wp_volume_rebuild_from_active_voxels_host(
+        id, points, num_points, point_mask, transform, translation, points_in_world_space, status
+    );
+}
+
+void wp_volume_get_tiles_device(uint64_t id, void* buf)
+{
+    MetalVolumeScope scope(metal_volume_context(id));
+    wp_volume_get_tiles_host(id, buf);
+}
+
+void wp_volume_get_voxels_device(uint64_t id, void* buf)
+{
+    MetalVolumeScope scope(metal_volume_context(id));
+    wp_volume_get_voxels_host(id, buf);
 }
 
 #else

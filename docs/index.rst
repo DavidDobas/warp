@@ -23,7 +23,8 @@ PyPI and nightly wheels for Linux and Windows use CUDA Toolkit 13.4. They requir
 NVIDIA R580-series or newer driver and a Turing (``sm_75``) or newer GPU for CUDA acceleration.
 For CUDA 12 environments, download a ``+cu12`` wheel from
 `GitHub Releases <https://github.com/NVIDIA/warp/releases>`_ or build Warp from source with CUDA 12.
-Warp can also run on the CPU. The Apple Silicon macOS wheel is CPU-only.
+Warp can also run on the CPU. The Apple Silicon macOS wheel is CPU-only; builds from source also run on
+Apple GPUs, see :doc:`user_guide/metal`.
 
 For conda, nightly builds, CUDA 12 compatibility wheels, building from source, and driver requirements,
 see :doc:`user_guide/installation`.
@@ -225,6 +226,7 @@ warp/examples/tile
 
     user_guide/installation
     user_guide/compatibility
+    user_guide/metal
     user_guide/basics
     user_guide/runtime
     user_guide/differentiability

@@ -187,7 +187,8 @@ Warp requires Python 3.10 or newer and supports Windows and Linux on x86-64,
 Linux on ARM64, and Apple Silicon macOS. PyPI and nightly wheels for Linux and
 Windows use CUDA Toolkit 13.4. They require an NVIDIA R580-series or newer driver
 and a Turing (``sm_75``) or newer GPU for CUDA acceleration. Warp can still run
-on the CPU without a compatible GPU or driver; macOS uses the CPU backend.
+on the CPU without a compatible GPU or driver. On macOS the wheels use the CPU
+backend, and builds from source can also use Apple GPUs (see :doc:`metal`).
 
 Python, operating-system, GPU-architecture, and driver requirements may change
 between releases. Check :doc:`compatibility` for the current requirements.

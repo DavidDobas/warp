@@ -58,13 +58,13 @@ public:
 };
 
 CUDA_CALLABLE inline void compute_integrals(
-    const vec3& a,
-    const vec3& b,
-    const vec3& c,
-    const vec3& P,
-    float* integral_ii,
-    float* integral_ij,
-    float* integral_ik,
+    const vec3 WP_THREAD& a,
+    const vec3 WP_THREAD& b,
+    const vec3 WP_THREAD& c,
+    const vec3 WP_THREAD& P,
+    float WP_THREAD* integral_ii,
+    float WP_THREAD* integral_ij,
+    float WP_THREAD* integral_ik,
     const int i
 )
 {
@@ -101,7 +101,7 @@ CUDA_CALLABLE inline void compute_integrals(
     *integral_ii = int_ii_a + int_ii_c;
 
     int jk = j;
-    float* integral = integral_ij;
+    float WP_THREAD* integral = integral_ij;
     float diff = jdiff;
     while (true)  // This only does 2 iterations, one for j and one for k
     {
@@ -128,15 +128,16 @@ CUDA_CALLABLE inline void compute_integrals(
     }
 };
 
-CUDA_CALLABLE inline void my_swap(int& a, int& b)
+CUDA_CALLABLE inline void my_swap(int WP_THREAD& a, int WP_THREAD& b)
 {
     int c = a;
     a = b;
     b = c;
 }
 
-CUDA_CALLABLE inline void
-precompute_triangle_solid_angle_props(const vec3& a, const vec3& b, const vec3& c, SolidAngleProps& my_data)
+CUDA_CALLABLE inline void precompute_triangle_solid_angle_props(
+    const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, SolidAngleProps WP_THREAD& my_data
+)
 {
     const vec3 ab = b - a;
     const vec3 ac = c - a;
@@ -260,7 +261,9 @@ precompute_triangle_solid_angle_props(const vec3& a, const vec3& b, const vec3& 
 }
 
 CUDA_CALLABLE inline void combine_precomputed_solid_angle_props(
-    SolidAngleProps& my_data, const SolidAngleProps* left_child_data, const SolidAngleProps* right_child_data
+    SolidAngleProps WP_THREAD& my_data,
+    const SolidAngleProps WP_THREAD* left_child_data,
+    const SolidAngleProps WP_THREAD* right_child_data
 )
 {
     vec3 N = left_child_data->normal;
@@ -323,7 +326,7 @@ CUDA_CALLABLE inline void combine_precomputed_solid_angle_props(
 
     for (int i = 0; i < (right_child_data ? 2 : 1); ++i) {
         // cppcheck-suppress nullPointerRedundantCheck
-        const SolidAngleProps& child_data = (i == 0) ? *left_child_data : *right_child_data;
+        const SolidAngleProps WP_THREAD& child_data = (i == 0) ? *left_child_data : *right_child_data;
         vec3 displacement = child_data.average_p - vec3(my_data.average_p);
         vec3 N = child_data.normal;
 
@@ -378,8 +381,9 @@ CUDA_CALLABLE inline void combine_precomputed_solid_angle_props(
         = length_sq(max(my_data.average_p - my_data.box.lower, my_data.box.upper - my_data.average_p));
 }
 
-CUDA_CALLABLE inline SolidAngleProps
-combine_precomputed_solid_angle_props(const SolidAngleProps* left_child_data, const SolidAngleProps* right_child_data)
+CUDA_CALLABLE inline SolidAngleProps combine_precomputed_solid_angle_props(
+    const SolidAngleProps WP_THREAD* left_child_data, const SolidAngleProps WP_THREAD* right_child_data
+)
 {
     SolidAngleProps my_data;
     combine_precomputed_solid_angle_props(my_data, left_child_data, right_child_data);
@@ -388,10 +392,13 @@ combine_precomputed_solid_angle_props(const SolidAngleProps* left_child_data, co
 
 // Return whether need to
 CUDA_CALLABLE inline bool evaluate_node_solid_angle(
-    const vec3& query_point, SolidAngleProps* current_data, float& solid_angle, const float accuracy_scale_sq
+    const vec3 WP_THREAD& query_point,
+    SolidAngleProps WP_DEVICE* current_data,
+    float WP_THREAD& solid_angle,
+    const float accuracy_scale_sq
 )
 {
-    SolidAngleProps& data = *current_data;
+    const SolidAngleProps data = *current_data;  // local copy: Metal has no device-reference operators
     float max_p_sq = data.max_p_dist_sq;
     vec3 q = query_point - data.average_p;
     float qlength2 = length_sq(q);
@@ -451,7 +458,8 @@ CUDA_CALLABLE inline bool evaluate_node_solid_angle(
     return false;
 }
 
-CUDA_CALLABLE inline float robust_solid_angle(const vec3& a, const vec3& b, const vec3& c, const vec3& p)
+CUDA_CALLABLE inline float
+robust_solid_angle(const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, const vec3 WP_THREAD& p)
 {
     vec3 qa = a - p;
     vec3 qb = b - p;
