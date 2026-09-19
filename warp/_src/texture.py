@@ -427,7 +427,12 @@ class Texture:
             c_mip_depths = (ctypes.c_int * resolved_num_mip_levels)(*(s[2] for s in mip_shapes))
             c_address_modes = (ctypes.c_int * 3)(address_mode_u, address_mode_v, address_mode_w)
             mip_data_ptrs = (ctypes.c_void_p * resolved_num_mip_levels)()
-            self._tex_handle = self._runtime.core.wp_texture_create_host(
+            create = (
+                (lambda *a: self._runtime.core.wp_texture_create_metal(device.metal_ordinal, *a))
+                if getattr(device, "is_metal", False)
+                else self._runtime.core.wp_texture_create_host
+            )
+            self._tex_handle = create(
                 ndim,
                 resolved_num_mip_levels,
                 c_mip_widths,
@@ -467,6 +472,8 @@ class Texture:
                         self._runtime.core.wp_texture_destroy_device(
                             self.device.context, self._array_handle, self._is_mipmapped
                         )
+            elif getattr(self.device, "is_metal", False):
+                self._runtime.core.wp_texture_destroy_metal(self._tex_handle)
             else:
                 self._runtime.core.wp_texture_destroy_host(self._tex_handle)
         except (TypeError, AttributeError):

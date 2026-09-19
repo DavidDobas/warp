@@ -1909,7 +1909,7 @@ def test_tile_rand(test, device):
 
     wp.launch_tiled(test_rand_kernel, dim=[M, N], inputs=[seed, x, y], block_dim=TILE_DIM, device=device)
 
-    if device.is_cuda:
+    if not wp.get_device(device).is_cpu:
         x_true = np.array(
             [
                 [798497746, 1803297529, -955788638, 17806966],
@@ -1956,7 +1956,7 @@ def test_tile_rand(test, device):
 
     wp.launch_tiled(test_rand_range_kernel, dim=[M, N], inputs=[seed, x, y], block_dim=TILE_DIM, device=device)
 
-    if device.is_cuda:
+    if not wp.get_device(device).is_cpu:
         x_true = np.array([[1, 4, 3, 1], [-2, -2, 1, 1], [1, -2, -2, -4], [3, 0, 3, -1]], dtype=int)
         y_true = np.array(
             [

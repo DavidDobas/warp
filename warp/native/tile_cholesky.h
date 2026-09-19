@@ -79,9 +79,96 @@ namespace partitioned_gemm {
 // plain sequential, the thread-0 diagonal write executes on the only thread,
 // and WP_TILE_SYNC() is a no-op -- behaviour matches the prior single-threaded
 // scalar fallback.
-template <bool Upper, typename TileA, typename TileOut>
-inline CUDA_CALLABLE void scalar_cholesky_impl(TileA& A, TileOut& Out)
+#if defined(__METAL_VERSION__)
+// Register Cholesky for blocks of at most one SIMD group: lane l owns columns l, l+BD, ... of the
+// factor in registers; the owner of column j scales it, the column is broadcast with SIMD shuffles
+// and every lane applies the rank-1 update to its own columns. No threadgroup memory and no
+// barriers during the factorization, so a world's latency no longer depends on how many
+// threadgroups fit in a core. The column loop is unrolled by template recursion so that every
+// register-array index is a compile-time constant (dynamic indexing would spill to thread memory).
+template <int J, int N, int CPL, int BD, typename T>
+inline WP_FORCE_INLINE void metal_register_cholesky_step(thread T (&col)[CPL][N], int lane)
 {
+    if constexpr (J < N) {
+        constexpr int owner = J % BD;
+        constexpr int cj = J / BD;
+        if (lane == owner) {
+            const T d = wp::sqrt(col[cj][J]);
+            const T inv = T(1) / d;
+            col[cj][J] = d;
+#pragma clang loop unroll(full)
+            for (int i = J + 1; i < N; ++i)
+                col[cj][i] *= inv;
+        }
+        T ljc[CPL];
+#pragma clang loop unroll(full)
+        for (int c = 0; c < CPL; ++c)
+            ljc[c] = T {};
+#pragma clang loop unroll(full)
+        for (int i = J; i < N; ++i) {
+            const T lij = metal::simd_shuffle(col[cj][i], ushort(owner));
+#pragma clang loop unroll(full)
+            for (int c = 0; c < CPL; ++c) {
+                const int jc = lane + c * BD;
+                if (i == jc)
+                    ljc[c] = lij;  // L[jc, J], reached before any row i > jc of column jc
+                if (jc > J && i >= jc)
+                    col[c][i] -= lij * ljc[c];
+            }
+        }
+        metal_register_cholesky_step<J + 1, N, CPL, BD, T>(col, lane);
+    }
+}
+
+template <bool Upper, typename TileA, typename TileOut>
+inline WP_FORCE_INLINE void metal_register_cholesky(TileA WP_THREAD& A, TileOut WP_THREAD& Out)
+{
+    using T = typename TileA::Type;
+    constexpr int n = TileA::Layout::Shape::dim(1);
+    constexpr int BD = WP_TILE_BLOCK_DIM;
+    constexpr int CPL = (n + BD - 1) / BD;  // columns per lane
+    const int lane = WP_TILE_THREAD_IDX;
+
+    auto idx = [](int row, int col) { return Upper ? tile_coord(col, row) : tile_coord(row, col); };
+
+    T col[CPL][n];
+#pragma clang loop unroll(full)
+    for (int c = 0; c < CPL; ++c) {
+        const int jc = lane + c * BD;
+#pragma clang loop unroll(full)
+        for (int i = 0; i < n; ++i)
+            col[c][i] = (jc < n && i >= jc) ? (Upper ? A.data(tile_coord(jc, i)) : A.data(tile_coord(i, jc))) : T {};
+    }
+
+    metal_register_cholesky_step<0, n, CPL, BD, T>(col, lane);
+
+    WP_TILE_SYNC();  // in-place callers alias A and Out: all reads are done before any write
+#pragma clang loop unroll(full)
+    for (int c = 0; c < CPL; ++c) {
+        const int jc = lane + c * BD;
+        if (jc < n) {
+#pragma clang loop unroll(full)
+            for (int i = 0; i < n; ++i) {
+                if (i >= jc)
+                    Out.data(idx(i, jc)) = col[c][i];
+                else
+                    Out.data(idx(jc, i)) = T {};  // zero the opposite triangle, row jc
+            }
+        }
+    }
+    WP_TILE_SYNC();
+}
+#endif  // __METAL_VERSION__
+
+template <bool Upper, typename TileA, typename TileOut>
+inline WP_FORCE_INLINE CUDA_CALLABLE void scalar_cholesky_impl(TileA WP_THREAD& A, TileOut WP_THREAD& Out)
+{
+#if defined(__METAL_VERSION__)
+    if constexpr (WP_TILE_BLOCK_DIM > 1 && WP_TILE_BLOCK_DIM <= 32 && TileA::Layout::Shape::dim(1) <= 40) {
+        metal_register_cholesky<Upper>(A, Out);
+        return;
+    }
+#endif
     using T = typename TileA::Type;
     constexpr int n = TileA::Layout::Shape::dim(1);
 
@@ -92,6 +179,11 @@ inline CUDA_CALLABLE void scalar_cholesky_impl(TileA& A, TileOut& Out)
     for (int j = 0; j < n; ++j) {
         // Diagonal: redundant compute on all threads.
         T s = A.data(tile_coord(j, j));
+
+        // In-place callers alias A and Out. Unlike GPU lockstep execution,
+        // one CPU fiber could otherwise overwrite the diagonal before its
+        // peers have read the original value.
+        WP_TILE_SYNC();
 
         for (int k = 0; k < j; ++k) {
             T r = Out.data(idx(j, k));
@@ -145,14 +237,15 @@ inline CUDA_CALLABLE void scalar_cholesky_impl(TileA& A, TileOut& Out)
 // Each phase ends with WP_TILE_SYNC(). Intra-phase, every thread writes to a
 // unique address.
 //
-// CPU compile: __shared__ is replaced with stack arrays. WP_TILE_BLOCK_DIM == 1
-// makes thread-strided loops collapse to sequential. Behaviour matches the
-// previous single-threaded adjoint on CPU.
+// CPU blocks share W1 and W2 through the tile arena. The one-lane
+// specialization retains the original local stack arrays.
 //
 // Upper=false: A = L L^T, Upper=true: A = U^T U
 template <bool Upper, typename TileA, typename TileOut>
-inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut& adj_Out, TileOut& Out)
+inline CUDA_CALLABLE void
+cooperative_scalar_cholesky_adj(TileA WP_THREAD& adj_A, TileOut WP_THREAD& adj_Out, TileOut WP_THREAD& Out)
 {
+    WP_TILE_ARENA_NULL
     using T = typename TileA::Type;
     constexpr int n = TileA::Layout::Shape::dim(1);
 
@@ -164,8 +257,17 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
     __shared__ T W1[n * n];
     __shared__ T W2[n * n];
 #else
-    T W1[n * n];
-    T W2[n * n];
+    T W1_local[WP_TILE_BLOCK_DIM == 1 ? n * n : 1];
+    T W2_local[WP_TILE_BLOCK_DIM == 1 ? n * n : 1];
+    T WP_THREAD* W1;
+    T WP_THREAD* W2;
+    if constexpr (WP_TILE_BLOCK_DIM == 1) {
+        W1 = W1_local;
+        W2 = W2_local;
+    } else {
+        W1 = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * n * n));
+        W2 = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * n * n));
+    }
 #endif
 
     // Phase 1: gemm into W1.
@@ -245,6 +347,13 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
         }
     }
     WP_TILE_SYNC();
+
+#if !defined(__CUDA_ARCH__)
+    if constexpr (WP_TILE_BLOCK_DIM > 1) {
+        WP_TILE_ALLOC(-int(sizeof(T) * n * n));
+        WP_TILE_ALLOC(-int(sizeof(T) * n * n));
+    }
+#endif
 }
 
 
@@ -255,7 +364,8 @@ inline CUDA_CALLABLE void cooperative_scalar_cholesky_adj(TileA& adj_A, TileOut&
 // Upper=false: produces lower-triangular L s.t. A = L L^T, zeros upper triangle.
 // Upper=true:  produces upper-triangular U s.t. A = U^T U, zeros lower triangle.
 template <bool Upper, typename Fwd, typename TileA, typename TileOut>
-CUDA_CALLABLE TileOut& tile_cholesky_impl(Fwd fun_forward, TileA& A, TileOut& Out)
+WP_FORCE_INLINE CUDA_CALLABLE TileOut WP_THREAD&
+tile_cholesky_impl(Fwd fun_forward, TileA WP_THREAD& A, TileOut WP_THREAD& Out)
 {
     static_assert(TileA::Layout::Shape::N == 2, "Expected TileA::Layout::Shape::N == 2");
     static_assert(TileOut::Layout::Shape::N == 2, "Expected TileOut::Layout::Shape::N == 2");
@@ -317,8 +427,13 @@ CUDA_CALLABLE TileOut& tile_cholesky_impl(Fwd fun_forward, TileA& A, TileOut& Ou
 
 
 template <bool Upper, typename BkwdGemm, typename BkwdTrsm, typename TileA, typename TileOut>
-CUDA_CALLABLE void
-adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut& Out, TileA& adj_A, TileOut& adj_Out)
+CUDA_CALLABLE void adj_tile_cholesky_impl(
+    BkwdGemm fun_bkwd_gemm,
+    BkwdTrsm fun_bkwd_trsm,
+    TileOut WP_THREAD& Out,
+    TileA WP_THREAD& adj_A,
+    TileOut WP_THREAD& adj_Out
+)
 {
     using T = typename TileA::Type;
     constexpr int n = TileA::Layout::Shape::dim(1);
@@ -405,7 +520,7 @@ adj_tile_cholesky_impl(BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileOut& 
 
 // Cholesky factorization (inplace) implementation.
 template <bool Upper, typename Fwd, typename TileA>
-CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, TileA& A)
+WP_FORCE_INLINE CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, TileA WP_THREAD& A)
 {
     static_assert(TileA::Layout::Shape::N == 2, "Expected TileA::Layout::Shape::N == 2");
     static_assert(TileA::Layout::Shape::dim(0) == TileA::Layout::Shape::dim(1), "Expected TileA to be square");
@@ -452,8 +567,9 @@ CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, TileA& A)
 
 // Cholesky (out-of-place): tile_cholesky<false>(...) for lower, tile_cholesky<true>(...) for upper
 template <bool Upper, typename Fwd, typename BkwdGemm, typename BkwdTrsm, typename TileA, typename TileOut>
-CUDA_CALLABLE TileOut&
-tile_cholesky(Fwd fun_forward, BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileA& A, TileOut& Out)
+CUDA_CALLABLE TileOut WP_THREAD& tile_cholesky(
+    Fwd fun_forward, BkwdGemm fun_bkwd_gemm, BkwdTrsm fun_bkwd_trsm, TileA WP_THREAD& A, TileOut WP_THREAD& Out
+)
 {
     return tile_cholesky_impl<Upper>(fun_forward, A, Out);
 }
@@ -465,27 +581,28 @@ CUDA_CALLABLE void adj_tile_cholesky(
     Fwd fun_forward,
     BkwdGemm fun_bkwd_gemm,
     BkwdTrsm fun_bkwd_trsm,
-    TileA& A,
-    TileOut& Out,
+    TileA WP_THREAD& A,
+    TileOut WP_THREAD& Out,
     Fwd adj_fun_forward,
     BkwdGemm adj_fun_bkwd_gemm,
     BkwdTrsm adj_fun_bkwd_trsm,
-    TileA& adj_A,
-    TileOut& adj_Out,
-    TileOut& adj_ret
+    TileA WP_THREAD& adj_A,
+    TileOut WP_THREAD& adj_Out,
+    TileOut WP_THREAD& adj_ret
 )
 {
     adj_tile_cholesky_impl<Upper>(fun_bkwd_gemm, fun_bkwd_trsm, Out, adj_A, adj_Out);
 }
 
 // Cholesky (inplace): tile_cholesky_inplace<false>(...) for lower, tile_cholesky_inplace<true>(...) for upper
-template <bool Upper, typename Fwd, typename TileA> CUDA_CALLABLE void tile_cholesky_inplace(Fwd fun_forward, TileA& A)
+template <bool Upper, typename Fwd, typename TileA>
+CUDA_CALLABLE void tile_cholesky_inplace(Fwd fun_forward, TileA WP_THREAD& A)
 {
     tile_cholesky_inplace_impl<Upper>(fun_forward, A);
 }
 
 template <bool Upper, typename Fwd, typename TileA, typename AdjFwd, typename AdjTileA>
-void adj_tile_cholesky_inplace(Fwd fun_forward, TileA& A, AdjFwd adj_fun_forward, AdjTileA& adj_A)
+void adj_tile_cholesky_inplace(Fwd fun_forward, TileA WP_THREAD& A, AdjFwd adj_fun_forward, AdjTileA WP_THREAD& adj_A)
 {
     // MISSINGADJOINT: apply Murray 2016 derivative in place; on entry A holds L
     // (lower) or U (upper), adj_A holds adj_L/adj_U; on exit adj_A holds adj of the original symmetric input

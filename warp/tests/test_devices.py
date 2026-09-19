@@ -69,14 +69,14 @@ def test_devices_can_access_self(test, device):
 
 
 def test_devices_sm_count(test, device):
-    if device.is_cuda:
+    if device.is_cuda or device.is_metal:
         test.assertTrue(device.sm_count > 0)
     else:
         test.assertEqual(device.sm_count, 0)
 
 
 def test_devices_max_shared_memory_per_block(test, device):
-    if device.is_cuda:
+    if device.is_cuda or device.is_metal:
         test.assertTrue(device.max_shared_memory_per_block > 0)
     else:
         test.assertEqual(device.max_shared_memory_per_block, 0)

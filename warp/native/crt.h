@@ -3,6 +3,9 @@
 
 #pragma once
 
+#if defined(__METAL_VERSION__)
+#include "metal_crt.h"
+#else
 // This file declares a subset of the C runtime (CRT) functions and macros for
 // use by compute kernel modules. There are three environments in which this
 // file gets included:
@@ -325,6 +328,7 @@ void* memcpy(void*, const void*, size_t);
 
 // stdlib.h
 void* malloc(size_t);
+void* calloc(size_t, size_t);
 void free(void*);
 
 }  // extern "C"
@@ -489,3 +493,5 @@ inline double erfcinv(double x) { return erfinv(1.0 - x); }
 inline float erfcinvf(float x) { return (float)erfcinv((double)x); }
 
 #endif  // !defined(__CUDACC__)
+
+#endif  // __METAL_VERSION__

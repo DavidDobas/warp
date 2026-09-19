@@ -532,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
             "native/scan.cpp",
             "native/apic.cpp",
             "native/alloc_tracker.cpp",
+            "native/cpu_block_runtime.cpp",
+            "native/cpu_fiber.cpp",
             "native/crt.cpp",
             "native/error.cpp",
             "native/cuda_util.cpp",
@@ -547,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
             "native/mathdx.cpp",
             "native/coloring.cpp",
             "native/deterministic.cpp",
+            "native/metal.mm" if platform.system() == "Darwin" else "native/metal_stub.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 

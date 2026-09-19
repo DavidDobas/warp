@@ -131,7 +131,9 @@ OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
 
 // Type-generic abs that works on device & host without relying on std overloads
 CUDA_CALLABLE inline float abs_t(float x) { return fabsf(x); }
+#if !defined(WP_NO_FLOAT64)
 CUDA_CALLABLE inline double abs_t(double x) { return fabs(x); }
+#endif  // !WP_NO_FLOAT64
 
 template <typename T> CUDA_CALLABLE inline T abs_t(T x) { return x < T(0) ? -x : x; }
 

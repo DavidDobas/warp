@@ -60,6 +60,9 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_OBJCXX_STANDARD 17)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+set(CMAKE_OBJCXX_EXTENSIONS OFF)
 
 if(WARP_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
@@ -205,6 +208,8 @@ set(WARP_CPP_SOURCES
     warp/native/scan.cpp
     warp/native/apic.cpp
     warp/native/alloc_tracker.cpp
+    warp/native/cpu_block_runtime.cpp
+    warp/native/cpu_fiber.cpp
     warp/native/crt.cpp
     warp/native/error.cpp
     warp/native/cuda_util.cpp
@@ -223,6 +228,20 @@ set(WARP_CPP_SOURCES
 )
 
 set(WARP_SOURCES ${WARP_CPP_SOURCES})
+
+# The Metal runtime is Objective-C++ and only exists on macOS; other platforms link a stub
+# that reports no Metal devices.
+if(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND WARP_SOURCES warp/native/metal.mm)
+    set_source_files_properties(
+        warp/native/metal.mm
+        PROPERTIES
+            COMPILE_OPTIONS "-fobjc-arc;-fno-rtti;-fvisibility=hidden;-fvisibility-inlines-hidden"
+    )
+else()
+    list(APPEND WARP_SOURCES warp/native/metal_stub.cpp)
+endif()
 
 if(WARP_ENABLE_CUDA)
     list(
@@ -365,6 +384,7 @@ if(WIN32)
     target_link_libraries(warp PRIVATE ws2_32 user32)
 elseif(APPLE)
     target_link_options(warp PRIVATE "LINKER:-rpath,@loader_path")
+    target_link_libraries(warp PRIVATE "-framework Metal" "-framework Foundation" "-framework IOKit")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     warp_add_linux_link_options(warp)
 endif()

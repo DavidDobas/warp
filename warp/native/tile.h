@@ -7,6 +7,10 @@
 
 #include "rand.h"
 
+#if !defined(__CUDA_ARCH__) && !defined(__METAL_VERSION__)
+#include "cpu_block_runtime.h"
+#endif
+
 #ifdef __clang__
 // disable warnings related to C++17 extensions on CPU JIT builds
 #pragma clang diagnostic push
@@ -24,7 +28,7 @@
 #include <cuda_runtime.h>
 #endif
 
-#else
+#elif !defined(__METAL_VERSION__)
 // If CUDA is not available (e.g., macOS build), manually define float4
 struct alignas(16) float4 {
     float x, y, z, w;
@@ -34,7 +38,61 @@ struct alignas(16) float4 {
 #if defined(__CUDA_ARCH__)
 #define WP_TILE_SYNC __syncthreads
 #else
-#define WP_TILE_SYNC void
+namespace wp {
+
+class tile_shared_storage_t;
+template <typename T> struct wp_block_shared;
+template <int BlockDim> inline void tile_sync()
+{
+#if defined(__METAL_VERSION__)
+    // A block of at most one SIMD group (32 lanes, checked at library load) only needs the
+    // much cheaper SIMD-group barrier; tile kernels are barrier-latency bound.
+    if constexpr (BlockDim > 32)
+        metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup | metal::mem_flags::mem_device);
+    else if constexpr (BlockDim > 1)
+        metal::simdgroup_barrier(metal::mem_flags::mem_threadgroup | metal::mem_flags::mem_device);
+#else
+    if constexpr (BlockDim > 1)
+        ::wp_cpu_tile_sync();
+#endif
+}
+}  // namespace wp
+#define WP_TILE_SYNC ::wp::tile_sync<WP_TILE_BLOCK_DIM>
+#endif
+
+// Metal functions cannot reach per-block state implicitly, so the shared-tile arena (the
+// threadgroup buffer) is passed explicitly as `_wp_arena`: a hidden parameter of generated
+// functions and of the tile helpers that allocate, and a member of shared tiles (their
+// destructors free). These expand to nothing on CPU and CUDA.
+#if defined(__METAL_VERSION__)
+#define WP_TILE_ARENA_PARAM threadgroup char* _wp_arena,
+#define WP_TILE_ARENA_ARG _wp_arena,
+#define WP_TILE_ARENA_PARAM0 threadgroup char* _wp_arena
+#define WP_TILE_ARENA_ARG0 _wp_arena
+#define WP_TILE_ARENA_MEMBER threadgroup char* _wp_arena = nullptr;
+#define WP_TILE_ALLOC(num_bytes) ::wp::tile_shared_storage_t::alloc(_wp_arena, num_bytes)
+#define WP_TILE_ARENA_NULL threadgroup char* _wp_arena = nullptr;  // adjoint-only bodies: parsed, never run
+#define WP_TILE_ARENA_PARAM_LAST , threadgroup char* _wp_arena = nullptr
+#define WP_TILE_ARENA_ARG_LAST , _wp_arena
+#define WP_TILE_CALL(f, ...) f(_wp_arena __VA_OPT__(, ) __VA_ARGS__)  // call a generated function
+#else
+#define WP_TILE_ARENA_PARAM
+#define WP_TILE_ARENA_ARG
+#define WP_TILE_ARENA_PARAM0
+#define WP_TILE_ARENA_ARG0
+#define WP_TILE_ARENA_MEMBER
+#define WP_TILE_ALLOC(num_bytes) ::wp::tile_shared_storage_t::alloc(num_bytes)
+#define WP_TILE_ARENA_NULL
+#define WP_TILE_ARENA_PARAM_LAST
+#define WP_TILE_ARENA_ARG_LAST
+#define WP_TILE_CALL(f, ...) f(__VA_ARGS__)
+#endif
+
+#if defined(__METAL_VERSION__)
+// The cooperative CPU block runtime does not exist on Metal; these stubs let the
+// block_dim > 1 branches (discarded at block_dim 1) still parse.
+inline int wp_cpu_get_first_active_lane() { return 0; }
+inline int wp_cpu_get_active_count() { return 1; }
 #endif
 
 #if defined(__CUDA_ARCH__) && !defined(__INTELLISENSE__)
@@ -58,16 +116,37 @@ struct alignas(16) float4 {
 // Type trait to detect null function placeholder (int literal 0).
 // Used to switch between scalar and LTO code paths at template instantiation time.
 template <typename T> struct wp_is_null_func {
-    static constexpr bool value = false;
+    static WP_CONSTANT constexpr bool value = false;
 };
 template <> struct wp_is_null_func<int> {
-    static constexpr bool value = true;
+    static WP_CONSTANT constexpr bool value = true;
 };
 
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#if defined(__CUDA_ARCH__) || defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 #define WP_TILE_THREAD_IDX threadIdx.x
 #else
-#define WP_TILE_THREAD_IDX 0
+// Preserve the literal-zero specialization in unoptimized CPU debug builds.
+namespace wp {
+template <int BlockDim> WP_FORCEINLINE int tile_thread_idx()
+{
+#if defined(__METAL_VERSION__)
+    // Metal only hands the thread index to kernel entry points, but these compiler builtins
+    // (used by the Metal headers themselves) work in any function; threadgroups are 1-D and
+    // Apple GPUs have 32-wide SIMD groups (checked when the library is loaded).
+    if constexpr (BlockDim == 1)
+        return 0;
+    else
+        return int(__metal_get_simdgroup_index_in_threadgroup(0u)) * 32
+            + int(__metal_get_thread_index_in_simdgroup(0u));
+#else
+    if constexpr (BlockDim == 1)
+        return 0;
+    else
+        return ::wp_cpu_get_thread_idx();
+#endif
+}
+}  // namespace wp
+#define WP_TILE_THREAD_IDX (::wp::tile_thread_idx<WP_TILE_BLOCK_DIM>())
 #endif
 
 
@@ -190,39 +269,48 @@ namespace wp {
 
 // Primary template
 template <typename T, typename U> struct is_same {
-    static constexpr bool value = false;
+    static WP_CONSTANT constexpr bool value = false;
 };
 
 // Specialization for the case when T and U are the same type
 template <typename T> struct is_same<T, T> {
-    static constexpr bool value = true;
+    static WP_CONSTANT constexpr bool value = true;
 };
 
 // Helper to detect tile types (tile_register_t or tile_shared_t)
 // Tiles have nested Type and Layout types
 template <typename T, typename = void> struct is_tile_type {
-    static constexpr bool value = false;
+    static WP_CONSTANT constexpr bool value = false;
 };
 
 template <typename T>
 struct is_tile_type<T, decltype(void(sizeof(typename T::Type)), void(sizeof(typename T::Layout)))> {
-    static constexpr bool value = true;
+    static WP_CONSTANT constexpr bool value = true;
 };
 
 // Helper for dependent static_assert failures
 template <typename T> struct always_false {
-    static constexpr bool value = false;
+    static WP_CONSTANT constexpr bool value = false;
 };
 
 template <typename T> struct remove_reference {
     using type = T;
 };
-template <typename T> struct remove_reference<T&> {
+template <typename T> struct remove_reference<T WP_THREAD&> {
     using type = T;
 };
-template <typename T> struct remove_reference<T&&> {
+template <typename T> struct remove_reference<T WP_THREAD&&> {
     using type = T;
 };
+#if defined(__METAL_VERSION__)
+// element references into shared tiles and arrays carry their address space
+template <typename T> struct remove_reference<T threadgroup&> {
+    using type = T;
+};
+template <typename T> struct remove_reference<T device&> {
+    using type = T;
+};
+#endif
 
 template <int N> struct tile_coord_t {
     int indices[N];
@@ -232,13 +320,13 @@ template <int N> struct tile_coord_t {
         assert(0 <= i && i < N);
         return indices[i];
     }
-    CUDA_CALLABLE inline int& operator[](int i)
+    CUDA_CALLABLE inline int WP_THREAD& operator[](int i)
     {
         assert(0 <= i && i < N);
         return indices[i];
     }
 
-    CUDA_CALLABLE inline tile_coord_t<N> operator+(const tile_coord_t<N>& c) const
+    CUDA_CALLABLE inline tile_coord_t<N> operator+(const tile_coord_t<N> WP_THREAD& c) const
     {
         tile_coord_t<N> out;
         for (int i = 0; i < N; ++i) {
@@ -306,10 +394,10 @@ inline auto tile_coord(int i, int j, int k, int l)
 
 // represents a compile time int tuple for strides/shapes/coords
 template <int... V> struct tile_tuple_t {
-    static constexpr int N = sizeof...(V);
+    static WP_CONSTANT constexpr int N = sizeof...(V);
     static_assert(N > 0, "Expected N > 0");
 
-    static constexpr int data[N] = { V... };
+    static WP_CONSTANT constexpr int data[N] = { V... };
 
     static constexpr int dim(int i)
     {
@@ -355,7 +443,7 @@ template <int... V> using tile_stride_t = tile_tuple_t<V...>;
 
 #ifndef NDEBUG
 template <typename Shape, typename Coord>
-inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* storage)
+inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord WP_THREAD& c, const char WP_CONSTANT* storage)
 {
     WP_PRAGMA_UNROLL
     for (int d = 0; d < Shape::N; ++d) {
@@ -376,7 +464,7 @@ inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* st
     return true;
 }
 
-template <int Size> inline CUDA_CALLABLE bool tile_check_linear_bounds(int linear, const char* storage)
+template <int Size> inline CUDA_CALLABLE bool tile_check_linear_bounds(int linear, const char WP_CONSTANT* storage)
 {
     if (linear < 0 || linear >= Size) {
         printf("Warp tile index out of bounds in %s tile: linear index %d is outside [0, %d)\n", storage, linear, Size);
@@ -459,20 +547,21 @@ template <int D0, int D1, int D2, int D3, int S> struct tile_shape_f4<tile_shape
 // Helper struct for checking vectorized load/store eligibility
 // Used by tile_shared_t::copy_from_global() and copy_to_global()
 template <typename T, typename Shape> struct tile_vectorized_check_t {
-    static constexpr int total_elements = Shape::size();
+    static WP_CONSTANT constexpr int total_elements = Shape::size();
     // Last dimension bytes must be a multiple of sizeof(float4) so that float4
     // reads cover the dimension exactly with no partial elements at the boundary.
     // E.g. vec3 (12B) with last_dim=4: 4*12=48, 48%16=0 → 3 float4s cover 4 vec3s exactly.
     // But vec3 with last_dim=3: 3*12=36, 36%16≠0 → rejected (last float4 would overread).
-    static constexpr int last_dim_bytes = Shape::dim(Shape::N - 1) * (int)sizeof(T);
-    static constexpr bool size_aligned = last_dim_bytes % (int)sizeof(float4) == 0;
-    static constexpr int float4_count = (total_elements * sizeof(T)) / sizeof(float4);
+    static WP_CONSTANT constexpr int last_dim_bytes = Shape::dim(Shape::N - 1) * (int)sizeof(T);
+    static WP_CONSTANT constexpr bool size_aligned = last_dim_bytes % (int)sizeof(float4) == 0;
+    static WP_CONSTANT constexpr int float4_count = (total_elements * sizeof(T)) / sizeof(float4);
 
     // Runtime checks for vectorized path eligibility.
     // Returns true only if ALL conditions are met for safe vectorized loads/stores.
     // Uses a single accumulated predicate (no early returns) for simpler control
     // flow and more predictable codegen.
-    template <typename Global> static CUDA_CALLABLE bool tile_can_vectorize(const Global& global, int64_t& base_bytes)
+    template <typename Global>
+    static CUDA_CALLABLE bool tile_can_vectorize(const Global WP_THREAD& global, int64_t WP_THREAD& base_bytes)
     {
         constexpr int lastdim = Shape::N - 1;
 
@@ -482,8 +571,8 @@ template <typename T, typename Shape> struct tile_vectorized_check_t {
         // 2. Global address aligned
         tile_coord_t<Shape::N> zero_coord {};
         base_bytes = global.byte_offset_from_coord(zero_coord);
-        const char* global_bytes = reinterpret_cast<const char*>(global.data.data) + base_bytes;
-        const float4* global128 = reinterpret_cast<const float4*>(global_bytes);
+        const char WP_DEVICE* global_bytes = reinterpret_cast<const char WP_DEVICE*>(global.data.data) + base_bytes;
+        const float4 WP_DEVICE* global128 = reinterpret_cast<const float4 WP_DEVICE*>(global_bytes);
         ok = ok && (reinterpret_cast<uint64_t>(global128) % sizeof(float4) == 0);
 
         // 3. All dimensions fit within bounds
@@ -524,10 +613,10 @@ template <typename T, typename Shape> struct tile_vectorized_check_t {
     // Address alignment is always checked (negligible cost, prevents silent UB).
     // Bounds and contiguity checks are debug-only.
     template <typename Global>
-    static CUDA_CALLABLE void validate_aligned_runtime(const Global& global, int64_t base_bytes)
+    static CUDA_CALLABLE void validate_aligned_runtime(const Global WP_THREAD& global, int64_t base_bytes)
     {
-        const char* global_bytes = reinterpret_cast<const char*>(global.data.data) + base_bytes;
-        const float4* global128 = reinterpret_cast<const float4*>(global_bytes);
+        const char WP_DEVICE* global_bytes = reinterpret_cast<const char WP_DEVICE*>(global.data.data) + base_bytes;
+        const float4 WP_DEVICE* global128 = reinterpret_cast<const float4 WP_DEVICE*>(global_bytes);
 
         // Always check address alignment — misaligned 128-bit loads are undefined behavior.
         // Debug: assert fires with a diagnostic message.
@@ -572,7 +661,8 @@ template <typename T, typename Shape> struct tile_vectorized_check_t {
 // Runtime check for coalesced byte-copy eligibility.
 // The coalesced path copies raw bytes (as float*) with thread-striped access,
 // which requires the tile's bytes to be contiguous in global memory.
-template <typename T, typename Shape, typename Global> inline CUDA_CALLABLE bool tile_can_coalesce(const Global& global)
+template <typename T, typename Shape, typename Global>
+inline CUDA_CALLABLE bool tile_can_coalesce(const Global WP_THREAD& global)
 {
     constexpr int lastdim = Shape::N - 1;
     bool ok = true;
@@ -611,7 +701,7 @@ template <typename T, typename Shape, typename Global> inline CUDA_CALLABLE bool
 // helper to insert an axis value into a coordinate (inverse of removing dimension)
 // used for mapping output coordinates back to input coordinates during axis reduction
 template <int Axis, int N>
-CUDA_CALLABLE constexpr auto tile_coord_insert_axis(const tile_coord_t<N>& coord, int axis_val)
+CUDA_CALLABLE constexpr auto tile_coord_insert_axis(const tile_coord_t<N> WP_THREAD& coord, int axis_val)
 {
     static_assert(Axis >= 0 && Axis <= N, "Axis out of bounds for tile_coord_insert_axis");
 
@@ -655,15 +745,16 @@ CUDA_CALLABLE constexpr auto tile_coord_insert_axis(const tile_coord_t<N>& coord
 // works in byte offsets throughout so strides need not be multiples of sizeof(T)
 // (e.g. arrays of structs where stride reflects the full struct size)
 template <typename Shape> struct tile_coord_iter_t {
-    static constexpr int N = Shape::N;
-    static constexpr int lastdim = N - 1;
+    static WP_CONSTANT constexpr int N = Shape::N;
+    static WP_CONSTANT constexpr int lastdim = N - 1;
 
     tile_coord_t<N> coord;
     int strides[N] = {};  // byte strides; bounded by array_t::strides[] int32 ABI
     int64_t byte_offset = 0;  // cumulative bytes; can exceed 2 GiB for large arrays
 
     // initialize from a starting coordinate and the global array byte strides/offsets
-    inline CUDA_CALLABLE void init(const tile_coord_t<N>& c, const int* byte_strides, const int* tile_offset)
+    inline CUDA_CALLABLE void
+    init(const tile_coord_t<N> WP_THREAD& c, const int WP_THREAD* byte_strides, const int WP_THREAD* tile_offset)
     {
         coord = c;
         byte_offset = 0;
@@ -693,11 +784,11 @@ template <typename Shape> struct tile_coord_iter_t {
     }
 };
 
-template <typename T> inline CUDA_CALLABLE T tile_atomic_add_value(T* ptr, T value)
+template <typename T> inline CUDA_CALLABLE T tile_atomic_add_value(T WP_DEVICE* ptr, T value)
 {
     return wp::atomic_add(ptr, value);
 }
-template <typename T> inline CUDA_CALLABLE T tile_adj_atomic_add_value(T* ptr, T value)
+template <typename T> inline CUDA_CALLABLE T tile_adj_atomic_add_value(T WP_DEVICE* ptr, T value)
 {
     // adj_atomic_add accumulates for floats but is a no-op for integral/bool types,
     // which lack a CUDA atomicAdd overload. The returned old value is unused.
@@ -705,6 +796,69 @@ template <typename T> inline CUDA_CALLABLE T tile_adj_atomic_add_value(T* ptr, T
     wp::adj_atomic_add(ptr, value);
     return old;
 }
+
+#if defined(__METAL_VERSION__)
+// Register tiles are private to a thread, so accumulating into them needs no atomics.
+template <typename T> inline T tile_atomic_add_value(thread T* ptr, T value)
+{
+    T old = *ptr;
+    *ptr = old + value;
+    return old;
+}
+template <typename T> inline T tile_adj_atomic_add_value(thread T* ptr, T value)
+{
+    return tile_atomic_add_value(ptr, value);
+}
+// Shared tiles live in threadgroup memory and may be accumulated by several lanes at once.
+inline int tile_atomic_add_value(threadgroup int* ptr, int value)
+{
+    return metal::atomic_fetch_add_explicit((threadgroup metal::atomic_int*)ptr, value, metal::memory_order_relaxed);
+}
+inline unsigned int tile_atomic_add_value(threadgroup unsigned int* ptr, unsigned int value)
+{
+    return metal::atomic_fetch_add_explicit((threadgroup metal::atomic_uint*)ptr, value, metal::memory_order_relaxed);
+}
+inline float
+tile_atomic_add_value(threadgroup float* ptr, float value)  // no threadgroup float fetch-add: CAS on the bits
+{
+    threadgroup metal::atomic_uint* a = (threadgroup metal::atomic_uint*)ptr;
+    unsigned int old_bits = metal::atomic_load_explicit(a, metal::memory_order_relaxed);
+    while (!metal::atomic_compare_exchange_weak_explicit(
+        a, &old_bits, as_type<unsigned int>(as_type<float>(old_bits) + value), metal::memory_order_relaxed,
+        metal::memory_order_relaxed
+    )) { }
+    return as_type<float>(old_bits);
+}
+template <unsigned L, typename T>
+inline vec_t<L, T> tile_atomic_add_value(threadgroup vec_t<L, T>* ptr, vec_t<L, T> value)
+{
+    vec_t<L, T> old;
+    for (unsigned i = 0; i < L; ++i)
+        old.c[i] = tile_atomic_add_value(&ptr->c[i], value.c[i]);
+    return old;
+}
+template <unsigned R, unsigned C, typename T>
+inline mat_t<R, C, T> tile_atomic_add_value(threadgroup mat_t<R, C, T>* ptr, mat_t<R, C, T> value)
+{
+    mat_t<R, C, T> old;
+    for (unsigned i = 0; i < R; ++i)
+        for (unsigned j = 0; j < C; ++j)
+            old.data[i][j] = tile_atomic_add_value(&ptr->data[i][j], value.data[i][j]);
+    return old;
+}
+template <typename T> inline T tile_atomic_add_value(threadgroup T* ptr, T value)  // no hardware atomic: not atomic
+{
+    T old = *ptr;
+    *ptr = old + value;
+    return old;
+}
+template <typename T> inline T tile_adj_atomic_add_value(threadgroup T* ptr, T value)
+{
+    return tile_atomic_add_value(ptr, value);
+}
+// wp::atomic_add on shared-tile elements (builtin.h only declares device-memory atomics)
+template <typename T> inline T atomic_add(threadgroup T* buf, T value) { return tile_atomic_add_value(buf, value); }
+#endif
 
 // represents a tile stored in global memory with dynamic strides
 // used to represent the source and offset for tile loads to register/shared
@@ -716,19 +870,19 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
     using Type = T;
     using Shape = Shape_;
     using Coord = tile_coord_t<Shape::N>;
-    static constexpr bool bounds_check = BoundsCheck;
-    static constexpr bool is_aligned = Aligned;
+    static WP_CONSTANT constexpr bool bounds_check = BoundsCheck;
+    static WP_CONSTANT constexpr bool is_aligned = Aligned;
 
     array_t<T> data;
     Coord offset;
 
-    tile_global_t(array_t<T>& a, const Coord& c)
+    tile_global_t(array_t<T> WP_THREAD& a, const Coord WP_THREAD& c)
         : data(a)
         , offset(c)
     {
     }
 
-    inline CUDA_CALLABLE int64_t byte_offset_from_coord(const Coord& coord) const
+    inline CUDA_CALLABLE int64_t byte_offset_from_coord(const Coord WP_THREAD& coord) const
     {
         int64_t byte_index = 0;
         WP_PRAGMA_UNROLL
@@ -738,12 +892,12 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
         return byte_index;
     }
 
-    inline CUDA_CALLABLE int64_t index_from_coord(const Coord& coord) const
+    inline CUDA_CALLABLE int64_t index_from_coord(const Coord WP_THREAD& coord) const
     {
         return byte_offset_from_coord(coord) / sizeof(T);
     }
 
-    inline CUDA_CALLABLE bool index(const Coord& coord, int64_t& out) const
+    inline CUDA_CALLABLE bool index(const Coord WP_THREAD& coord, int64_t WP_THREAD& out) const
     {
         if constexpr (BoundsCheck) {
             // Byte total can exceed 2 GiB; accumulate in 64-bit.
@@ -770,7 +924,7 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
         }
     }
 
-    inline CUDA_CALLABLE T load(const Coord& coord) const
+    inline CUDA_CALLABLE T load(const Coord WP_THREAD& coord) const
     {
         int64_t i;
         if (index(coord, i))
@@ -779,7 +933,7 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
             return T {};
     }
 
-    inline CUDA_CALLABLE T load_grad(const Coord& coord) const
+    inline CUDA_CALLABLE T load_grad(const Coord WP_THREAD& coord) const
     {
         int64_t i;
         if (index(coord, i))
@@ -788,14 +942,14 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
             return T {};
     }
 
-    inline CUDA_CALLABLE void store(const Coord& coord, const T& x) const
+    inline CUDA_CALLABLE void store(const Coord WP_THREAD& coord, const T WP_THREAD& x) const
     {
         int64_t i;
         if (index(coord, i))
             data.data[i] = x;
     }
 
-    inline CUDA_CALLABLE T atomic_add(const Coord& coord, const T& value) const
+    inline CUDA_CALLABLE T atomic_add(const Coord WP_THREAD& coord, const T WP_THREAD& value) const
     {
         int64_t i;
         if (index(coord, i))
@@ -804,7 +958,7 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
             return T {};
     }
 
-    inline CUDA_CALLABLE T atomic_add_grad(const Coord& coord, const T& grad) const
+    inline CUDA_CALLABLE T atomic_add_grad(const Coord WP_THREAD& coord, const T WP_THREAD& grad) const
     {
         int64_t i;
         if (index(coord, i))
@@ -819,9 +973,9 @@ template <typename Shape_> struct tile_layout_register_t {
     using Shape = Shape_;
     using Coord = tile_coord_t<Shape::N>;
 
-    static constexpr int Size = Shape::size();
-    static constexpr int NumRegs = (Size + WP_TILE_BLOCK_DIM - 1) / WP_TILE_BLOCK_DIM;
-    static constexpr bool Aligned = Size % WP_TILE_BLOCK_DIM == 0;
+    static WP_CONSTANT constexpr int Size = Shape::size();
+    static WP_CONSTANT constexpr int NumRegs = (Size + WP_TILE_BLOCK_DIM - 1) / WP_TILE_BLOCK_DIM;
+    static WP_CONSTANT constexpr bool Aligned = Size % WP_TILE_BLOCK_DIM == 0;
 
     static inline CUDA_CALLABLE int linear_from_register(int reg)
     {
@@ -861,8 +1015,8 @@ template <typename Shape_> struct tile_layout_register_t {
 
     static inline CUDA_CALLABLE int thread_from_linear(int linear)
     {
-        const int thread = linear % WP_TILE_BLOCK_DIM;
-        return thread;
+        const int thread_idx = linear % WP_TILE_BLOCK_DIM;
+        return thread_idx;
     }
 
     static inline CUDA_CALLABLE int register_from_linear(int linear)
@@ -910,7 +1064,7 @@ template <typename T, typename L> struct tile_register_t {
     // in return statements when a templated function returns a shared tile
     // but the declared return type is tile_register_t)
     template <typename SharedLayout, bool Owner>
-    inline CUDA_CALLABLE tile_register_t(const tile_shared_t<T, SharedLayout, Owner>& t)
+    inline CUDA_CALLABLE tile_register_t(const tile_shared_t<T, SharedLayout, Owner> WP_THREAD& t)
     {
         static_assert(
             Layout::Size == tile_layout_register_t<typename SharedLayout::Shape>::Size,
@@ -920,14 +1074,15 @@ template <typename T, typename L> struct tile_register_t {
     }
 
     template <bool BoundsCheck, bool Aligned>
-    inline CUDA_CALLABLE auto& operator=(const tile_global_t<T, typename Layout::Shape, BoundsCheck, Aligned>& t)
+    inline CUDA_CALLABLE auto WP_THREAD&
+    operator=(const tile_global_t<T, typename Layout::Shape, BoundsCheck, Aligned> WP_THREAD& t)
     {
         copy_from_global(t);
         return *this;
     }
 
     // broadcast a scalar to all elements - mirrors tile_shared_t scalar assignment
-    inline CUDA_CALLABLE auto& operator=(const T& value)
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(const T WP_THREAD& value)
     {
         for (int i = 0; i < Layout::NumRegs; ++i)
             data[i] = value;
@@ -935,29 +1090,29 @@ template <typename T, typename L> struct tile_register_t {
     }
 
     // no-init assignment: leave data unchanged - the rvalue side of tile_empty
-    inline CUDA_CALLABLE auto& operator=(tile_empty_t) { return *this; }
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(tile_empty_t) { return *this; }
 
     // define the += operator which is used during backward pass codegen
     // when returning a register tile from a user defined function
-    inline CUDA_CALLABLE auto& operator+=(const tile_register_t<T, Layout>& rhs)
+    inline CUDA_CALLABLE auto WP_THREAD& operator+=(const tile_register_t<T, Layout> WP_THREAD& rhs)
     {
         grad_add(rhs);
         return *this;
     }
 
-    inline CUDA_CALLABLE T& operator()(int reg)
+    inline CUDA_CALLABLE T WP_THREAD& operator()(int reg)
     {
         assert(reg < Layout::NumRegs);
         return data[reg];
     }
 
-    inline CUDA_CALLABLE const T& operator()(int reg) const
+    inline CUDA_CALLABLE const T WP_THREAD& operator()(int reg) const
     {
         assert(reg < Layout::NumRegs);
         return data[reg];
     }
 
-    inline CUDA_CALLABLE void assign(const tile_register_t<T, Layout>& tile)
+    inline CUDA_CALLABLE void assign(const tile_register_t<T, Layout> WP_THREAD& tile)
     {
         for (int i = 0; i < Layout::NumRegs; ++i)
             data[i] = tile.data[i];
@@ -970,23 +1125,20 @@ template <typename T, typename L> struct tile_register_t {
     }
 
     // extract a single tile element to a native type
-    template <typename Coord> inline CUDA_CALLABLE Type extract(const Coord& c)
+    template <typename Coord> inline CUDA_CALLABLE Type extract(WP_TILE_ARENA_PARAM const Coord WP_THREAD& c)
     {
         // map from logical coords (i, j) -> (thread, reg)
         const int linear = Layout::linear_from_coord(c);
-        const int thread = Layout::thread_from_linear(linear);
+        const int thread_idx = Layout::thread_from_linear(linear);
         const int reg = Layout::register_from_linear(linear);
 
 #if defined(__CUDA_ARCH__)
         __shared__ Type scratch;
-#else
-        Type scratch;
-#endif
 
         // ensure any previously scheduled threads have finished reading from scratch
         WP_TILE_SYNC();
 
-        if (WP_TILE_THREAD_IDX == thread) {
+        if (WP_TILE_THREAD_IDX == thread_idx) {
             scratch = data[reg];
         }
 
@@ -994,29 +1146,52 @@ template <typename T, typename L> struct tile_register_t {
         WP_TILE_SYNC();
 
         return scratch;
+#else
+        if constexpr (WP_TILE_BLOCK_DIM == 1) {
+            return data[linear];
+        } else {
+            wp_block_shared<Type> scratch_holder { WP_TILE_ARENA_ARG0 };
+            Type WP_TILE_SHARED& scratch = *scratch_holder;
+
+            WP_TILE_SYNC();
+
+            if (WP_TILE_THREAD_IDX == thread_idx) {
+                scratch = data[reg];
+            }
+
+            WP_TILE_SYNC();
+
+            // Copy the result before any fiber releases and reuses the
+            // block-shared scratch allocation.
+            Type result = scratch;
+            WP_TILE_SYNC();
+            return result;
+        }
+#endif
     }
 
 
     // backward version of scalar extract
-    template <typename Coord> inline CUDA_CALLABLE void adj_extract(const Coord& c, Type adj_ret)
+    template <typename Coord> inline CUDA_CALLABLE void adj_extract(const Coord WP_THREAD& c, Type adj_ret)
     {
         // map from logical coords (i, j) -> (thread, reg)
         const int linear = Layout::linear_from_coord(c);
-        const int thread = Layout::thread_from_linear(linear);
+        const int thread_idx = Layout::thread_from_linear(linear);
         const int reg = Layout::register_from_linear(linear);
 
-        if (WP_TILE_THREAD_IDX == thread) {
+        if (WP_TILE_THREAD_IDX == thread_idx) {
             data[reg] += adj_ret;
         }
     }
 
+    inline CUDA_CALLABLE void print_from_shared(T WP_THREAD* smem) const;
     inline CUDA_CALLABLE void print() const;
 
 
     // return the in-register version of this tile (nop)
-    inline CUDA_CALLABLE auto& copy_to_register() { return *this; }
+    inline CUDA_CALLABLE auto WP_THREAD& copy_to_register() { return *this; }
 
-    inline CUDA_CALLABLE const auto& copy_to_register() const { return *this; }
+    inline CUDA_CALLABLE const auto WP_THREAD& copy_to_register() const { return *this; }
 
     // apply a lambda to all valid entries in the tile
     // Op should be a functor that takes a register index and tile_coord_t as input
@@ -1038,19 +1213,19 @@ template <typename T, typename L> struct tile_register_t {
     inline CUDA_CALLABLE void grad_zero() { zero(); }
 
     // accumulate gradients onto this tile
-    inline CUDA_CALLABLE void grad_add(const tile_register_t<T, Layout>& tile)
+    inline CUDA_CALLABLE void grad_add(const tile_register_t<T, Layout> WP_THREAD& tile)
     {
         for (int i = 0; i < Layout::NumRegs; ++i)
             data[i] += tile.data[i];
     }
 
-    inline CUDA_CALLABLE void grad_add(const tile_global_t<T, typename Layout::Shape>& global)
+    inline CUDA_CALLABLE void grad_add(const tile_global_t<T, typename Layout::Shape> WP_THREAD& global)
     {
         apply([&](int reg, auto c) { data[reg] += global.load_grad(c); });
     }
 
     // zero the gradient in a global array for the elements covered by this tile
-    template <typename Global> inline CUDA_CALLABLE void grad_zero_global(const Global& global)
+    template <typename Global> inline CUDA_CALLABLE void grad_zero_global(const Global WP_THREAD& global)
     {
         apply([&](int reg, auto c) {
             int64_t i;
@@ -1059,24 +1234,24 @@ template <typename T, typename L> struct tile_register_t {
         });
     }
 
-    inline CUDA_CALLABLE auto& grad_to_register()
+    inline CUDA_CALLABLE auto WP_THREAD& grad_to_register()
     {
         // nop for register tiles
         return *this;
     }
 
-    template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global& dest)
+    template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global WP_THREAD& dest)
     {
         apply([&](int reg, auto c) { dest.store(c, data[reg]); });
     }
 
-    template <typename Global> inline CUDA_CALLABLE void copy_from_global(const Global& src)
+    template <typename Global> inline CUDA_CALLABLE void copy_from_global(const Global WP_THREAD& src)
     {
         apply([&](int reg, auto c) { data[reg] = src.load(c); });
     }
 
     // add a register tile to a global array
-    template <typename Global> inline CUDA_CALLABLE auto atomic_add(const Global& dest)
+    template <typename Global> inline CUDA_CALLABLE auto atomic_add(const Global WP_THREAD& dest)
     {
         // allocate a tile to hold previous dest value
         auto previous = *this;
@@ -1086,7 +1261,7 @@ template <typename T, typename L> struct tile_register_t {
     }
 
     // add a register tile to the gradient of a global array
-    template <typename Global> inline CUDA_CALLABLE auto atomic_add_grad(const Global& dest)
+    template <typename Global> inline CUDA_CALLABLE auto atomic_add_grad(const Global WP_THREAD& dest)
     {
         // allocate a tile to hold previous dest value
         auto previous = *this;
@@ -1100,7 +1275,7 @@ template <typename T, typename L> struct tile_register_t {
 // helper to allocate a register tile like another tile
 // users can either specify a template explicitly or
 // pass in another concrete instance
-template <typename Tile> auto tile_register_like(Tile* t = nullptr)
+template <typename Tile> auto tile_register_like(Tile WP_THREAD* t = nullptr)
 {
     using T = typename Tile::Type;
     using L = typename Tile::Layout;
@@ -1135,7 +1310,7 @@ inline CUDA_CALLABLE int tile_align(int num_bytes)
     return sign * ((num_bytes_abs + alignment - 1) / alignment) * alignment;
 }
 
-#if defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
+#if defined(WP_ENABLE_TILES_IN_STACK_MEMORY) && !defined(__METAL_VERSION__)
 // On the CPU we use a fixed size block of stack memory for shared tile allocations.
 // We store a pointer to the current allocation storage either in a reserved register
 // (AArch64) or a static variable (x86-64).
@@ -1154,6 +1329,30 @@ static tile_shared_storage_t* shared_tile_storage;
 #endif
 #endif
 
+#if defined(__METAL_VERSION__)
+// The dynamic threadgroup buffer bound at index 0 starts at threadgroup address 0 (the runtime
+// checks this once when it loads a library), which gives every function the same fixed arena
+// that CUDA gets from extern __shared__. Its first WP_TILE_BLOCK_DIM words hold the per-lane
+// bump offsets, like the static smem_base below; allocations follow.
+class tile_shared_storage_t {
+public:
+    // The first WP_TILE_BLOCK_DIM words of the arena hold the per-lane bump offsets, like the
+    // static smem_base below; allocations follow.
+    static inline threadgroup char* data_base(threadgroup char* arena)
+    {
+        return arena + tile_align(int(WP_TILE_BLOCK_DIM * sizeof(unsigned int)));
+    }
+    static inline void init(threadgroup char* arena) { ((threadgroup unsigned int*)arena)[WP_TILE_THREAD_IDX] = 0; }
+    static inline void check() { }
+    static inline threadgroup void* alloc(threadgroup char* arena, int num_bytes)
+    {
+        threadgroup unsigned int* smem_base = (threadgroup unsigned int*)arena;
+        const unsigned int offset = smem_base[WP_TILE_THREAD_IDX];
+        smem_base[WP_TILE_THREAD_IDX] += tile_align(num_bytes);
+        return data_base(arena) + offset;
+    }
+};
+#else
 // This class manages a block of "shared" memory for use by tiles.
 // On the GPU this maps to dynamic shared memory, while on the CPU we allocate
 // a fixed size block of memory on the stack and manage allocations from it.
@@ -1172,7 +1371,7 @@ private:
     // we maintain a per-thread offset into dynamic
     // shared memory that allows us to keep track of
     // current use across dynamic function calls
-    static inline CUDA_CALLABLE unsigned int* get_smem_base()
+    static inline CUDA_CALLABLE unsigned int WP_THREAD* get_smem_base()
     {
 #if defined(__CUDA_ARCH__)
         __shared__ unsigned int smem_base[WP_TILE_BLOCK_DIM];
@@ -1185,7 +1384,7 @@ private:
 #endif
     }
 
-    static inline CUDA_CALLABLE char* get_dynamic_smem_base()
+    static inline CUDA_CALLABLE char WP_THREAD* get_dynamic_smem_base()
     {
 #if defined(__CUDA_ARCH__)
         extern __shared__ char dynamic_smem_base[];
@@ -1199,6 +1398,15 @@ private:
     }
 
 public:
+    static inline void bind(tile_shared_storage_t WP_THREAD* storage)
+    {
+#if !defined(__CUDA_ARCH__) && defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
+        shared_tile_storage = storage;
+#else
+        (void)storage;
+#endif
+    }
+
     // cppcheck-suppress uninitMemberVar
     inline CUDA_CALLABLE tile_shared_storage_t()
     {
@@ -1207,6 +1415,13 @@ public:
         // or static variable so it can be accessed from anywhere within a kernel.
         old_value = shared_tile_storage;
         shared_tile_storage = this;
+        if constexpr (WP_TILE_BLOCK_DIM > 1) {
+            // A stack-backed arena can reuse the same address for consecutive
+            // blocks. Clear it so initialized shared values never inherit data
+            // from a preceding block; the one-lane specialization emits none
+            // of this cooperative-block work.
+            __builtin_memset(dynamic_smem_base, 0, sizeof(dynamic_smem_base));
+        }
 #endif
 
         init();
@@ -1223,34 +1438,95 @@ public:
 
     static inline CUDA_CALLABLE void init()
     {
-        unsigned int* smem_base = get_smem_base();
+        unsigned int WP_THREAD* smem_base = get_smem_base();
 
+#if defined(__CUDA_ARCH__)
         smem_base[WP_TILE_THREAD_IDX] = 0;
+#else
+        if constexpr (WP_TILE_BLOCK_DIM == 1) {
+            smem_base[0] = 0;
+        } else {
+            for (int lane = 0; lane < WP_TILE_BLOCK_DIM; ++lane)
+                smem_base[lane] = 0;
+        }
+#endif
     }
 
     static inline CUDA_CALLABLE void check()
     {
-        unsigned int* smem_base = get_smem_base();
+        unsigned int WP_THREAD* smem_base = get_smem_base();
 
+#if defined(__CUDA_ARCH__)
         assert(smem_base[WP_TILE_THREAD_IDX] == 0);
+#else
+        if constexpr (WP_TILE_BLOCK_DIM == 1) {
+            assert(smem_base[0] == 0);
+        } else {
+            for (int lane = 0; lane < WP_TILE_BLOCK_DIM; ++lane)
+                assert(smem_base[lane] == 0);
+        }
+#endif
     }
 
-    static inline CUDA_CALLABLE void* alloc(int num_bytes)
+    static inline CUDA_CALLABLE void WP_THREAD* alloc(int num_bytes)
     {
-        unsigned int* smem_base = get_smem_base();
-        char* dynamic_smem_base = get_dynamic_smem_base();
+        unsigned int WP_THREAD* smem_base = get_smem_base();
+        char WP_THREAD* dynamic_smem_base = get_dynamic_smem_base();
 
+#if defined(__CUDA_ARCH__)
+        // Keep this path separate from the checked CPU arithmetic below. NVRTC
+        // targeting sm_89 otherwise fails to hoist repeated shared-memory
+        // address calculations in tiled kernels.
         const unsigned int offset = smem_base[WP_TILE_THREAD_IDX];
 
         // one entry per-thread so no need for synchronization
         smem_base[WP_TILE_THREAD_IDX] += tile_align(num_bytes);
+#else
+        const int thread_idx = WP_TILE_THREAD_IDX;
+        const unsigned int offset = smem_base[thread_idx];
+        const int aligned_num_bytes = tile_align(num_bytes);
 
-#if !defined(__CUDA_ARCH__)
-        assert(smem_base[WP_TILE_THREAD_IDX] <= WP_MAX_CPU_SHARED);
+        // Check the signed next offset before updating the allocator or
+        // forming a pointer beyond the fixed CPU arena.
+        const long long next_offset = static_cast<long long>(offset) + aligned_num_bytes;
+        if (next_offset < 0 || next_offset > WP_MAX_CPU_SHARED) {
+            _wp_assert(
+                "Warp CPU tile shared-memory allocation exceeds the 256 KiB arena", __FILE__, (unsigned int)__LINE__
+            );
+            return nullptr;
+        }
+        smem_base[thread_idx] = static_cast<unsigned int>(next_offset);
 #endif
 
         return &(dynamic_smem_base[offset]);
     }
+};
+#endif  // !__METAL_VERSION__
+
+
+// Give every lane in a block the same scratch address while retaining a
+// lane-local bump offset. The barriers at call sites bracket its LIFO lifetime.
+template <typename T> struct wp_block_shared {
+    WP_TILE_ARENA_MEMBER
+    T WP_TILE_SHARED* ptr;
+
+    inline CUDA_CALLABLE wp_block_shared(WP_TILE_ARENA_PARAM0)
+#if defined(__METAL_VERSION__)
+        : _wp_arena(_wp_arena)
+        , ptr((T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T))))
+#else
+        : ptr((T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T))))
+#endif
+    {
+    }
+
+    inline CUDA_CALLABLE ~wp_block_shared() { WP_TILE_ALLOC(-int(sizeof(T))); }
+
+    inline CUDA_CALLABLE T WP_TILE_SHARED& operator*() { return *ptr; }
+    inline CUDA_CALLABLE T WP_TILE_SHARED* operator->() { return ptr; }
+
+    wp_block_shared(const wp_block_shared WP_THREAD&) = delete;
+    wp_block_shared WP_THREAD& operator=(const wp_block_shared WP_THREAD&) = delete;
 };
 
 
@@ -1259,8 +1535,8 @@ template <typename Shape_, typename Stride_ = typename compute_strides<Shape_>::
     using Stride = Stride_;
     using Coord = tile_coord_t<Shape::N>;
 
-    static constexpr int Size = Shape::size();
-    static constexpr bool Aligned = Size % WP_TILE_BLOCK_DIM == 0;
+    static WP_CONSTANT constexpr int Size = Shape::size();
+    static WP_CONSTANT constexpr bool Aligned = Size % WP_TILE_BLOCK_DIM == 0;
 
     static inline CUDA_CALLABLE auto coord_from_linear(int linear)
     {
@@ -1313,7 +1589,7 @@ template <typename Shape_, typename Stride_ = typename compute_strides<Shape_>::
         return true;
     }
 
-    static constexpr bool Unique = is_unique();
+    static WP_CONSTANT constexpr bool Unique = is_unique();
 
     // True when strides match dense row-major packing: stride[N-1]==1,
     // stride[d]==shape[d+1]*stride[d+1].  Implies Unique (zero strides fail)
@@ -1330,7 +1606,7 @@ template <typename Shape_, typename Stride_ = typename compute_strides<Shape_>::
         return true;
     }
 
-    static constexpr bool Dense = is_dense();
+    static WP_CONSTANT constexpr bool Dense = is_dense();
 
     static inline CUDA_CALLABLE bool valid(int linear) { return linear < Size; }
 };
@@ -1370,17 +1646,17 @@ but in some cases e.g.: tile_matmul() it is done manually.
 template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     using Type = T;
     using Layout = L;
-    static constexpr bool Owner = Owner_;
+    static WP_CONSTANT constexpr bool Owner = Owner_;
 
     struct Storage {
-        T* ptr;
+        T WP_TILE_SHARED* ptr;
 
-        Storage(T* p)
+        Storage(T WP_TILE_SHARED* p)
             : ptr(p)
         {
         }
 
-        inline CUDA_CALLABLE T& operator()(typename Layout::Coord c)
+        inline CUDA_CALLABLE T WP_TILE_SHARED& operator()(typename Layout::Coord c)
         {
             assert(ptr);
 
@@ -1388,7 +1664,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
             return ptr[index];
         }
 
-        inline CUDA_CALLABLE const T& operator()(typename Layout::Coord c) const
+        inline CUDA_CALLABLE const T WP_TILE_SHARED& operator()(typename Layout::Coord c) const
         {
             assert(ptr);
 
@@ -1396,7 +1672,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
             return ptr[index];
         }
 
-        inline CUDA_CALLABLE T& operator()(int linear)
+        inline CUDA_CALLABLE T WP_TILE_SHARED& operator()(int linear)
         {
             assert(ptr);
 
@@ -1404,7 +1680,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
             return (*this)(c);
         }
 
-        inline CUDA_CALLABLE const T& operator()(int linear) const
+        inline CUDA_CALLABLE const T WP_TILE_SHARED& operator()(int linear) const
         {
             assert(ptr);
 
@@ -1415,6 +1691,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
 
     Storage data;
     Storage grad;
+    WP_TILE_ARENA_MEMBER
 
     // we need to track whether or not this tile's data has been initialized.
     // once true, any re-initialization of data that follows needs a WP_TILE_SYNC()
@@ -1436,40 +1713,57 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     // we delete the copy constructor because in the case the shared tile is owning,
     // this leads to a double deallocation.
     // this also forces one to handle copies explicitly
-    inline CUDA_CALLABLE tile_shared_t(const tile_shared_t& other)
+    inline CUDA_CALLABLE tile_shared_t(const tile_shared_t WP_THREAD& other)
         : data(other.data)
         , grad(other.grad)
         , initialized(other.initialized)
     {
         static_assert(!Owner, "Copy constructor is only supported for non-owning tiles.");
+#if defined(__METAL_VERSION__)
+        _wp_arena = other._wp_arena;
+#endif
     }
 
     // move constructor
-    inline CUDA_CALLABLE tile_shared_t(tile_shared_t&& other)
+    inline CUDA_CALLABLE tile_shared_t(tile_shared_t WP_THREAD&& other)
         : data(other.data)
         , grad(other.grad)
         , initialized(other.initialized)
     {
+#if defined(__METAL_VERSION__)
+        _wp_arena = other._wp_arena;
+#endif
         other.data.ptr = nullptr;
         other.grad.ptr = nullptr;
     }
 
     template <typename OtherT, typename OtherLayout, bool OtherOwner>
-    inline CUDA_CALLABLE tile_shared_t(const tile_shared_t<OtherT, OtherLayout, OtherOwner>& other)
+    inline CUDA_CALLABLE tile_shared_t(const tile_shared_t<OtherT, OtherLayout, OtherOwner> WP_THREAD& other)
         : data(other.data.ptr)
         , grad(other.grad.ptr)
         , initialized(other.initialized)
     {
+#if defined(__METAL_VERSION__)
+        _wp_arena = other._wp_arena;
+#endif
+#if defined(__METAL_VERSION__)
+        _wp_arena = other._wp_arena;
+#endif
         static_assert(!Owner, "Copy constructor is only supported for non-owning tiles.");
         static_assert(Layout::Size == OtherLayout::Size, "Expected Size == OtherLayout::Size");
     }
 
     // initialize from an existing tile's memory
-    inline CUDA_CALLABLE tile_shared_t(T* data, T* grad = nullptr, bool initialized = true)
+    inline CUDA_CALLABLE tile_shared_t(
+        T WP_TILE_SHARED* data, T WP_TILE_SHARED* grad = nullptr, bool initialized = true WP_TILE_ARENA_PARAM_LAST
+    )
         : data(data)
         , grad(grad)
         , initialized(initialized)
     {
+#if defined(__METAL_VERSION__)
+        this->_wp_arena = _wp_arena;
+#endif
     }
 
     inline CUDA_CALLABLE ~tile_shared_t()
@@ -1477,15 +1771,16 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
         if (Owner) {
             // update our per-thread shared memory allocator
             if (data.ptr)
-                tile_shared_storage_t::alloc(-Layout::Size * int(sizeof(T)));
+                WP_TILE_ALLOC(-Layout::Size * int(sizeof(T)));
 
             if (grad.ptr)
-                tile_shared_storage_t::alloc(-Layout::Size * int(sizeof(T)));
+                WP_TILE_ALLOC(-Layout::Size * int(sizeof(T)));
         }
     }
 
     // assign from a register tile
-    inline CUDA_CALLABLE auto& operator=(const tile_register_t<Type, tile_layout_register_t<typename Layout::Shape>>& t)
+    inline CUDA_CALLABLE auto WP_THREAD&
+    operator=(const tile_register_t<Type, tile_layout_register_t<typename Layout::Shape>> WP_THREAD& t)
     {
         assign(t);
         return *this;
@@ -1495,7 +1790,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     // is invoked for reshape operations like `wp.tile_transpose()`
     // or `wp::copy()`
     template <typename OtherT, typename OtherLayout, bool OtherOwner>
-    inline CUDA_CALLABLE auto& operator=(const tile_shared_t<OtherT, OtherLayout, OtherOwner>& rhs)
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(const tile_shared_t<OtherT, OtherLayout, OtherOwner> WP_THREAD& rhs)
     {
         // check dimensions are compatible
         static_assert(Layout::Size == OtherLayout::Size, "Expected Size == OtherLayout::Size");
@@ -1514,7 +1809,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
         return *this;
     }
 
-    inline CUDA_CALLABLE auto& operator=(const tile_shared_t& rhs)
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(const tile_shared_t WP_THREAD& rhs)
     {
         if (Owner) {
             // if the tile owns the data we need to copy
@@ -1532,14 +1827,15 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     // assign from a global tile (load)
 
     template <bool BoundsCheck, bool Aligned>
-    inline CUDA_CALLABLE auto& operator=(const tile_global_t<T, typename Layout::Shape, BoundsCheck, Aligned>& t)
+    inline CUDA_CALLABLE auto WP_THREAD&
+    operator=(const tile_global_t<T, typename Layout::Shape, BoundsCheck, Aligned> WP_THREAD& t)
     {
         copy_from_global<tile_global_t<T, typename Layout::Shape, BoundsCheck, Aligned>>(t);
         return *this;
     }
 
     // assign from a constant value
-    inline CUDA_CALLABLE auto& operator=(const T& x)
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(const T WP_THREAD& x)
     {
         // sync if we are re-initializing data so that any threads that are still
         // reading from this tile can complete their work, e.g.: if re-assigning
@@ -1556,17 +1852,18 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // no-init assignment: leave data unchanged - the rvalue side of tile_empty
-    inline CUDA_CALLABLE auto& operator=(tile_empty_t) { return *this; }
+    inline CUDA_CALLABLE auto WP_THREAD& operator=(tile_empty_t) { return *this; }
 
     // define the += operator which is used during backward pass codegen
     // when returning a register tile from a user defined function
-    template <typename OtherLayout> inline CUDA_CALLABLE auto& operator+=(const tile_register_t<T, OtherLayout>& rhs)
+    template <typename OtherLayout>
+    inline CUDA_CALLABLE auto WP_THREAD& operator+=(const tile_register_t<T, OtherLayout> WP_THREAD& rhs)
     {
         grad_add(rhs);
         return *this;
     }
 
-    inline CUDA_CALLABLE auto& operator+=(const tile_shared_t<T, Layout>& rhs)
+    inline CUDA_CALLABLE auto WP_THREAD& operator+=(const tile_shared_t<T, Layout> WP_THREAD& rhs)
     {
         grad_add(rhs);
         return *this;
@@ -1582,10 +1879,10 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // extract a single tile element to a native type
-    inline CUDA_CALLABLE Type extract(const typename Layout::Coord& c) { return data(c); }
+    inline CUDA_CALLABLE Type extract(WP_TILE_ARENA_PARAM const typename Layout::Coord WP_THREAD& c) { return data(c); }
 
     // backward of scalar extraction
-    inline CUDA_CALLABLE void adj_extract(const typename Layout::Coord& c, Type adj_ret)
+    inline CUDA_CALLABLE void adj_extract(const typename Layout::Coord WP_THREAD& c, Type adj_ret)
     {
         // since multiple threads may extract the same element
         // we need to accumulate using atomic operations
@@ -1595,7 +1892,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // add scalar value onto a single tile element
-    inline CUDA_CALLABLE void add_inplace(const typename Layout::Coord& c, const Type& x)
+    inline CUDA_CALLABLE void add_inplace(const typename Layout::Coord WP_THREAD& c, const Type WP_THREAD& x)
     {
         // since multiple threads may add to the same element
         // we need to accumulate using atomic operations
@@ -1605,10 +1902,13 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // backward of inplace scalar addition
-    inline CUDA_CALLABLE void adj_add_inplace(const typename Layout::Coord& c, Type& adj_x) { adj_x += grad(c); }
+    inline CUDA_CALLABLE void adj_add_inplace(const typename Layout::Coord WP_THREAD& c, Type WP_THREAD& adj_x)
+    {
+        adj_x += grad(c);
+    }
 
     // subtract scalar value from a single tile element
-    inline CUDA_CALLABLE void sub_inplace(const typename Layout::Coord& c, const Type& x)
+    inline CUDA_CALLABLE void sub_inplace(const typename Layout::Coord WP_THREAD& c, const Type WP_THREAD& x)
     {
         // since multiple threads may add to the same element
         // we need to accumulate using atomic operations
@@ -1618,10 +1918,13 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // backward of inplace scalar subtraction
-    inline CUDA_CALLABLE void adj_sub_inplace(const typename Layout::Coord& c, Type& adj_x) { adj_x -= grad(c); }
+    inline CUDA_CALLABLE void adj_sub_inplace(const typename Layout::Coord WP_THREAD& c, Type WP_THREAD& adj_x)
+    {
+        adj_x -= grad(c);
+    }
 
     // perform AND between a scalar value and a single tile element
-    inline CUDA_CALLABLE void bit_and_inplace(const typename Layout::Coord& c, const Type& x)
+    inline CUDA_CALLABLE void bit_and_inplace(const typename Layout::Coord WP_THREAD& c, const Type WP_THREAD& x)
     {
         // since multiple threads may access the same element
         // we need to access using atomic operations
@@ -1631,14 +1934,14 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // backward of inplace scalar AND
-    inline CUDA_CALLABLE void adj_bit_and_inplace(const typename Layout::Coord& c, Type& adj_x)
+    inline CUDA_CALLABLE void adj_bit_and_inplace(const typename Layout::Coord WP_THREAD& c, Type WP_THREAD& adj_x)
     {
         // nop: integer atomic suppressor (bitwise ops on integer tiles have no gradient)
     }
 
 
     // perform OR between a scalar value and a single tile element
-    inline CUDA_CALLABLE void bit_or_inplace(const typename Layout::Coord& c, const Type& x)
+    inline CUDA_CALLABLE void bit_or_inplace(const typename Layout::Coord WP_THREAD& c, const Type WP_THREAD& x)
     {
         // since multiple threads may access the same element
         // we need to access using atomic operations
@@ -1648,13 +1951,13 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // backward of inplace scalar OR
-    inline CUDA_CALLABLE void adj_bit_or_inplace(const typename Layout::Coord& c, Type& adj_x)
+    inline CUDA_CALLABLE void adj_bit_or_inplace(const typename Layout::Coord WP_THREAD& c, Type WP_THREAD& adj_x)
     {
         // nop: integer atomic suppressor (bitwise ops on integer tiles have no gradient)
     }
 
     // perform XOR between a scalar value and a single tile element
-    inline CUDA_CALLABLE void bit_xor_inplace(const typename Layout::Coord& c, const Type& x)
+    inline CUDA_CALLABLE void bit_xor_inplace(const typename Layout::Coord WP_THREAD& c, const Type WP_THREAD& x)
     {
         // since multiple threads may access the same element
         // we need to access using atomic operations
@@ -1664,13 +1967,13 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // backward of inplace scalar XOR
-    inline CUDA_CALLABLE void adj_bit_xor_inplace(const typename Layout::Coord& c, Type& adj_x)
+    inline CUDA_CALLABLE void adj_bit_xor_inplace(const typename Layout::Coord WP_THREAD& c, Type WP_THREAD& adj_x)
     {
         // nop: integer atomic suppressor (bitwise ops on integer tiles have no gradient)
     }
 
     // copy register tile to shared
-    template <typename Tile> inline CUDA_CALLABLE void assign(const Tile& tile)
+    template <typename Tile> inline CUDA_CALLABLE void assign(const Tile WP_THREAD& tile)
     {
         if (initialized)
             WP_TILE_SYNC();
@@ -1693,7 +1996,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
 
     // shared tile deep copy
     template <typename OtherT, typename OtherLayout, bool OtherOwner>
-    inline CUDA_CALLABLE void assign(const tile_shared_t<OtherT, OtherLayout, OtherOwner>& tile)
+    inline CUDA_CALLABLE void assign(const tile_shared_t<OtherT, OtherLayout, OtherOwner> WP_THREAD& tile)
     {
         // check dimensions are compatible
         static_assert(Layout::Size == OtherLayout::Size, "Expected Size == OtherLayout::Size");
@@ -1722,7 +2025,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
 
 
     // accumulate gradients onto this tile
-    template <typename Tile> inline CUDA_CALLABLE void grad_add(const Tile& tile)
+    template <typename Tile> inline CUDA_CALLABLE void grad_add(const Tile WP_THREAD& tile)
     {
         WP_PRAGMA_UNROLL
         for (int i = 0; i < Tile::Layout::NumRegs; ++i) {
@@ -1748,7 +2051,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // accumulate gradients onto this tile from another shared tile
-    inline CUDA_CALLABLE void grad_add(const tile_shared_t<T, Layout>& tile)
+    inline CUDA_CALLABLE void grad_add(const tile_shared_t<T, Layout> WP_THREAD& tile)
     {
         WP_PRAGMA_UNROLL
         for (int i = WP_TILE_THREAD_IDX; i < Layout::Size; i += WP_TILE_BLOCK_DIM) {
@@ -1760,7 +2063,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // accumulate gradient onto this tile from a global array
-    inline CUDA_CALLABLE void grad_add(const tile_global_t<T, typename Layout::Shape>& global)
+    inline CUDA_CALLABLE void grad_add(const tile_global_t<T, typename Layout::Shape> WP_THREAD& global)
     {
         WP_PRAGMA_UNROLL
         for (int i = WP_TILE_THREAD_IDX; i < Layout::Size; i += WP_TILE_BLOCK_DIM) {
@@ -1783,7 +2086,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     }
 
     // zero the gradient in a global array for the elements covered by this tile
-    template <typename Global> inline CUDA_CALLABLE void grad_zero_global(const Global& global)
+    template <typename Global> inline CUDA_CALLABLE void grad_zero_global(const Global WP_THREAD& global)
     {
         WP_PRAGMA_UNROLL
         for (int i = WP_TILE_THREAD_IDX; i < Layout::Size; i += WP_TILE_BLOCK_DIM) {
@@ -1834,7 +2137,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
 
     // Store a tile from shared memory to global memory.
     // Same three-tier path cascade as copy_from_global (see that function for details).
-    template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global& dest)
+    template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global WP_THREAD& dest)
     {
 
 #if defined(__CUDA_ARCH__)
@@ -1937,8 +2240,8 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                     }
 
                     if (valid)
-                        *reinterpret_cast<T*>(
-                            reinterpret_cast<char*>(dest.data.data) + base_bytes + i * int64_t(byte_stride)
+                        *reinterpret_cast<T WP_DEVICE*>(
+                            reinterpret_cast<char WP_DEVICE*>(dest.data.data) + base_bytes + i * int64_t(byte_stride)
                         ) = data(i);
                 }
             } else {
@@ -1959,7 +2262,9 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                     }
 
                     if (valid)
-                        *reinterpret_cast<T*>(reinterpret_cast<char*>(dest.data.data) + iter.byte_offset) = data(i);
+                        *reinterpret_cast<T WP_DEVICE*>(
+                            reinterpret_cast<char WP_DEVICE*>(dest.data.data) + iter.byte_offset
+                        ) = data(i);
                     iter.advance(WP_TILE_BLOCK_DIM);
                 }
             }
@@ -1991,7 +2296,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     //      CPU execution. Uses flat byte-offset indexing for 1D, incremental
     //      coordinate iteration (tile_coord_iter_t) for N-D.
     //
-    template <typename Global> inline CUDA_CALLABLE void copy_from_global(const Global& src)
+    template <typename Global> inline CUDA_CALLABLE void copy_from_global(const Global WP_THREAD& src)
     {
         if (initialized)
             WP_TILE_SYNC();
@@ -2099,11 +2404,11 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                             valid = false;
                     }
 
-                    data(i) = valid
-                        ? *reinterpret_cast<const T*>(
-                              reinterpret_cast<const char*>(src.data.data) + base_bytes + i * int64_t(byte_stride)
-                          )
-                        : T {};
+                    data(i) = valid ? *reinterpret_cast<const T WP_DEVICE*>(
+                                          reinterpret_cast<const char WP_DEVICE*>(src.data.data) + base_bytes
+                                          + i * int64_t(byte_stride)
+                                      )
+                                    : T {};
                 }
             } else {
                 using Iter = tile_coord_iter_t<Shape>;
@@ -2122,9 +2427,10 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                         }
                     }
 
-                    data(i) = valid
-                        ? *reinterpret_cast<const T*>(reinterpret_cast<const char*>(src.data.data) + iter.byte_offset)
-                        : T {};
+                    data(i) = valid ? *reinterpret_cast<const T WP_DEVICE*>(
+                                          reinterpret_cast<const char WP_DEVICE*>(src.data.data) + iter.byte_offset
+                                      )
+                                    : T {};
                     iter.advance(WP_TILE_BLOCK_DIM);
                 }
             }
@@ -2134,12 +2440,12 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
         WP_TILE_SYNC();
     }
 
-    template <typename Global> inline CUDA_CALLABLE auto atomic_add(Global& dest)
+    template <typename Global> inline CUDA_CALLABLE auto atomic_add(Global WP_THREAD& dest)
     {
         return copy_to_register().atomic_add(dest);
     }
 
-    template <typename Global> inline CUDA_CALLABLE auto atomic_add_grad(Global& dest)
+    template <typename Global> inline CUDA_CALLABLE auto atomic_add_grad(Global WP_THREAD& dest)
     {
         return grad_to_register().atomic_add_grad(dest);
     }
@@ -2150,7 +2456,8 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     // overload for floating point types
     template <typename ValueType> inline CUDA_CALLABLE void print_value(ValueType x) const { printf("%g", x); }
 
-    template <int Level = 0> inline CUDA_CALLABLE void print_values(const Storage& storage, int index = 0) const
+    template <int Level = 0>
+    inline CUDA_CALLABLE void print_values(const Storage WP_THREAD& storage, int index = 0) const
     {
         using Shape = typename Layout::Shape;
 
@@ -2232,15 +2539,9 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
 };
 
 
-template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::print() const
+template <typename T, typename L>
+inline CUDA_CALLABLE void tile_register_t<T, L>::print_from_shared(T WP_THREAD* smem) const
 {
-    // create a temporary shared tile so that
-    // we can print it deterministically
-#if defined(__CUDA_ARCH__)
-    __shared__ T smem[L::Size];
-#else
-    T smem[L::Size];
-#endif
     tile_shared_t<T, tile_layout_strided_t<typename L::Shape>, false> scratch(smem, nullptr);
 
     scratch.assign(*this);
@@ -2263,55 +2564,94 @@ template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::prin
     WP_TILE_SYNC();
 }
 
+template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::print() const
+{
+#if defined(__METAL_VERSION__)
+    return;
+#else
+    // Create a temporary shared tile so that we can print it deterministically.
+#if defined(__CUDA_ARCH__)
+    __shared__ T smem[L::Size];
+    print_from_shared(smem);
+#else
+    if constexpr (WP_TILE_BLOCK_DIM == 1) {
+        // Preserve the legacy one-lane path without using the shared allocator.
+        T smem[L::Size];
+        print_from_shared(smem);
+    } else {
+        // Register-tile elements are distributed across fibers, so all lanes
+        // must populate the same temporary tile before lane 0 prints it.
+        wp_block_shared<T[L::Size]> smem_holder { WP_TILE_ARENA_ARG0 };
+        print_from_shared(*smem_holder);
+    }
+#endif
+#endif
+}
+
 // print entry points
-template <typename T, typename L> inline CUDA_CALLABLE void print(const tile_register_t<T, L>& t) { t.print(); }
+template <typename T, typename L> inline CUDA_CALLABLE void print(const tile_register_t<T, L> WP_THREAD& t)
+{
+    t.print();
+}
 
 template <typename T, typename L>
-inline CUDA_CALLABLE void adj_print(const tile_register_t<T, L>& t, const tile_register_t<T, L>& a)
+inline CUDA_CALLABLE void adj_print(const tile_register_t<T, L> WP_THREAD& t, const tile_register_t<T, L> WP_THREAD& a)
 {
     a.print();
 }
 
-template <typename T, typename L, bool Owner> inline CUDA_CALLABLE void print(const tile_shared_t<T, L, Owner>& t)
+template <typename T, typename L, bool Owner>
+inline CUDA_CALLABLE void print(const tile_shared_t<T, L, Owner> WP_THREAD& t)
 {
     t.print();
 }
 
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE void adj_print(const tile_shared_t<T, L, Owner>& t, const tile_shared_t<T, L, Owner>& a)
+inline CUDA_CALLABLE void
+adj_print(const tile_shared_t<T, L, Owner> WP_THREAD& t, const tile_shared_t<T, L, Owner> WP_THREAD& a)
 {
     a.print(true);
 }
 
-template <typename T, typename L, bool O> inline CUDA_CALLABLE int len(const tile_shared_t<T, L, O>& t)
+template <typename T, typename L, bool O> inline CUDA_CALLABLE int len(const tile_shared_t<T, L, O> WP_THREAD& t)
 {
     return L::Shape::dim(0);
 }
 
-template <typename T, typename L> inline CUDA_CALLABLE int len(const tile_register_t<T, L>& t)
+template <typename T, typename L> inline CUDA_CALLABLE int len(const tile_register_t<T, L> WP_THREAD& t)
 {
     return L::Shape::dim(0);
 }
 
 // where specialization for register/shared tiles
 template <typename C, typename T, typename LRegister, typename LShared, bool Owner>
-inline CUDA_CALLABLE auto
-where(const C& cond, const tile_register_t<T, LRegister>& a, const tile_shared_t<T, LShared, Owner>& b)
+inline CUDA_CALLABLE auto where(
+    const C WP_THREAD& cond,
+    const tile_register_t<T, LRegister> WP_THREAD& a,
+    const tile_shared_t<T, LShared, Owner> WP_THREAD& b
+)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     return (!!cond) ? a : b.copy_to_register();
 }
 
 template <typename C, typename T, typename LRegister, typename LShared, bool Owner>
-inline CUDA_CALLABLE auto
-where(const C& cond, const tile_shared_t<T, LShared, Owner>& a, const tile_register_t<T, LRegister>& b)
+inline CUDA_CALLABLE auto where(
+    const C WP_THREAD& cond,
+    const tile_shared_t<T, LShared, Owner> WP_THREAD& a,
+    const tile_register_t<T, LRegister> WP_THREAD& b
+)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     return (!!cond) ? a.copy_to_register() : b;
 }
 
 template <typename C, typename T, typename L, bool Owner>
-inline CUDA_CALLABLE auto where(const C& cond, const tile_shared_t<T, L, Owner>& a, const tile_shared_t<T, L, Owner>& b)
+inline CUDA_CALLABLE auto where(
+    const C WP_THREAD& cond,
+    const tile_shared_t<T, L, Owner> WP_THREAD& a,
+    const tile_shared_t<T, L, Owner> WP_THREAD& b
+)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     return (!!cond) ? tile_shared_t<T, L, false>(a.data.ptr, a.grad.ptr)
@@ -2319,8 +2659,11 @@ inline CUDA_CALLABLE auto where(const C& cond, const tile_shared_t<T, L, Owner>&
 }
 
 template <typename C, typename T, typename L, bool LOwner, bool ROwner>
-inline CUDA_CALLABLE auto
-where(const C& cond, const tile_shared_t<T, L, LOwner>& a, const tile_shared_t<T, L, ROwner>& b)
+inline CUDA_CALLABLE auto where(
+    const C WP_THREAD& cond,
+    const tile_shared_t<T, L, LOwner> WP_THREAD& a,
+    const tile_shared_t<T, L, ROwner> WP_THREAD& b
+)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     return (!!cond) ? tile_shared_t<T, L, false>(a.data.ptr, a.grad.ptr)
@@ -2331,14 +2674,17 @@ where(const C& cond, const tile_shared_t<T, L, LOwner>& a, const tile_shared_t<T
 
 // copy specialization for shared tiles, the lvalue this gets assigned to is owning, thus, this invokes the copy assign
 // path
-template <typename T, typename L, bool Owner> inline CUDA_CALLABLE auto copy(const tile_shared_t<T, L, Owner>& t)
+template <typename T, typename L, bool Owner>
+inline CUDA_CALLABLE auto copy(const tile_shared_t<T, L, Owner> WP_THREAD& t)
 {
     return tile_shared_t<T, L, false>(t.data.ptr, t.grad.ptr);
 }
 
 template <typename T, typename L, bool Owner>
 inline CUDA_CALLABLE void adj_copy(
-    const tile_shared_t<T, L, Owner>& src, tile_shared_t<T, L, Owner>& adj_src, tile_shared_t<T, L, Owner>& adj_dest
+    const tile_shared_t<T, L, Owner> WP_THREAD& src,
+    tile_shared_t<T, L, Owner> WP_THREAD& adj_src,
+    tile_shared_t<T, L, Owner> WP_THREAD& adj_dest
 )
 {
     adj_src += adj_dest;
@@ -2352,28 +2698,28 @@ inline CUDA_CALLABLE void adj_copy(
 
 // Read one element from a register tile (indexed by register slot).
 template <typename T, typename L>
-inline CUDA_CALLABLE T tile_read(const tile_register_t<T, L>& tile, int reg, int /*linear*/)
+inline CUDA_CALLABLE T tile_read(const tile_register_t<T, L> WP_THREAD& tile, int reg, int /*linear*/)
 {
     return tile.data[reg];
 }
 
 // Read one element from a shared tile (indexed by linear position).
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE T tile_read(const tile_shared_t<T, L, Owner>& tile, int /*reg*/, int linear)
+inline CUDA_CALLABLE T tile_read(const tile_shared_t<T, L, Owner> WP_THREAD& tile, int /*reg*/, int linear)
 {
     return tile.data(linear);
 }
 
 // Add a value to one element of a register tile.
 template <typename T, typename L>
-inline CUDA_CALLABLE void tile_add(tile_register_t<T, L>& tile, int reg, int /*linear*/, T val)
+inline CUDA_CALLABLE void tile_add(tile_register_t<T, L> WP_THREAD& tile, int reg, int /*linear*/, T val)
 {
     tile.data[reg] += val;
 }
 
 // Add a value to one element of a shared tile.
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE void tile_add(tile_shared_t<T, L, Owner>& tile, int /*reg*/, int linear, T val)
+inline CUDA_CALLABLE void tile_add(tile_shared_t<T, L, Owner> WP_THREAD& tile, int /*reg*/, int linear, T val)
 {
     if constexpr (L::Unique)
         tile.data(linear) += val;
@@ -2384,17 +2730,18 @@ inline CUDA_CALLABLE void tile_add(tile_shared_t<T, L, Owner>& tile, int /*reg*/
 // ---------------------------------------------------------------------------
 
 // helpers to allocate shared tiles
-template <typename T, typename Shape, typename Strides, bool RequiresGrad> inline CUDA_CALLABLE auto tile_alloc_empty()
+template <typename T, typename Shape, typename Strides, bool RequiresGrad>
+inline CUDA_CALLABLE auto tile_alloc_empty(WP_TILE_ARENA_PARAM0)
 {
     constexpr int size = Shape::size();
-    T* data = (T*)tile_shared_storage_t::alloc(size * sizeof(T));
-    T* grad = nullptr;
+    T WP_TILE_SHARED* data = (T WP_TILE_SHARED*)WP_TILE_ALLOC(size * sizeof(T));
+    T WP_TILE_SHARED* grad = nullptr;
 
 #if FP_CHECK
 
     // initialize tile to quiet nan
     uint32_t qnanbits = 0x7FC00000;
-    float qnan = *(float*)(&qnanbits);
+    float qnan = *(float WP_THREAD*)(&qnanbits);
 
     for (int i = WP_TILE_THREAD_IDX; i < size; i += WP_TILE_BLOCK_DIM)
         data[i] = T(qnan);
@@ -2405,7 +2752,7 @@ template <typename T, typename Shape, typename Strides, bool RequiresGrad> inlin
 
 
     if (RequiresGrad) {
-        grad = (T*)tile_shared_storage_t::alloc(size * sizeof(T));
+        grad = (T WP_TILE_SHARED*)WP_TILE_ALLOC(size * sizeof(T));
 
         for (int i = WP_TILE_THREAD_IDX; i < size; i += WP_TILE_BLOCK_DIM)
             grad[i] = T {};
@@ -2413,7 +2760,7 @@ template <typename T, typename Shape, typename Strides, bool RequiresGrad> inlin
         WP_TILE_SYNC();
     }
 
-    return tile_shared_t<T, tile_layout_strided_t<Shape, Strides>>(data, grad);
+    return tile_shared_t<T, tile_layout_strided_t<Shape, Strides>>(data, grad, true WP_TILE_ARENA_ARG_LAST);
 }
 
 
@@ -2421,7 +2768,7 @@ template <typename T, typename Shape, typename Strides, bool RequiresGrad> inlin
 // High level entry points for each op (correspond to one Warp builtin)
 
 // construct a tile from a local SIMT value (one per-thread)
-template <typename T> inline CUDA_CALLABLE auto tile(const T& x)
+template <typename T> inline CUDA_CALLABLE auto tile(const T WP_THREAD& x)
 {
     tile_register_t<T, tile_layout_register_t<tile_shape_t<WP_TILE_BLOCK_DIM>>> result;
 
@@ -2433,7 +2780,7 @@ template <typename T> inline CUDA_CALLABLE auto tile(const T& x)
 }
 
 // overload for constructing a tile from a per-thread vector
-template <typename T, unsigned Length> inline CUDA_CALLABLE auto tile(const wp::vec_t<Length, T>& x)
+template <typename T, unsigned Length> inline CUDA_CALLABLE auto tile(const wp::vec_t<Length, T> WP_THREAD& x)
 {
     tile_register_t<T, tile_layout_register_t<tile_shape_t<Length, WP_TILE_BLOCK_DIM>>> result;
 
@@ -2447,7 +2794,8 @@ template <typename T, unsigned Length> inline CUDA_CALLABLE auto tile(const wp::
 }
 
 // overload for constructing a tile from a per-thread matrix
-template <unsigned Rows, unsigned Cols, typename T> inline CUDA_CALLABLE auto tile(const wp::mat_t<Rows, Cols, T>& x)
+template <unsigned Rows, unsigned Cols, typename T>
+inline CUDA_CALLABLE auto tile(const wp::mat_t<Rows, Cols, T> WP_THREAD& x)
 {
     tile_register_t<T, tile_layout_register_t<tile_shape_t<Rows, Cols, WP_TILE_BLOCK_DIM>>> result;
 
@@ -2464,7 +2812,8 @@ template <unsigned Rows, unsigned Cols, typename T> inline CUDA_CALLABLE auto ti
 // it is sufficient to use a single adjoint for all tile overload funcs
 // it is also necessary, because we don't provide a dispatch_func for adjoint calls
 // so the compiler will default to choosing based on argument types
-template <typename T, typename AdjTile> inline CUDA_CALLABLE void adj_tile(const T& x, T& adj_x, AdjTile& adj_ret)
+template <typename T, typename AdjTile>
+inline CUDA_CALLABLE void adj_tile(const T WP_THREAD& x, T WP_THREAD& adj_x, AdjTile WP_THREAD& adj_ret)
 {
     static_assert(
         AdjTile::Layout::Shape::dim(AdjTile::Layout::Shape::N - 1) == WP_TILE_BLOCK_DIM,
@@ -2486,7 +2835,7 @@ template <typename T, typename AdjTile> inline CUDA_CALLABLE void adj_tile(const
 }
 
 
-template <typename Tile> inline CUDA_CALLABLE auto untile(Tile& tile)
+template <typename Tile> inline CUDA_CALLABLE auto untile(Tile WP_THREAD& tile)
 {
     // code-gen should have set the tile to
     // have exactly the block dimension so
@@ -2524,7 +2873,7 @@ template <typename Tile> inline CUDA_CALLABLE auto untile(Tile& tile)
 }
 
 template <typename Tile, typename Value>
-inline CUDA_CALLABLE void adj_untile(Tile& tile, Tile& adj_tile, Value& adj_ret)
+inline CUDA_CALLABLE void adj_untile(Tile WP_THREAD& tile, Tile WP_THREAD& adj_tile, Value WP_THREAD& adj_ret)
 {
     auto adj = adj_tile.copy_to_register();
 
@@ -2585,7 +2934,8 @@ template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_full(T x
 }
 
 // tile initialized from a specific thread's value (broadcasts value from thread_idx to all threads)
-template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_from_thread(T value, int thread_idx)
+template <typename T, unsigned... Shape>
+inline CUDA_CALLABLE auto tile_from_thread(WP_TILE_ARENA_PARAM T value, int thread_idx)
 {
 #if defined(__CUDA_ARCH__)
     assert(thread_idx >= 0 && thread_idx < blockDim.x);
@@ -2608,10 +2958,22 @@ template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_from_thr
     // tile variable assignment operator will handle initialization (since lhs could be shared/register tile)
     return scratch;
 #else
-    // On CPU there's only one "thread" per kernel invocation,
-    // so just return the value directly
-    (void)thread_idx;  // unused on CPU
-    return value;
+    assert(thread_idx >= 0 && thread_idx < WP_TILE_BLOCK_DIM);
+
+    if constexpr (WP_TILE_BLOCK_DIM == 1) {
+        return value;
+    } else {
+        wp_block_shared<T> scratch_holder { WP_TILE_ARENA_ARG0 };
+        T WP_TILE_SHARED& scratch = *scratch_holder;
+
+        WP_TILE_SYNC();
+        if (WP_TILE_THREAD_IDX == thread_idx)
+            scratch = value;
+        WP_TILE_SYNC();
+        T result = scratch;
+        WP_TILE_SYNC();
+        return result;
+    }
 #endif
 }
 
@@ -2734,8 +3096,15 @@ template <typename T, int Len> inline CUDA_CALLABLE auto tile_arange(T start, T 
 }
 
 template <typename T, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_arange(T start, T stop, T step, T& adj_start, T& adj_stop, T& adj_step, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_arange(
+    T start,
+    T stop,
+    T step,
+    T WP_THREAD& adj_start,
+    T WP_THREAD& adj_stop,
+    T WP_THREAD& adj_step,
+    AdjTile WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: output[i] = start + i*step, so adj_start += sum(adj_ret) and adj_step +=
     // sum(i * adj_ret[i]); stop is non-differentiable
@@ -2744,15 +3113,15 @@ adj_tile_arange(T start, T stop, T step, T& adj_start, T& adj_stop, T& adj_step,
 // entry point for load operations, these just return a reference to a global memory array + coordinate
 // Aligned: when true, indicates caller guarantees 16-byte alignment and full tile bounds (skips runtime checks)
 template <typename T, bool BoundsCheck, bool Aligned, unsigned... Shape, typename... Offset>
-inline CUDA_CALLABLE auto tile_load(array_t<T>& src, Offset... offset)
+inline CUDA_CALLABLE auto tile_load(array_t<T> WP_THREAD& src, Offset... offset)
 {
     return tile_global_t<T, tile_shape_t<Shape...>, BoundsCheck, Aligned>(src, tile_coord(offset...));
 }
 
 // used for indexed loads and stores
-template <typename T, typename IndicesTile, typename Coord>
+template <typename T, typename Coord>
 inline CUDA_CALLABLE bool
-compute_index(array_t<T>& src, IndicesTile& indices, int axis, Coord offset, Coord c, int64_t& out)
+compute_index(array_t<T> WP_THREAD& src, int index, int axis, Coord offset, Coord c, int64_t WP_THREAD& out)
 {
     // Byte total can exceed 2 GiB; accumulate in 64-bit.
     int64_t byte_index = 0;
@@ -2761,7 +3130,7 @@ compute_index(array_t<T>& src, IndicesTile& indices, int axis, Coord offset, Coo
     for (int i = 0; i < Coord::size(); ++i) {
         if (i == axis) {
             // global = offset_coord + index_mapped_coord
-            int index_along_axis = offset[i] + indices.data(c[i]);
+            int index_along_axis = offset[i] + index;
 
             // out of bounds on either side predicates to zero, so a -1 index
             // acts as a padding sentinel (no physical zero row required)
@@ -2787,18 +3156,35 @@ compute_index(array_t<T>& src, IndicesTile& indices, int axis, Coord offset, Coo
 }
 
 
+template <typename Tile> struct tile_is_register {
+    static WP_CONSTANT constexpr bool value = false;
+};
+template <typename T, typename Layout> struct tile_is_register<tile_register_t<T, Layout>> {
+    static WP_CONSTANT constexpr bool value = true;
+};
+
 template <unsigned... Shape, typename T, typename IndicesTile, typename... Offset>
-inline CUDA_CALLABLE auto tile_load_indexed(array_t<T>& src, IndicesTile& indices, int axis, Offset... offset)
+inline CUDA_CALLABLE auto
+tile_load_indexed(array_t<T> WP_THREAD& src, IndicesTile WP_THREAD& indices, int axis, Offset... offset)
 {
     auto out = tile_register_t<T, tile_layout_register_t<tile_shape_t<Shape...>>>();
     auto offset_coord = tile_coord(offset...);
 
     out.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(src, indices, axis, offset_coord, c, i))
-            out.data[reg] = src.data[i];
-        else
-            out.data[reg] = T {};
+        bool valid;
+        if constexpr (tile_is_register<IndicesTile>::value) {
+            // A 1D register index tile with the output's shape shares its register layout, so
+            // this lane already holds the index of every element it gathers (no shared memory).
+            static_assert(
+                sizeof...(Shape) == 1 && IndicesTile::Layout::Shape::dim(0) == tile_shape_t<Shape...>::dim(0),
+                "register index tiles must be 1D with the gathered tile's shape"
+            );
+            valid = compute_index(src, indices.data[reg], axis, offset_coord, c, i);
+        } else {
+            valid = compute_index(src, indices.data(c[axis]), axis, offset_coord, c, i);
+        }
+        out.data[reg] = valid ? src.data[i] : T {};
     });
 
     return out;
@@ -2807,22 +3193,22 @@ inline CUDA_CALLABLE auto tile_load_indexed(array_t<T>& src, IndicesTile& indice
 
 // entry point for tile store operations
 template <typename T, bool BoundsCheck, bool Aligned, typename Tile>
-inline CUDA_CALLABLE void tile_store(array_t<T>& dest, int x, Tile& src)
+inline CUDA_CALLABLE void tile_store(array_t<T> WP_THREAD& dest, int x, Tile WP_THREAD& src)
 {
     src.copy_to_global(tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck, Aligned>(dest, tile_coord(x)));
 }
 template <typename T, bool BoundsCheck, bool Aligned, typename Tile>
-inline CUDA_CALLABLE void tile_store(array_t<T>& dest, int x, int y, Tile& src)
+inline CUDA_CALLABLE void tile_store(array_t<T> WP_THREAD& dest, int x, int y, Tile WP_THREAD& src)
 {
     src.copy_to_global(tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck, Aligned>(dest, tile_coord(x, y)));
 }
 template <typename T, bool BoundsCheck, bool Aligned, typename Tile>
-inline CUDA_CALLABLE void tile_store(array_t<T>& dest, int x, int y, int z, Tile& src)
+inline CUDA_CALLABLE void tile_store(array_t<T> WP_THREAD& dest, int x, int y, int z, Tile WP_THREAD& src)
 {
     src.copy_to_global(tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck, Aligned>(dest, tile_coord(x, y, z)));
 }
 template <typename T, bool BoundsCheck, bool Aligned, typename Tile>
-inline CUDA_CALLABLE void tile_store(array_t<T>& dest, int x, int y, int z, int w, Tile& src)
+inline CUDA_CALLABLE void tile_store(array_t<T> WP_THREAD& dest, int x, int y, int z, int w, Tile WP_THREAD& src)
 {
     src.copy_to_global(
         tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck, Aligned>(dest, tile_coord(x, y, z, w))
@@ -2831,18 +3217,18 @@ inline CUDA_CALLABLE void tile_store(array_t<T>& dest, int x, int y, int z, int 
 
 template <typename T, int M, typename Tile, typename Coord>
 inline CUDA_CALLABLE void tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     Coord offset,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     auto src_reg = src.copy_to_register();
 
     src_reg.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(dest, indices, axis, offset, c, i))
+        if (compute_index(dest, indices.data(c[axis]), axis, offset, c, i))
             dest.data[i] = src_reg.data[reg];
     });
 }
@@ -2850,46 +3236,50 @@ inline CUDA_CALLABLE void tile_store_indexed(
 // entry point for tile index store operations
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE void tile_store_indexed(
-    array_t<T>& dest, tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices, int axis, int x, Tile& src
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
+    int axis,
+    int x,
+    Tile WP_THREAD& src
 )
 {
     tile_store_indexed(dest, indices, axis, tile_coord(x), src);
 }
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE void tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     tile_store_indexed(dest, indices, axis, tile_coord(x, y), src);
 }
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE void tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     tile_store_indexed(dest, indices, axis, tile_coord(x, y, z), src);
 }
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE void tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
     int w,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     tile_store_indexed(dest, indices, axis, tile_coord(x, y, z, w), src);
@@ -2898,25 +3288,25 @@ inline CUDA_CALLABLE void tile_store_indexed(
 
 // compiler struggles with these if they are one line
 template <typename T, bool BoundsCheck, typename Tile>
-inline CUDA_CALLABLE auto tile_atomic_add(array_t<T>& dest, int x, Tile& src)
+inline CUDA_CALLABLE auto tile_atomic_add(array_t<T> WP_THREAD& dest, int x, Tile WP_THREAD& src)
 {
     tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck> global(dest, tile_coord(x));
     return src.atomic_add(global);
 }
 template <typename T, bool BoundsCheck, typename Tile>
-inline CUDA_CALLABLE auto tile_atomic_add(array_t<T>& dest, int x, int y, Tile& src)
+inline CUDA_CALLABLE auto tile_atomic_add(array_t<T> WP_THREAD& dest, int x, int y, Tile WP_THREAD& src)
 {
     tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck> global(dest, tile_coord(x, y));
     return src.atomic_add(global);
 }
 template <typename T, bool BoundsCheck, typename Tile>
-inline CUDA_CALLABLE auto tile_atomic_add(array_t<T>& dest, int x, int y, int z, Tile& src)
+inline CUDA_CALLABLE auto tile_atomic_add(array_t<T> WP_THREAD& dest, int x, int y, int z, Tile WP_THREAD& src)
 {
     tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck> global(dest, tile_coord(x, y, z));
     return src.atomic_add(global);
 }
 template <typename T, bool BoundsCheck, typename Tile>
-inline CUDA_CALLABLE auto tile_atomic_add(array_t<T>& dest, int x, int y, int z, int w, Tile& src)
+inline CUDA_CALLABLE auto tile_atomic_add(array_t<T> WP_THREAD& dest, int x, int y, int z, int w, Tile WP_THREAD& src)
 {
     tile_global_t<T, typename Tile::Layout::Shape, BoundsCheck> global(dest, tile_coord(x, y, z, w));
     return src.atomic_add(global);
@@ -2924,11 +3314,11 @@ inline CUDA_CALLABLE auto tile_atomic_add(array_t<T>& dest, int x, int y, int z,
 
 template <typename T, int M, typename Tile, typename Coord>
 inline CUDA_CALLABLE auto tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     Coord offset,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     auto src_reg = src.copy_to_register();
@@ -2936,7 +3326,7 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 
     src_reg.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(dest, indices, axis, offset, c, i))
+        if (compute_index(dest, indices.data(c[axis]), axis, offset, c, i))
             ret_reg.data[reg] = tile_atomic_add_value(&dest.data[i], src_reg.data[reg]);
         else
             ret_reg.data[reg] = T {};
@@ -2948,7 +3338,11 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 // entry point for tile index atomic add operations
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE auto tile_atomic_add_indexed(
-    array_t<T>& dest, tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices, int axis, int x, Tile& src
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
+    int axis,
+    int x,
+    Tile WP_THREAD& src
 )
 {
     return tile_atomic_add_indexed(dest, indices, axis, tile_coord(x), src);
@@ -2956,12 +3350,12 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE auto tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     return tile_atomic_add_indexed(dest, indices, axis, tile_coord(x, y), src);
@@ -2969,13 +3363,13 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE auto tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     return tile_atomic_add_indexed(dest, indices, axis, tile_coord(x, y, z), src);
@@ -2983,14 +3377,14 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 
 template <typename T, int M, typename Tile>
 inline CUDA_CALLABLE auto tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
     int w,
-    Tile& src
+    Tile WP_THREAD& src
 )
 {
     return tile_atomic_add_indexed(dest, indices, axis, tile_coord(x, y, z, w), src);
@@ -3001,7 +3395,9 @@ inline CUDA_CALLABLE auto tile_atomic_add_indexed(
 // Adjoints
 
 template <typename T, typename AdjTile, typename Coord>
-inline CUDA_CALLABLE void adj_tile_load(array_t<T>& src, Coord c, array_t<T>& adj_src, Coord adj_c, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_load(
+    array_t<T> WP_THREAD& src, Coord c, array_t<T> WP_THREAD& adj_src, Coord adj_c, AdjTile WP_THREAD& adj_ret
+)
 {
     tile_global_t<T, typename AdjTile::Layout::Shape> dest(src, c);
 
@@ -3016,36 +3412,52 @@ inline CUDA_CALLABLE void adj_tile_load(array_t<T>& src, Coord c, array_t<T>& ad
 }
 
 template <typename T, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_load(array_t<T>& src, int x, array_t<T>& adj_src, int adj_x, AdjTile& adj_ret)
+inline CUDA_CALLABLE void
+adj_tile_load(array_t<T> WP_THREAD& src, int x, array_t<T> WP_THREAD& adj_src, int adj_x, AdjTile WP_THREAD& adj_ret)
 {
     adj_tile_load(src, tile_coord(x), adj_src, tile_coord(0), adj_ret);
 }
 template <typename T, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_load(array_t<T>& src, int x, int y, array_t<T>& adj_src, int adj_x, int adj_y, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_load(
+    array_t<T> WP_THREAD& src,
+    int x,
+    int y,
+    array_t<T> WP_THREAD& adj_src,
+    int adj_x,
+    int adj_y,
+    AdjTile WP_THREAD& adj_ret
+)
 {
     adj_tile_load(src, tile_coord(x, y), adj_src, tile_coord(0, 0), adj_ret);
 }
 template <typename T, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load(
-    array_t<T>& src, int x, int y, int z, array_t<T>& adj_src, int adj_x, int adj_y, int adj_z, AdjTile& adj_ret
+    array_t<T> WP_THREAD& src,
+    int x,
+    int y,
+    int z,
+    array_t<T> WP_THREAD& adj_src,
+    int adj_x,
+    int adj_y,
+    int adj_z,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load(src, tile_coord(x, y, z), adj_src, tile_coord(0, 0, 0), adj_ret);
 }
 template <typename T, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load(
-    array_t<T>& src,
+    array_t<T> WP_THREAD& src,
     int x,
     int y,
     int z,
     int w,
-    array_t<T>& adj_src,
+    array_t<T> WP_THREAD& adj_src,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load(src, tile_coord(x, y, z, w), adj_src, tile_coord(0, 0, 0, 0), adj_ret);
@@ -3053,15 +3465,15 @@ inline CUDA_CALLABLE void adj_tile_load(
 
 template <typename T, typename IndicesTile, typename AdjTile, typename Coord>
 inline CUDA_CALLABLE void adj_tile_load_indexed(
-    array_t<T>& src,
-    IndicesTile& indices,
+    array_t<T> WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
     int axis,
     Coord offset,
-    array_t<T>& adj_src,
-    IndicesTile& adj_indices,
+    array_t<T> WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
     int adj_axis,
     Coord adj_offset,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     // we allow users to override grad of src
@@ -3075,39 +3487,39 @@ inline CUDA_CALLABLE void adj_tile_load_indexed(
 
     adj_ret_reg.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(src, indices, axis, offset, c, i))
+        if (compute_index(src, indices.data(c[axis]), axis, offset, c, i))
             tile_adj_atomic_add_value(&src.grad[i], adj_ret_reg.data[reg]);
     });
 }
 
 template <typename T, typename IndicesTile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load_indexed(
-    array_t<T>& src,
-    IndicesTile& indices,
+    array_t<T> WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
     int axis,
     int x,
-    array_t<T>& adj_src,
-    IndicesTile& adj_indices,
+    array_t<T> WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load_indexed(src, indices, axis, tile_coord(x), adj_src, adj_indices, adj_axis, tile_coord(0), adj_ret);
 }
 template <typename T, typename IndicesTile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load_indexed(
-    array_t<T>& src,
-    IndicesTile& indices,
+    array_t<T> WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
     int axis,
     int x,
     int y,
-    array_t<T>& adj_src,
-    IndicesTile& adj_indices,
+    array_t<T> WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load_indexed(
@@ -3116,19 +3528,19 @@ inline CUDA_CALLABLE void adj_tile_load_indexed(
 }
 template <typename T, typename IndicesTile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load_indexed(
-    array_t<T>& src,
-    IndicesTile& indices,
+    array_t<T> WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
-    array_t<T>& adj_src,
-    IndicesTile& adj_indices,
+    array_t<T> WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load_indexed(
@@ -3137,21 +3549,21 @@ inline CUDA_CALLABLE void adj_tile_load_indexed(
 }
 template <typename T, typename IndicesTile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_load_indexed(
-    array_t<T>& src,
-    IndicesTile& indices,
+    array_t<T> WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
     int w,
-    array_t<T>& adj_src,
-    IndicesTile& adj_indices,
+    array_t<T> WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_ret
+    AdjTile WP_THREAD& adj_ret
 )
 {
     adj_tile_load_indexed(
@@ -3160,8 +3572,14 @@ inline CUDA_CALLABLE void adj_tile_load_indexed(
 }
 
 template <typename T, typename Tile, typename AdjTile, typename Coord>
-inline CUDA_CALLABLE void
-adj_tile_store(array_t<T>& dest, Coord c, Tile& t, array_t<T>& adj_dest, Coord adj_c, AdjTile& adj_t)
+inline CUDA_CALLABLE void adj_tile_store(
+    array_t<T> WP_THREAD& dest,
+    Coord c,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    Coord adj_c,
+    AdjTile WP_THREAD& adj_t
+)
 {
     tile_global_t<T, typename AdjTile::Layout::Shape> src(dest, c);
 
@@ -3177,47 +3595,61 @@ adj_tile_store(array_t<T>& dest, Coord c, Tile& t, array_t<T>& adj_dest, Coord a
 }
 
 template <typename T, typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_store(array_t<T>& dest, int x, Tile& t, array_t<T>& adj_dest, int adj_x, AdjTile& adj_t)
+inline CUDA_CALLABLE void adj_tile_store(
+    array_t<T> WP_THREAD& dest,
+    int x,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    int adj_x,
+    AdjTile WP_THREAD& adj_t
+)
 {
     adj_tile_store(dest, tile_coord(x), t, adj_dest, tile_coord(0), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_store(array_t<T>& dest, int x, int y, Tile& t, array_t<T>& adj_dest, int adj_x, int adj_y, AdjTile& adj_t)
+inline CUDA_CALLABLE void adj_tile_store(
+    array_t<T> WP_THREAD& dest,
+    int x,
+    int y,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    int adj_x,
+    int adj_y,
+    AdjTile WP_THREAD& adj_t
+)
 {
     adj_tile_store(dest, tile_coord(x, y), t, adj_dest, tile_coord(0, 0), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store(
-    array_t<T>& dest,
+    array_t<T> WP_THREAD& dest,
     int x,
     int y,
     int z,
-    Tile& t,
-    array_t<T>& adj_dest,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
     int adj_x,
     int adj_y,
     int adj_z,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store(dest, tile_coord(x, y, z), t, adj_dest, tile_coord(0, 0, 0), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store(
-    array_t<T>& dest,
+    array_t<T> WP_THREAD& dest,
     int x,
     int y,
     int z,
     int w,
-    Tile& t,
-    array_t<T>& adj_dest,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store(dest, tile_coord(x, y, z, w), t, adj_dest, tile_coord(0, 0, 0, 0), adj_t);
@@ -3225,16 +3657,16 @@ inline CUDA_CALLABLE void adj_tile_store(
 
 template <typename T, int M, typename Tile, typename AdjTile, typename Coord>
 inline CUDA_CALLABLE void adj_tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     Coord offset,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     Coord adj_offset,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     // we allow users to override grad of src
@@ -3248,7 +3680,7 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 
     adj_t_reg.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(dest, indices, axis, offset, c, i)) {
+        if (compute_index(dest, indices.data(c[axis]), axis, offset, c, i)) {
             adj_t_reg.data[reg] += dest.grad[i];
             dest.grad[i] = T();
         }
@@ -3260,16 +3692,16 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 
 template <typename T, int M, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store_indexed(
@@ -3278,18 +3710,18 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store_indexed(
@@ -3298,20 +3730,20 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store_indexed(
@@ -3320,22 +3752,22 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_store_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
     int w,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     adj_tile_store_indexed(
@@ -3344,8 +3776,14 @@ inline CUDA_CALLABLE void adj_tile_store_indexed(
 }
 
 template <typename T, typename Tile, typename AdjTile, typename Coord>
-inline CUDA_CALLABLE void
-adj_tile_atomic_add(array_t<T>& dest, Coord c, Tile& t, array_t<T>& adj_dest, Coord adj_c, AdjTile& adj_t)
+inline CUDA_CALLABLE void adj_tile_atomic_add(
+    array_t<T> WP_THREAD& dest,
+    Coord c,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    Coord adj_c,
+    AdjTile WP_THREAD& adj_t
+)
 {
     tile_global_t<T, typename AdjTile::Layout::Shape> src(dest, c);
 
@@ -3360,50 +3798,65 @@ adj_tile_atomic_add(array_t<T>& dest, Coord c, Tile& t, array_t<T>& adj_dest, Co
 }
 
 template <typename T, typename Tile, typename AdjTile, typename AdjRet>
-inline CUDA_CALLABLE void
-adj_tile_atomic_add(array_t<T>& dest, int x, Tile& t, array_t<T>& adj_dest, int adj_x, AdjTile& adj_t, AdjRet& adj_ret)
+inline CUDA_CALLABLE void adj_tile_atomic_add(
+    array_t<T> WP_THREAD& dest,
+    int x,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    int adj_x,
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
+)
 {
     adj_tile_atomic_add(dest, tile_coord(x), t, adj_dest, tile_coord(adj_x), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add(
-    array_t<T>& dest, int x, int y, Tile& t, array_t<T>& adj_dest, int adj_x, int adj_y, AdjTile& adj_t, AdjRet& adj_ret
+    array_t<T> WP_THREAD& dest,
+    int x,
+    int y,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    int adj_x,
+    int adj_y,
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add(dest, tile_coord(x, y), t, adj_dest, tile_coord(adj_x, adj_y), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add(
-    array_t<T>& dest,
+    array_t<T> WP_THREAD& dest,
     int x,
     int y,
     int z,
-    Tile& t,
-    array_t<T>& adj_dest,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
     int adj_x,
     int adj_y,
     int adj_z,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add(dest, tile_coord(x, y, z), t, adj_dest, tile_coord(adj_x, adj_y, adj_z), adj_t);
 }
 template <typename T, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add(
-    array_t<T>& dest,
+    array_t<T> WP_THREAD& dest,
     int x,
     int y,
     int z,
     int w,
-    Tile& t,
-    array_t<T>& adj_dest,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add(dest, tile_coord(x, y, z, w), t, adj_dest, tile_coord(adj_x, adj_y, adj_z, adj_w), adj_t);
@@ -3411,16 +3864,16 @@ inline CUDA_CALLABLE void adj_tile_atomic_add(
 
 template <typename T, int M, typename Tile, typename AdjTile, typename Coord>
 inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     Coord offset,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     Coord adj_offset,
-    AdjTile& adj_t
+    AdjTile WP_THREAD& adj_t
 )
 {
     // we allow users to override grad of src
@@ -3434,7 +3887,7 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 
     adj_t_reg.apply([&](int reg, auto c) {
         int64_t i;
-        if (compute_index(dest, indices, axis, offset, c, i))
+        if (compute_index(dest, indices.data(c[axis]), axis, offset, c, i))
             adj_t_reg.data[reg] += dest.grad[i];
     });
 
@@ -3444,17 +3897,17 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 
 template <typename T, int M, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add_indexed(
@@ -3463,19 +3916,19 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add_indexed(
@@ -3484,21 +3937,21 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add_indexed(
@@ -3507,23 +3960,23 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 }
 template <typename T, int M, typename Tile, typename AdjTile, typename AdjRet>
 inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
-    array_t<T>& dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& indices,
+    array_t<T> WP_THREAD& dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& indices,
     int axis,
     int x,
     int y,
     int z,
     int w,
-    Tile& t,
-    array_t<T>& adj_dest,
-    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>>& adj_indices,
+    Tile WP_THREAD& t,
+    array_t<T> WP_THREAD& adj_dest,
+    tile_shared_t<int, tile_layout_strided_t<tile_shape_t<M>>> WP_THREAD& adj_indices,
     int adj_axis,
     int adj_x,
     int adj_y,
     int adj_z,
     int adj_w,
-    AdjTile& adj_t,
-    AdjRet& adj_ret
+    AdjTile WP_THREAD& adj_t,
+    AdjRet WP_THREAD& adj_ret
 )
 {
     adj_tile_atomic_add_indexed(
@@ -3538,7 +3991,7 @@ inline CUDA_CALLABLE void adj_tile_atomic_add_indexed(
 
 // Convert an argument to a register tile. If already a tile, copies to register.
 // If a non-tile constant (scalar, vec, or mat), creates a constant register tile with the given shape.
-template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(T& x)
+template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(T WP_THREAD& x)
 {
     if constexpr (is_tile_type<T>::value) {
         return x.copy_to_register();
@@ -3549,7 +4002,7 @@ template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(T& x)
 }
 
 // Const version for non-tile constants passed by const ref
-template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(const T& x)
+template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(const T WP_THREAD& x)
 {
     if constexpr (is_tile_type<T>::value) {
         return x.copy_to_register();
@@ -3561,7 +4014,7 @@ template <typename Shape, typename T> inline CUDA_CALLABLE auto to_tile(const T&
 
 // Adjoint counterpart to to_tile: accumulates adjoints from register tile back to original argument
 template <typename Shape, typename T, typename AdjReg>
-inline CUDA_CALLABLE void adj_to_tile(T& adj_arg, AdjReg& adj_reg)
+inline CUDA_CALLABLE void adj_to_tile(T WP_THREAD& adj_arg, AdjReg WP_THREAD& adj_reg)
 {
     if constexpr (is_tile_type<T>::value) {
         adj_arg.grad_add(adj_reg);
@@ -3577,7 +4030,7 @@ inline CUDA_CALLABLE void adj_to_tile(T& adj_arg, AdjReg& adj_reg)
 // ============================================================================
 
 // unary map - return type deduced from operation result
-template <typename Tile, typename Fwd> inline CUDA_CALLABLE auto tile_map(Fwd op, Tile& a)
+template <typename Tile, typename Fwd> inline CUDA_CALLABLE auto tile_map(Fwd op, Tile WP_THREAD& a)
 {
     using Shape = typename Tile::Layout::Shape;
     auto a_reg = a.copy_to_register();
@@ -3598,7 +4051,8 @@ template <typename Tile, typename Fwd> inline CUDA_CALLABLE auto tile_map(Fwd op
 
 
 template <typename Tile, typename AdjTile, typename Fwd, typename Adj>
-inline CUDA_CALLABLE void adj_tile_map(Fwd op, Tile& a, Adj adj_op, Tile& adj_a, AdjTile& adj_ret)
+inline CUDA_CALLABLE void
+adj_tile_map(Fwd op, Tile WP_THREAD& a, Adj adj_op, Tile WP_THREAD& adj_a, AdjTile WP_THREAD& adj_ret)
 {
     auto a_reg = a.copy_to_register();
     auto adj_a_reg = tile_register_like<Tile>();
@@ -3617,7 +4071,8 @@ inline CUDA_CALLABLE void adj_tile_map(Fwd op, Tile& a, Adj adj_op, Tile& adj_a,
 
 // binary map - TileA is always a tile, B can be a tile or scalar constant
 // Return type deduced from operation result
-template <typename TileA, typename B, typename Fwd> inline CUDA_CALLABLE auto tile_map(Fwd op, TileA& a, const B& b)
+template <typename TileA, typename B, typename Fwd>
+inline CUDA_CALLABLE auto tile_map(Fwd op, TileA WP_THREAD& a, const B WP_THREAD& b)
 {
     using Shape = typename TileA::Layout::Shape;
 
@@ -3639,8 +4094,15 @@ template <typename TileA, typename B, typename Fwd> inline CUDA_CALLABLE auto ti
 }
 
 template <typename TileA, typename B, typename AdjB, typename Fwd, typename Adj, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_map(Fwd op, TileA& a, const B& b, Adj adj_op, TileA& adj_a, AdjB& adj_b, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_map(
+    Fwd op,
+    TileA WP_THREAD& a,
+    const B WP_THREAD& b,
+    Adj adj_op,
+    TileA WP_THREAD& adj_a,
+    AdjB WP_THREAD& adj_b,
+    AdjTile WP_THREAD& adj_ret
+)
 {
     using Shape = typename TileA::Layout::Shape;
 
@@ -3670,7 +4132,7 @@ adj_tile_map(Fwd op, TileA& a, const B& b, Adj adj_op, TileA& adj_a, AdjB& adj_b
 
 // N = 3
 template <typename Fwd, typename T1, typename T2, typename T3>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3)
+inline CUDA_CALLABLE auto tile_map(Fwd op, T1 WP_THREAD& t1, T2 WP_THREAD& t2, T3 WP_THREAD& t3)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3687,7 +4149,7 @@ inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3)
 
 // N = 4
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4)
+inline CUDA_CALLABLE auto tile_map(Fwd op, T1 WP_THREAD& t1, T2 WP_THREAD& t2, T3 WP_THREAD& t3, T4 WP_THREAD& t4)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3705,7 +4167,8 @@ inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4)
 
 // N = 5
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4, typename T5>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t5)
+inline CUDA_CALLABLE auto
+tile_map(Fwd op, T1 WP_THREAD& t1, T2 WP_THREAD& t2, T3 WP_THREAD& t3, T4 WP_THREAD& t4, T5 WP_THREAD& t5)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3724,7 +4187,9 @@ inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t
 
 // N = 6
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4, typename T5, typename T6>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t5, T6& t6)
+inline CUDA_CALLABLE auto tile_map(
+    Fwd op, T1 WP_THREAD& t1, T2 WP_THREAD& t2, T3 WP_THREAD& t3, T4 WP_THREAD& t4, T5 WP_THREAD& t5, T6 WP_THREAD& t6
+)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3744,7 +4209,16 @@ inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t
 
 // N = 7
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4, typename T5, typename T6, typename T7>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t5, T6& t6, T7& t7)
+inline CUDA_CALLABLE auto tile_map(
+    Fwd op,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
+    T6 WP_THREAD& t6,
+    T7 WP_THREAD& t7
+)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3774,7 +4248,17 @@ template <
     typename T6,
     typename T7,
     typename T8>
-inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t5, T6& t6, T7& t7, T8& t8)
+inline CUDA_CALLABLE auto tile_map(
+    Fwd op,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
+    T6 WP_THREAD& t6,
+    T7 WP_THREAD& t7,
+    T8 WP_THREAD& t8
+)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3798,8 +4282,17 @@ inline CUDA_CALLABLE auto tile_map(Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, T5& t
 
 // N = 3
 template <typename Fwd, typename T1, typename T2, typename T3, typename Adj, typename AdjTile>
-inline CUDA_CALLABLE void
-adj_tile_map(Fwd op, T1& t1, T2& t2, T3& t3, Adj adj_op, T1& adj_t1, T2& adj_t2, T3& adj_t3, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_map(
+    Fwd op,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    Adj adj_op,
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    AdjTile WP_THREAD& adj_ret
+)
 {
     using Shape = typename T1::Layout::Shape;
     auto r1 = t1.copy_to_register();
@@ -3821,7 +4314,17 @@ adj_tile_map(Fwd op, T1& t1, T2& t2, T3& t3, Adj adj_op, T1& adj_t1, T2& adj_t2,
 // N = 4
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4, typename Adj, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_map(
-    Fwd op, T1& t1, T2& t2, T3& t3, T4& t4, Adj adj_op, T1& adj_t1, T2& adj_t2, T3& adj_t3, T4& adj_t4, AdjTile& adj_ret
+    Fwd op,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    Adj adj_op,
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    T4 WP_THREAD& adj_t4,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     using Shape = typename T1::Layout::Shape;
@@ -3851,18 +4354,18 @@ inline CUDA_CALLABLE void adj_tile_map(
 template <typename Fwd, typename T1, typename T2, typename T3, typename T4, typename T5, typename Adj, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_map(
     Fwd op,
-    T1& t1,
-    T2& t2,
-    T3& t3,
-    T4& t4,
-    T5& t5,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
     Adj adj_op,
-    T1& adj_t1,
-    T2& adj_t2,
-    T3& adj_t3,
-    T4& adj_t4,
-    T5& adj_t5,
-    AdjTile& adj_ret
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    T4 WP_THREAD& adj_t4,
+    T5 WP_THREAD& adj_t5,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     using Shape = typename T1::Layout::Shape;
@@ -3904,20 +4407,20 @@ template <
     typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_map(
     Fwd op,
-    T1& t1,
-    T2& t2,
-    T3& t3,
-    T4& t4,
-    T5& t5,
-    T6& t6,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
+    T6 WP_THREAD& t6,
     Adj adj_op,
-    T1& adj_t1,
-    T2& adj_t2,
-    T3& adj_t3,
-    T4& adj_t4,
-    T5& adj_t5,
-    T6& adj_t6,
-    AdjTile& adj_ret
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    T4 WP_THREAD& adj_t4,
+    T5 WP_THREAD& adj_t5,
+    T6 WP_THREAD& adj_t6,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     using Shape = typename T1::Layout::Shape;
@@ -3963,22 +4466,22 @@ template <
     typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_map(
     Fwd op,
-    T1& t1,
-    T2& t2,
-    T3& t3,
-    T4& t4,
-    T5& t5,
-    T6& t6,
-    T7& t7,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
+    T6 WP_THREAD& t6,
+    T7 WP_THREAD& t7,
     Adj adj_op,
-    T1& adj_t1,
-    T2& adj_t2,
-    T3& adj_t3,
-    T4& adj_t4,
-    T5& adj_t5,
-    T6& adj_t6,
-    T7& adj_t7,
-    AdjTile& adj_ret
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    T4 WP_THREAD& adj_t4,
+    T5 WP_THREAD& adj_t5,
+    T6 WP_THREAD& adj_t6,
+    T7 WP_THREAD& adj_t7,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     using Shape = typename T1::Layout::Shape;
@@ -4029,24 +4532,24 @@ template <
     typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_map(
     Fwd op,
-    T1& t1,
-    T2& t2,
-    T3& t3,
-    T4& t4,
-    T5& t5,
-    T6& t6,
-    T7& t7,
-    T8& t8,
+    T1 WP_THREAD& t1,
+    T2 WP_THREAD& t2,
+    T3 WP_THREAD& t3,
+    T4 WP_THREAD& t4,
+    T5 WP_THREAD& t5,
+    T6 WP_THREAD& t6,
+    T7 WP_THREAD& t7,
+    T8 WP_THREAD& t8,
     Adj adj_op,
-    T1& adj_t1,
-    T2& adj_t2,
-    T3& adj_t3,
-    T4& adj_t4,
-    T5& adj_t5,
-    T6& adj_t6,
-    T7& adj_t7,
-    T8& adj_t8,
-    AdjTile& adj_ret
+    T1 WP_THREAD& adj_t1,
+    T2 WP_THREAD& adj_t2,
+    T3 WP_THREAD& adj_t3,
+    T4 WP_THREAD& adj_t4,
+    T5 WP_THREAD& adj_t5,
+    T6 WP_THREAD& adj_t6,
+    T7 WP_THREAD& adj_t7,
+    T8 WP_THREAD& adj_t8,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     using Shape = typename T1::Layout::Shape;
@@ -4090,104 +4593,125 @@ inline CUDA_CALLABLE void adj_tile_map(
 // the `adj_ret` parameter, which means it's not possible to figure out the overload we need using simple casting.
 // The return type is automatically deduced from the operation result using decltype.
 
-#define tile_unary_map(op, a) tile_map([](auto x) { return op(x);}, a)
-#define adj_tile_unary_map(op, a, adj_op, adj_a, adj_ret) adj_tile_map([](auto x) { return op(x);}, a, [](auto x, auto& adj_x, auto adj_ret) { adj_op(x, adj_x, adj_ret);}, adj_a, adj_ret)
+#define tile_unary_map(op, a) tile_map([&](auto x) { return op(x);}, a)
+#define adj_tile_unary_map(op, a, adj_op, adj_a, adj_ret) adj_tile_map([&](auto x) { return op(x);}, a, [&](auto x, auto WP_THREAD& adj_x, auto adj_ret) { adj_op(x, adj_x, adj_ret);}, adj_a, adj_ret)
 
-#define tile_binary_map(op, a, b) tile_map([](auto x, auto y) { return op(x, y);}, a, b)
-#define adj_tile_binary_map(op, a, b, adj_op, adj_a, adj_b, adj_ret) adj_tile_map([](auto x, auto y) { return op(x, y);}, a, b, [](auto x, auto y, auto& adj_x, auto& adj_y, auto adj_ret) { adj_op(x, y, adj_x, adj_y, adj_ret);}, adj_a, adj_b, adj_ret)
+#define tile_binary_map(op, a, b) tile_map([&](auto x, auto y) { return op(x, y);}, a, b)
+#define adj_tile_binary_map(op, a, b, adj_op, adj_a, adj_b, adj_ret) adj_tile_map([&](auto x, auto y) { return op(x, y);}, a, b, [&](auto x, auto y, auto WP_THREAD& adj_x, auto WP_THREAD& adj_y, auto adj_ret) { adj_op(x, y, adj_x, adj_y, adj_ret);}, adj_a, adj_b, adj_ret)
 
 // Wrapper for scalar adj_div to match the 5-arg interface expected by adj_tile_binary_map.
 // Scalar adj_div takes 6 args (includes ret), but adj_tile_binary_map only passes 5.
 // Trade-off: we recompute ret here, which duplicates work from the forward pass, but allows
 // using the uniform 5-arg adjoint interface for tile operations.
-template <typename T> inline CUDA_CALLABLE void adj_cw_div(T a, T b, T& adj_a, T& adj_b, T adj_ret)
+template <typename T> inline CUDA_CALLABLE void adj_cw_div(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret)
 {
     T ret = div(a, b);
     adj_div(a, b, ret, adj_a, adj_b, adj_ret);
 }
 
 // -tile (unary neg)
-template <typename Tile> inline CUDA_CALLABLE auto tile_neg(Tile& a) { return tile_unary_map(wp::neg, a); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_neg(Tile WP_THREAD& a) { return tile_unary_map(wp::neg, a); }
 
 template <typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_neg(Tile& a, Tile& adj_a, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_neg(Tile WP_THREAD& a, Tile WP_THREAD& adj_a, AdjTile WP_THREAD& adj_ret)
 {
     adj_tile_unary_map(wp::neg, a, wp::adj_neg, adj_a, adj_ret);
 }
 
 
 // tile + tile
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_add(TileA& a, TileB& b)
+template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_add(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(add, a, b);
 }
 
 // add overloads get called in user function adjoints generated by codegen (adj_tile += adj_ret)
 template <typename T, typename L>
-inline CUDA_CALLABLE auto add(tile_register_t<T, L>& a, const tile_register_t<T, L>& b)
+inline CUDA_CALLABLE auto add(tile_register_t<T, L> WP_THREAD& a, const tile_register_t<T, L> WP_THREAD& b)
 {
     return tile_add(a, b);
 }
 
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE auto add(tile_shared_t<T, L, Owner>& a, const tile_shared_t<T, L, Owner>& b)
+inline CUDA_CALLABLE auto add(tile_shared_t<T, L, Owner> WP_THREAD& a, const tile_shared_t<T, L, Owner> WP_THREAD& b)
 {
     return tile_add(a, b);
 }
 
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE auto add(tile_register_t<T, L>& a, const tile_shared_t<T, L, Owner>& b)
+inline CUDA_CALLABLE auto add(tile_register_t<T, L> WP_THREAD& a, const tile_shared_t<T, L, Owner> WP_THREAD& b)
 {
     return tile_add(a, b);
 }
 
 template <typename T, typename L, bool Owner>
-inline CUDA_CALLABLE auto add(tile_shared_t<T, L, Owner>& a, const tile_register_t<T, L>& b)
+inline CUDA_CALLABLE auto add(tile_shared_t<T, L, Owner> WP_THREAD& a, const tile_register_t<T, L> WP_THREAD& b)
 {
     return tile_add(a, b);
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_add(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_add(
+    TileA WP_THREAD& a,
+    TileB WP_THREAD& b,
+    AdjTileA WP_THREAD& adj_a,
+    AdjTileB WP_THREAD& adj_b,
+    AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(add, a, b, adj_add, adj_a, adj_b, adj_c);
 }
 
 // tile - tile
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_sub(TileA& a, TileB& b)
+template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_sub(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(sub, a, b);
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_sub(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_sub(
+    TileA WP_THREAD& a,
+    TileB WP_THREAD& b,
+    AdjTileA WP_THREAD& adj_a,
+    AdjTileB WP_THREAD& adj_b,
+    AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(sub, a, b, adj_sub, adj_a, adj_b, adj_c);
 }
 
 
 // tile * scalar/vec/mat (Python always generates calls with tile first)
-template <typename Tile, typename S> inline CUDA_CALLABLE auto tile_mul(Tile& a, const S& s)
+template <typename Tile, typename S> inline CUDA_CALLABLE auto tile_mul(Tile WP_THREAD& a, const S WP_THREAD& s)
 {
     // tile_binary_map will automatically promote scalar s to a constant tile
     return tile_binary_map(mul, a, s);
 }
 
 template <typename Tile, typename S, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_mul(Tile& a, const S& s, Tile& adj_a, S& adj_s, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_mul(
+    Tile WP_THREAD& a, const S WP_THREAD& s, Tile WP_THREAD& adj_a, S WP_THREAD& adj_s, AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(mul, a, s, adj_mul, adj_a, adj_s, adj_c);
 }
 
 
 // tile * tile (element-wise)
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_mul_elementwise(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE auto tile_mul_elementwise(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(mul, a, b);
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_mul_elementwise(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_mul_elementwise(
+    TileA WP_THREAD& a,
+    TileB WP_THREAD& b,
+    AdjTileA WP_THREAD& adj_a,
+    AdjTileB WP_THREAD& adj_b,
+    AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(mul, a, b, adj_mul, adj_a, adj_b, adj_c);
 }
@@ -4196,14 +4720,16 @@ inline CUDA_CALLABLE void adj_tile_mul_elementwise(TileA& a, TileB& b, AdjTileA&
 // tile / scalar/vec/mat
 // SFINAE: Tile must be a tile type (has Layout::Shape)
 template <typename Tile, typename S, typename = typename Tile::Layout::Shape>
-inline CUDA_CALLABLE auto tile_div(Tile& a, const S& s)
+inline CUDA_CALLABLE auto tile_div(Tile WP_THREAD& a, const S WP_THREAD& s)
 {
     // tile_binary_map will automatically promote scalar s to a constant tile
     return tile_binary_map(div, a, s);
 }
 
 template <typename Tile, typename S, typename AdjTile, typename = typename Tile::Layout::Shape>
-inline CUDA_CALLABLE void adj_tile_div(Tile& a, const S& s, Tile& adj_a, S& adj_s, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_div(
+    Tile WP_THREAD& a, const S WP_THREAD& s, Tile WP_THREAD& adj_a, S WP_THREAD& adj_s, AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(div, a, s, adj_cw_div, adj_a, adj_s, adj_c);
 }
@@ -4212,7 +4738,7 @@ inline CUDA_CALLABLE void adj_tile_div(Tile& a, const S& s, Tile& adj_a, S& adj_
 // scalar/vec/mat / tile
 // SFINAE: Tile must be a tile type (has Layout::Shape)
 template <typename S, typename Tile, typename = typename Tile::Layout::Shape>
-inline CUDA_CALLABLE auto tile_div(const S& s, Tile& a)
+inline CUDA_CALLABLE auto tile_div(const S WP_THREAD& s, Tile WP_THREAD& a)
 {
     using Shape = typename Tile::Layout::Shape;
     auto s_tile = to_tile<Shape>(s);
@@ -4220,7 +4746,9 @@ inline CUDA_CALLABLE auto tile_div(const S& s, Tile& a)
 }
 
 template <typename S, typename Tile, typename AdjTile, typename = typename Tile::Layout::Shape>
-inline CUDA_CALLABLE void adj_tile_div(const S& s, Tile& a, S& adj_s, Tile& adj_a, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_div(
+    const S WP_THREAD& s, Tile WP_THREAD& a, S WP_THREAD& adj_s, Tile WP_THREAD& adj_a, AdjTile WP_THREAD& adj_c
+)
 {
     using Shape = typename Tile::Layout::Shape;
     auto s_tile = to_tile<Shape>(s);
@@ -4233,38 +4761,46 @@ inline CUDA_CALLABLE void adj_tile_div(const S& s, Tile& a, S& adj_s, Tile& adj_
 
 
 // tile / tile (element-wise)
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_div_elementwise(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE auto tile_div_elementwise(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(div, a, b);
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_div_elementwise(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b, AdjTile& adj_c)
+inline CUDA_CALLABLE void adj_tile_div_elementwise(
+    TileA WP_THREAD& a,
+    TileB WP_THREAD& b,
+    AdjTileA WP_THREAD& adj_a,
+    AdjTileB WP_THREAD& adj_b,
+    AdjTile WP_THREAD& adj_c
+)
 {
     adj_tile_binary_map(div, a, b, adj_cw_div, adj_a, adj_b, adj_c);
 }
 
 
 // tile & tile
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_and(TileA& a, TileB& b)
+template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_and(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(bit_and, a, b);
 }
 
 // tile | tile
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_or(TileA& a, TileB& b)
+template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_or(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(bit_or, a, b);
 }
 
 // tile ^ tile
-template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_xor(TileA& a, TileB& b)
+template <typename TileA, typename TileB> inline CUDA_CALLABLE auto tile_bit_xor(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     return tile_binary_map(bit_xor, a, b);
 }
 
 
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_add_inplace(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_add_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4292,7 +4828,8 @@ template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_add_inp
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
-inline CUDA_CALLABLE void adj_tile_add_inplace(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b)
+inline CUDA_CALLABLE void
+adj_tile_add_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b, AdjTileA WP_THREAD& adj_a, AdjTileB WP_THREAD& adj_b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4325,7 +4862,9 @@ inline CUDA_CALLABLE void adj_tile_add_inplace(TileA& a, TileB& b, AdjTileA& adj
 // copying to intermediate register tiles.
 template <typename TileDest, typename TileSrc>
 inline CUDA_CALLABLE void tile_axpy(
-    decltype(tensordot(typename TileDest::Type {}, typename TileDest::Type {})) alpha, TileSrc& src, TileDest& dest
+    decltype(tensordot(typename TileDest::Type {}, typename TileDest::Type {})) alpha,
+    TileSrc WP_THREAD& src,
+    TileDest WP_THREAD& dest
 )
 {
     using ShapeDest = typename TileDest::Layout::Shape;
@@ -4354,7 +4893,8 @@ inline CUDA_CALLABLE void tile_axpy(
 
 // adj_tile_axpy is defined in tile_reduce.h (needs warp shuffle for adj_alpha reduction)
 
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_sub_inplace(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_sub_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4383,7 +4923,8 @@ template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_sub_inp
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
-inline CUDA_CALLABLE void adj_tile_sub_inplace(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& adj_b)
+inline CUDA_CALLABLE void
+adj_tile_sub_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b, AdjTileA WP_THREAD& adj_a, AdjTileB WP_THREAD& adj_b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4411,7 +4952,8 @@ inline CUDA_CALLABLE void adj_tile_sub_inplace(TileA& a, TileB& b, AdjTileA& adj
     adj_b.grad_add(adj_b_reg);
 }
 
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_bit_and_inplace(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_bit_and_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4439,7 +4981,8 @@ template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_bit_and
     a.assign(a_reg);
 }
 
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_bit_or_inplace(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_bit_or_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4467,7 +5010,8 @@ template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_bit_or_
     a.assign(a_reg);
 }
 
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_bit_xor_inplace(TileA& a, TileB& b)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_bit_xor_inplace(TileA WP_THREAD& a, TileB WP_THREAD& b)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -4514,43 +5058,57 @@ template <int Index, typename... Indices> inline CUDA_CALLABLE int tile_index_ar
     return values[Index];
 }
 
-template <typename Tile, typename... Indices> inline CUDA_CALLABLE auto tile_extract_impl(Tile& t, Indices... indices)
+template <typename Tile, typename... Indices>
+inline CUDA_CALLABLE auto tile_extract_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, Indices... indices)
 {
     constexpr int Rank = Tile::Layout::Shape::N;
     constexpr int NumIndices = sizeof...(Indices);
     auto coord = tile_coord_prefix<Rank>(indices...);
 
     if constexpr (NumIndices == Rank) {
-        return t.extract(coord);
+        return t.extract(WP_TILE_ARENA_ARG coord);
     } else if constexpr (is_vector<typename Tile::Type>::value && NumIndices == Rank + 1) {
-        return t.extract(coord)[tile_index_arg<Rank>(indices...)];
+        return t.extract(WP_TILE_ARENA_ARG coord)[tile_index_arg<Rank>(indices...)];
     } else if constexpr (is_matrix<typename Tile::Type>::value && NumIndices == Rank + 1) {
-        return t.extract(coord).get_row(tile_index_arg<Rank>(indices...));
+        return t.extract(WP_TILE_ARENA_ARG coord).get_row(tile_index_arg<Rank>(indices...));
     } else if constexpr (is_matrix<typename Tile::Type>::value && NumIndices == Rank + 2) {
-        return extract(t.extract(coord), tile_index_arg<Rank>(indices...), tile_index_arg<Rank + 1>(indices...));
+        return extract(
+            t.extract(WP_TILE_ARENA_ARG coord), tile_index_arg<Rank>(indices...), tile_index_arg<Rank + 1>(indices...)
+        );
     } else {
         static_assert(always_false<Tile>::value, "tile_extract index count is incompatible with tile dtype and rank");
     }
 }
 
-template <typename Tile> auto tile_extract(Tile& t, int i) { return tile_extract_impl(t, i); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j) { return tile_extract_impl(t, i, j); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k) { return tile_extract_impl(t, i, j, k); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l)
+template <typename Tile> auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i)
 {
-    return tile_extract_impl(t, i, j, k, l);
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i);
 }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l, int m)
+template <typename Tile> auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i, int j)
 {
-    return tile_extract_impl(t, i, j, k, l, m);
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i, j);
 }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l, int m, int n)
+template <typename Tile> auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i, int j, int k)
 {
-    return tile_extract_impl(t, i, j, k, l, m, n);
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i, j, k);
+}
+template <typename Tile> auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i, int j, int k, int l)
+{
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i, j, k, l);
+}
+template <typename Tile> auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i, int j, int k, int l, int m)
+{
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i, j, k, l, m);
+}
+template <typename Tile>
+auto tile_extract(WP_TILE_ARENA_PARAM Tile WP_THREAD& t, int i, int j, int k, int l, int m, int n)
+{
+    return tile_extract_impl(WP_TILE_ARENA_ARG t, i, j, k, l, m, n);
 }
 
 template <typename Tile, typename AdjTile, typename AdjType, typename... Indices>
-inline CUDA_CALLABLE void adj_tile_extract_impl(Tile& t, AdjTile& adj_t, AdjType adj_ret, Indices... indices)
+inline CUDA_CALLABLE void
+adj_tile_extract_impl(Tile WP_THREAD& t, AdjTile WP_THREAD& adj_t, AdjType adj_ret, Indices... indices)
 {
     (void)t;
 
@@ -4580,36 +5138,48 @@ inline CUDA_CALLABLE void adj_tile_extract_impl(Tile& t, AdjTile& adj_t, AdjType
 }
 
 template <typename Tile, typename AdjTile>
-void adj_tile_extract(Tile& t, int i, AdjTile& adj_t, int adj_i, typename Tile::Type adj_ret)
+void adj_tile_extract(Tile WP_THREAD& t, int i, AdjTile WP_THREAD& adj_t, int adj_i, typename Tile::Type adj_ret)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(Tile& t, int i, int j, AdjTile& adj_t, int adj_i, int adj_j, AdjType adj_ret)
+void adj_tile_extract(Tile WP_THREAD& t, int i, int j, AdjTile WP_THREAD& adj_t, int adj_i, int adj_j, AdjType adj_ret)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(Tile& t, int i, int j, int k, AdjTile& adj_t, int adj_i, int adj_j, int adj_k, AdjType adj_ret)
+void adj_tile_extract(
+    Tile WP_THREAD& t, int i, int j, int k, AdjTile WP_THREAD& adj_t, int adj_i, int adj_j, int adj_k, AdjType adj_ret
+)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j, k);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
 void adj_tile_extract(
-    Tile& t, int i, int j, int k, int l, AdjTile& adj_t, int adj_i, int adj_j, int adj_k, int adj_l, AdjType adj_ret
+    Tile WP_THREAD& t,
+    int i,
+    int j,
+    int k,
+    int l,
+    AdjTile WP_THREAD& adj_t,
+    int adj_i,
+    int adj_j,
+    int adj_k,
+    int adj_l,
+    AdjType adj_ret
 )
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j, k, l);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
 void adj_tile_extract(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     int m,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
@@ -4622,14 +5192,14 @@ void adj_tile_extract(
 }
 template <typename Tile, typename AdjTile, typename AdjType>
 void adj_tile_extract(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     int m,
     int n,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
@@ -4650,7 +5220,7 @@ void adj_tile_extract(
 // A synchronization barrier follows so the updated values are visible to
 // all threads after the call returns.
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void tile_scatter_add(Tile WP_THREAD& t, int i, typename Tile::Type value, bool has_value)
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0)));
     if (has_value)
@@ -4659,7 +5229,7 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, typename Tile::Type v
 }
 
 template <bool Atomic, typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void tile_scatter_add(Tile WP_THREAD& t, int i, typename Tile::Type value, bool has_value)
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0)));
     if (has_value) {
@@ -4672,7 +5242,7 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, typename Tile::Type v
 }
 
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void tile_scatter_add(Tile WP_THREAD& t, int i, int j, typename Tile::Type value, bool has_value)
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0) && j >= 0 && j < Tile::Layout::Shape::dim(1)));
     if (has_value)
@@ -4681,7 +5251,7 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, typename Tile:
 }
 
 template <bool Atomic, typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void tile_scatter_add(Tile WP_THREAD& t, int i, int j, typename Tile::Type value, bool has_value)
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0) && j >= 0 && j < Tile::Layout::Shape::dim(1)));
     if (has_value) {
@@ -4694,7 +5264,8 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, typename Tile:
 }
 
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, int k, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void
+tile_scatter_add(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value, bool has_value)
 {
     assert(
         !has_value
@@ -4707,7 +5278,8 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, int k, typenam
 }
 
 template <bool Atomic, typename Tile>
-inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, int k, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void
+tile_scatter_add(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value, bool has_value)
 {
     assert(
         !has_value
@@ -4725,7 +5297,7 @@ inline CUDA_CALLABLE void tile_scatter_add(Tile& t, int i, int j, int k, typenam
 
 template <typename Tile>
 inline CUDA_CALLABLE void
-tile_scatter_add(Tile& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
+tile_scatter_add(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
 {
     assert(
         !has_value
@@ -4739,7 +5311,7 @@ tile_scatter_add(Tile& t, int i, int j, int k, int l, typename Tile::Type value,
 
 template <bool Atomic, typename Tile>
 inline CUDA_CALLABLE void
-tile_scatter_add(Tile& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
+tile_scatter_add(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
 {
     assert(
         !has_value
@@ -4757,14 +5329,14 @@ tile_scatter_add(Tile& t, int i, int j, int k, int l, typename Tile::Type value,
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0)));
@@ -4776,14 +5348,14 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 // Adjoint for non-atomic variant (delegates to atomic adjoint)
 template <bool Atomic, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     adj_tile_scatter_add(t, i, value, has_value, adj_t, adj_i, adj_value, adj_has_value);
@@ -4791,16 +5363,16 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     assert(!has_value || (i >= 0 && i < Tile::Layout::Shape::dim(0) && j >= 0 && j < Tile::Layout::Shape::dim(1)));
@@ -4811,18 +5383,18 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     assert(
@@ -4837,20 +5409,20 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    int& adj_l,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    int WP_THREAD& adj_l,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     assert(
@@ -4866,16 +5438,16 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 // Adjoints for non-atomic ND variants (delegate to atomic adjoints)
 template <bool Atomic, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     adj_tile_scatter_add(t, i, j, value, has_value, adj_t, adj_i, adj_j, adj_value, adj_has_value);
@@ -4883,18 +5455,18 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 
 template <bool Atomic, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     adj_tile_scatter_add(t, i, j, k, value, has_value, adj_t, adj_i, adj_j, adj_k, adj_value, adj_has_value);
@@ -4902,20 +5474,20 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 
 template <bool Atomic, typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_add(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    int& adj_l,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    int WP_THREAD& adj_l,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     adj_tile_scatter_add(t, i, j, k, l, value, has_value, adj_t, adj_i, adj_j, adj_k, adj_l, adj_value, adj_has_value);
@@ -4930,7 +5502,7 @@ inline CUDA_CALLABLE void adj_tile_scatter_add(
 // threads write to the same index, the result is undefined (data race in the
 // forward pass, incorrect gradients in the backward pass).
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_masked(Tile& t, int i, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void tile_scatter_masked(Tile WP_THREAD& t, int i, typename Tile::Type value, bool has_value)
 {
     if (has_value)
         t.data(tile_coord(i)) = value;
@@ -4938,14 +5510,16 @@ inline CUDA_CALLABLE void tile_scatter_masked(Tile& t, int i, typename Tile::Typ
 }
 
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_masked(Tile& t, int i, int j, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void
+tile_scatter_masked(Tile WP_THREAD& t, int i, int j, typename Tile::Type value, bool has_value)
 {
     if (has_value)
         t.data(tile_coord(i, j)) = value;
     WP_TILE_SYNC();
 }
 template <typename Tile>
-inline CUDA_CALLABLE void tile_scatter_masked(Tile& t, int i, int j, int k, typename Tile::Type value, bool has_value)
+inline CUDA_CALLABLE void
+tile_scatter_masked(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value, bool has_value)
 {
     if (has_value)
         t.data(tile_coord(i, j, k)) = value;
@@ -4953,7 +5527,7 @@ inline CUDA_CALLABLE void tile_scatter_masked(Tile& t, int i, int j, int k, type
 }
 template <typename Tile>
 inline CUDA_CALLABLE void
-tile_scatter_masked(Tile& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
+tile_scatter_masked(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value, bool has_value)
 {
     if (has_value)
         t.data(tile_coord(i, j, k, l)) = value;
@@ -4962,14 +5536,14 @@ tile_scatter_masked(Tile& t, int i, int j, int k, int l, typename Tile::Type val
 
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_masked(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     if (t.grad.ptr && has_value) {
@@ -4980,16 +5554,16 @@ inline CUDA_CALLABLE void adj_tile_scatter_masked(
 }
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_masked(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     if (t.grad.ptr && has_value) {
@@ -5000,18 +5574,18 @@ inline CUDA_CALLABLE void adj_tile_scatter_masked(
 }
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_masked(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     if (t.grad.ptr && has_value) {
@@ -5022,20 +5596,20 @@ inline CUDA_CALLABLE void adj_tile_scatter_masked(
 }
 template <typename Tile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_scatter_masked(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     typename Tile::Type value,
     bool has_value,
-    AdjTile& adj_t,
-    int& adj_i,
-    int& adj_j,
-    int& adj_k,
-    int& adj_l,
-    typename Tile::Type& adj_value,
-    bool& adj_has_value
+    AdjTile WP_THREAD& adj_t,
+    int WP_THREAD& adj_i,
+    int WP_THREAD& adj_j,
+    int WP_THREAD& adj_k,
+    int WP_THREAD& adj_l,
+    typename Tile::Type WP_THREAD& adj_value,
+    bool WP_THREAD& adj_has_value
 )
 {
     if (t.grad.ptr && has_value) {
@@ -5046,142 +5620,150 @@ inline CUDA_CALLABLE void adj_tile_scatter_masked(
 }
 
 
-template <typename Tile> void tile_add_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> void tile_add_inplace(Tile WP_THREAD& t, int i, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> void tile_add_inplace(Tile WP_THREAD& t, int i, int j, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> void tile_add_inplace(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile> void tile_add_inplace(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> void tile_sub_inplace(Tile WP_THREAD& t, int i, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> void tile_sub_inplace(Tile WP_THREAD& t, int i, int j, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> void tile_sub_inplace(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile> void tile_sub_inplace(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> void tile_bit_and_inplace(Tile WP_THREAD& t, int i, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> void tile_bit_and_inplace(Tile WP_THREAD& t, int i, int j, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> void tile_bit_and_inplace(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+void tile_bit_and_inplace(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> void tile_bit_or_inplace(Tile WP_THREAD& t, int i, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> void tile_bit_or_inplace(Tile WP_THREAD& t, int i, int j, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> void tile_bit_or_inplace(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+void tile_bit_or_inplace(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> void tile_bit_xor_inplace(Tile WP_THREAD& t, int i, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> void tile_bit_xor_inplace(Tile WP_THREAD& t, int i, int j, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> void tile_bit_xor_inplace(Tile WP_THREAD& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+void tile_bit_xor_inplace(Tile WP_THREAD& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j, k, l), value);
 }
 
 template <typename Tile, typename AdjTile>
 void adj_tile_add_inplace(
-    Tile& t, int i, typename Tile::Type value, AdjTile& adj_t, int adj_i, typename Tile::Type& adj_value
+    Tile WP_THREAD& t,
+    int i,
+    typename Tile::Type value,
+    AdjTile WP_THREAD& adj_t,
+    int adj_i,
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_add_inplace(tile_coord(i), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_add_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_add_inplace(tile_coord(i, j), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_add_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_add_inplace(tile_coord(i, j, k), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_add_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
     int adj_l,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_add_inplace(tile_coord(i, j, k, l), adj_value);
@@ -5189,55 +5771,60 @@ void adj_tile_add_inplace(
 
 template <typename Tile, typename AdjTile>
 void adj_tile_sub_inplace(
-    Tile& t, int i, typename Tile::Type value, AdjTile& adj_t, int adj_i, typename Tile::Type& adj_value
+    Tile WP_THREAD& t,
+    int i,
+    typename Tile::Type value,
+    AdjTile WP_THREAD& adj_t,
+    int adj_i,
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_sub_inplace(tile_coord(i), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_sub_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_sub_inplace(tile_coord(i, j), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_sub_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_sub_inplace(tile_coord(i, j, k), adj_value);
 }
 template <typename Tile, typename AdjTile>
 void adj_tile_sub_inplace(
-    Tile& t,
+    Tile WP_THREAD& t,
     int i,
     int j,
     int k,
     int l,
     typename Tile::Type value,
-    AdjTile& adj_t,
+    AdjTile WP_THREAD& adj_t,
     int adj_i,
     int adj_j,
     int adj_k,
     int adj_l,
-    typename Tile::Type& adj_value
+    typename Tile::Type WP_THREAD& adj_value
 )
 {
     adj_t.adj_sub_inplace(tile_coord(i, j, k, l), adj_value);
@@ -5253,7 +5840,7 @@ void adj_tile_sub_inplace(
 #include "tile_fft.h"
 namespace wp {
 
-template <typename Tile> inline CUDA_CALLABLE auto tile_transpose(Tile& t)
+template <typename Tile> inline CUDA_CALLABLE auto tile_transpose(Tile WP_THREAD& t)
 {
     static_assert(Tile::Layout::Shape::N == 2, "Expected Tile::Layout::Shape::N == 2");
 
@@ -5271,15 +5858,15 @@ template <typename Tile> inline CUDA_CALLABLE auto tile_transpose(Tile& t)
 }
 
 template <typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_transpose(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_transpose(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     auto a = tile_transpose(adj_ret);
-    auto& b = adj_t;
+    auto WP_THREAD& b = adj_t;
 
     adj_t.assign(tile_add(a, b));
 }
 
-template <int N, int StrideN, typename Tile> inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
+template <int N, int StrideN, typename Tile> inline CUDA_CALLABLE auto tile_broadcast(Tile WP_THREAD& t)
 {
     // alias incoming tile with new strides
     return tile_shared_t<typename Tile::Type, tile_layout_strided_t<tile_shape_t<N>, tile_stride_t<StrideN>>, false>(
@@ -5287,7 +5874,8 @@ template <int N, int StrideN, typename Tile> inline CUDA_CALLABLE auto tile_broa
     );
 }
 
-template <int M, int N, int StrideM, int StrideN, typename Tile> inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
+template <int M, int N, int StrideM, int StrideN, typename Tile>
+inline CUDA_CALLABLE auto tile_broadcast(Tile WP_THREAD& t)
 {
     // alias incoming tile with new strides
     return tile_shared_t<
@@ -5297,7 +5885,7 @@ template <int M, int N, int StrideM, int StrideN, typename Tile> inline CUDA_CAL
 }
 
 template <int M, int N, int O, int StrideM, int StrideN, int StrideO, typename Tile>
-inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
+inline CUDA_CALLABLE auto tile_broadcast(Tile WP_THREAD& t)
 {
     // alias incoming tile with new strides
     return tile_shared_t<
@@ -5306,7 +5894,7 @@ inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
 }
 
 template <int M, int N, int O, int P, int StrideM, int StrideN, int StrideO, int StrideP, typename Tile>
-inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
+inline CUDA_CALLABLE auto tile_broadcast(Tile WP_THREAD& t)
 {
     // alias incoming tile with new strides
     return tile_shared_t<
@@ -5317,20 +5905,20 @@ inline CUDA_CALLABLE auto tile_broadcast(Tile& t)
 }
 
 template <typename Tile, typename AdjTile>
-inline CUDA_CALLABLE void adj_tile_broadcast(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_broadcast(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // nop, since memory is aliased, grads already accumulated
 }
 
 
 template <typename ReturnTile, typename Tile, typename... Indices>
-inline CUDA_CALLABLE auto tile_view(Tile& t, Indices... indices)
+inline CUDA_CALLABLE auto tile_view(Tile WP_THREAD& t, Indices... indices)
 {
     auto c = tile_coord(indices...);
 
     // return new tile with same strides
-    typename Tile::Type* data_ptr = &t.data(c);
-    typename Tile::Type* grad_ptr = nullptr;
+    typename Tile::Type WP_TILE_SHARED* data_ptr = &t.data(c);
+    typename Tile::Type WP_TILE_SHARED* grad_ptr = nullptr;
 
     if (t.grad.ptr)
         grad_ptr = &t.grad(c);
@@ -5343,7 +5931,7 @@ inline CUDA_CALLABLE auto tile_view(Tile& t, Indices... indices)
 // `indices` is a 1D tile of integers whose length equals the output extent along
 // `axis`. The result is a register tile (a fresh copy, not an alias of `src`).
 template <unsigned... Shape, typename Tile, typename IndicesTile>
-inline CUDA_CALLABLE auto tile_slice_indexed(Tile& src, IndicesTile& indices, int axis)
+inline CUDA_CALLABLE auto tile_slice_indexed(Tile WP_THREAD& src, IndicesTile WP_THREAD& indices, int axis)
 {
     using T = typename Tile::Type;
     using SrcShape = typename Tile::Layout::Shape;
@@ -5364,7 +5952,13 @@ inline CUDA_CALLABLE auto tile_slice_indexed(Tile& src, IndicesTile& indices, in
 
 template <unsigned... Shape, typename Tile, typename IndicesTile, typename AdjTile>
 inline CUDA_CALLABLE void adj_tile_slice_indexed(
-    Tile& src, IndicesTile& indices, int axis, Tile& adj_src, IndicesTile& adj_indices, int adj_axis, AdjTile& adj_ret
+    Tile WP_THREAD& src,
+    IndicesTile WP_THREAD& indices,
+    int axis,
+    Tile WP_THREAD& adj_src,
+    IndicesTile WP_THREAD& adj_indices,
+    int adj_axis,
+    AdjTile WP_THREAD& adj_ret
 )
 {
     // scatter gradients from the gathered result back onto the selected source
@@ -5390,11 +5984,11 @@ inline CUDA_CALLABLE void adj_tile_slice_indexed(
 }
 
 
-template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_squeeze(Tile& t)
+template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_squeeze(Tile WP_THREAD& t)
 {
     // ReturnTile layout is set in builtins.py
-    typename Tile::Type* data_ptr = t.data.ptr;
-    typename Tile::Type* grad_ptr = nullptr;
+    typename Tile::Type WP_TILE_SHARED* data_ptr = t.data.ptr;
+    typename Tile::Type WP_TILE_SHARED* grad_ptr = nullptr;
 
     if (t.grad.ptr)
         grad_ptr = t.grad.ptr;
@@ -5403,17 +5997,18 @@ template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_squ
 }
 
 template <typename Tile, typename AdjTile, typename AdjReturnTile>
-inline CUDA_CALLABLE void adj_tile_squeeze(Tile& t, AdjTile& adj_t, AdjReturnTile& adj_ret)
+inline CUDA_CALLABLE void
+adj_tile_squeeze(Tile WP_THREAD& t, AdjTile WP_THREAD& adj_t, AdjReturnTile WP_THREAD& adj_ret)
 {
     // nop, since memory is aliased, grads already accumulated
 }
 
 
-template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_reshape(Tile& t)
+template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_reshape(Tile WP_THREAD& t)
 {
     // ReturnTile layout is set in builtins.py
-    typename Tile::Type* data_ptr = t.data.ptr;
-    typename Tile::Type* grad_ptr = nullptr;
+    typename Tile::Type WP_TILE_SHARED* data_ptr = t.data.ptr;
+    typename Tile::Type WP_TILE_SHARED* grad_ptr = nullptr;
 
     if (t.grad.ptr)
         grad_ptr = t.grad.ptr;
@@ -5422,13 +6017,14 @@ template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_res
 }
 
 template <typename Tile, typename AdjTile, typename AdjReturnTile>
-inline CUDA_CALLABLE void adj_tile_reshape(Tile& t, AdjTile& adj_t, AdjReturnTile& adj_ret)
+inline CUDA_CALLABLE void
+adj_tile_reshape(Tile WP_THREAD& t, AdjTile WP_THREAD& adj_t, AdjReturnTile WP_THREAD& adj_ret)
 {
     // nop, since memory is aliased, grads already accumulated
 }
 
 
-template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_astype(Tile& t)
+template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_astype(Tile WP_THREAD& t)
 {
     // verify shapes and sizes are compatible
     using ShapeIn = typename Tile::Layout::Shape;
@@ -5457,7 +6053,7 @@ template <typename ReturnTile, typename Tile> inline CUDA_CALLABLE auto tile_ast
 }
 
 template <typename Tile, typename AdjTile, typename AdjReturnTile>
-inline CUDA_CALLABLE void adj_tile_astype(Tile& t, AdjTile& adj_t, AdjReturnTile& adj_ret)
+inline CUDA_CALLABLE void adj_tile_astype(Tile WP_THREAD& t, AdjTile WP_THREAD& adj_t, AdjReturnTile WP_THREAD& adj_ret)
 {
     // gradients only flow between float conversions
     if constexpr (
@@ -5465,13 +6061,20 @@ inline CUDA_CALLABLE void adj_tile_astype(Tile& t, AdjTile& adj_t, AdjReturnTile
 #ifndef WP_NO_BFLOAT16
          || is_same<typename AdjTile::Type, wp::bfloat16>::value
 #endif
-         || is_same<typename AdjTile::Type, wp::float32>::value || is_same<typename AdjTile::Type, wp::float64>::value)
+         || is_same<typename AdjTile::Type, wp::float32>::value
+#if !defined(WP_NO_FLOAT64)
+         || is_same<typename AdjTile::Type, wp::float64>::value
+#endif
+        )
         && (is_same<typename AdjReturnTile::Type, wp::float16>::value
 #ifndef WP_NO_BFLOAT16
             || is_same<typename AdjReturnTile::Type, wp::bfloat16>::value
 #endif
             || is_same<typename AdjReturnTile::Type, wp::float32>::value
-            || is_same<typename AdjReturnTile::Type, wp::float64>::value)
+#if !defined(WP_NO_FLOAT64)
+            || is_same<typename AdjReturnTile::Type, wp::float64>::value
+#endif
+        )
     ) {
         auto adj_ret_reg = adj_ret.grad_to_register();
         auto adj_t_reg = tile_register_like<AdjTile>();
@@ -5490,8 +6093,8 @@ inline CUDA_CALLABLE void adj_tile_astype(Tile& t, AdjTile& adj_t, AdjReturnTile
 
 template <typename T, typename SharedLayout, bool Owner>
 inline CUDA_CALLABLE void assign(
-    tile_shared_t<T, SharedLayout, Owner>& dest,
-    const tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& src
+    tile_shared_t<T, SharedLayout, Owner> WP_THREAD& dest,
+    const tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& src
 )
 {
     dest = src;
@@ -5499,10 +6102,10 @@ inline CUDA_CALLABLE void assign(
 
 template <typename T, typename SharedLayout, bool Owner>
 inline CUDA_CALLABLE void adj_assign(
-    tile_shared_t<T, SharedLayout, Owner>& dest,
-    const tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& src,
-    tile_shared_t<T, SharedLayout, Owner>& adj_dest,
-    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& adj_src
+    tile_shared_t<T, SharedLayout, Owner> WP_THREAD& dest,
+    const tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& src,
+    tile_shared_t<T, SharedLayout, Owner> WP_THREAD& adj_dest,
+    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& adj_src
 )
 {
     using RegLayout = tile_layout_register_t<typename SharedLayout::Shape>;
@@ -5533,8 +6136,8 @@ inline CUDA_CALLABLE void adj_assign(
 
 template <typename T, typename SharedLayout, bool Owner>
 inline CUDA_CALLABLE void assign(
-    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& dest,
-    const tile_shared_t<T, SharedLayout, Owner>& src
+    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& dest,
+    const tile_shared_t<T, SharedLayout, Owner> WP_THREAD& src
 )
 {
     dest.assign(src.copy_to_register());
@@ -5542,10 +6145,10 @@ inline CUDA_CALLABLE void assign(
 
 template <typename T, typename SharedLayout, bool Owner>
 inline CUDA_CALLABLE void adj_assign(
-    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& dest,
-    const tile_shared_t<T, SharedLayout, Owner>& src,
-    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>>& adj_dest,
-    tile_shared_t<T, SharedLayout, Owner>& adj_src
+    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& dest,
+    const tile_shared_t<T, SharedLayout, Owner> WP_THREAD& src,
+    tile_register_t<T, tile_layout_register_t<typename SharedLayout::Shape>> WP_THREAD& adj_dest,
+    tile_shared_t<T, SharedLayout, Owner> WP_THREAD& adj_src
 )
 {
     (void)dest;
@@ -5561,7 +6164,7 @@ inline CUDA_CALLABLE void adj_assign(
 
 
 template <typename TileA, typename Scalar, typename... Indices>
-inline CUDA_CALLABLE void tile_element_assign(TileA& dest, const Scalar& src, Indices... indices)
+inline CUDA_CALLABLE void tile_element_assign(TileA WP_THREAD& dest, const Scalar WP_THREAD& src, Indices... indices)
 {
     constexpr int Rank = TileA::Layout::Shape::N;
     constexpr int NumIndices = sizeof...(Indices);
@@ -5583,7 +6186,7 @@ inline CUDA_CALLABLE void tile_element_assign(TileA& dest, const Scalar& src, In
 }
 
 template <typename TileA, typename Scalar, typename... Indices>
-inline CUDA_CALLABLE void tile_element_adj_assign(TileA& dest, Scalar& adj_src, Indices... indices)
+inline CUDA_CALLABLE void tile_element_adj_assign(TileA WP_THREAD& dest, Scalar WP_THREAD& adj_src, Indices... indices)
 {
     if (dest.grad.ptr == nullptr) {
         return;
@@ -5613,128 +6216,145 @@ inline CUDA_CALLABLE void tile_element_adj_assign(TileA& dest, Scalar& adj_src, 
     WP_TILE_SYNC();
 }
 
-template <typename TileA, typename Scalar> inline CUDA_CALLABLE void assign(TileA& dest, int i, const Scalar& src)
+template <typename TileA, typename Scalar>
+inline CUDA_CALLABLE void assign(TileA WP_THREAD& dest, int i, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i);
 }
 template <typename TileA, typename Scalar>
-inline CUDA_CALLABLE void assign(TileA& dest, int i, int j, const Scalar& src)
+inline CUDA_CALLABLE void assign(TileA WP_THREAD& dest, int i, int j, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i, j);
 }
 template <typename TileA, typename Scalar>
-inline CUDA_CALLABLE void assign(TileA& dest, int i, int j, int k, const Scalar& src)
+inline CUDA_CALLABLE void assign(TileA WP_THREAD& dest, int i, int j, int k, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i, j, k);
 }
 template <typename TileA, typename Scalar>
-inline CUDA_CALLABLE void assign(TileA& dest, int i, int j, int k, int l, const Scalar& src)
+inline CUDA_CALLABLE void assign(TileA WP_THREAD& dest, int i, int j, int k, int l, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i, j, k, l);
 }
 template <typename TileA, typename Scalar>
-inline CUDA_CALLABLE void assign(TileA& dest, int i, int j, int k, int l, int m, const Scalar& src)
+inline CUDA_CALLABLE void assign(TileA WP_THREAD& dest, int i, int j, int k, int l, int m, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i, j, k, l, m);
 }
 template <typename TileA, typename Scalar>
-inline CUDA_CALLABLE void assign(TileA& dest, int i, int j, int k, int l, int m, int n, const Scalar& src)
+inline CUDA_CALLABLE void
+assign(TileA WP_THREAD& dest, int i, int j, int k, int l, int m, int n, const Scalar WP_THREAD& src)
 {
     tile_element_assign(dest, src, i, j, k, l, m, n);
 }
 
 
 template <typename TileA, typename AdjTileA, typename Scalar>
-inline CUDA_CALLABLE void
-adj_assign(TileA& dest, int i, const Scalar& src, AdjTileA& adj_dest, int adj_i, Scalar& adj_src)
+inline CUDA_CALLABLE void adj_assign(
+    TileA WP_THREAD& dest,
+    int i,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
+    int adj_i,
+    Scalar WP_THREAD& adj_src
+)
 {
     tile_element_adj_assign(dest, adj_src, i);
 }
 template <typename TileA, typename AdjTileA, typename Scalar>
-inline CUDA_CALLABLE void
-adj_assign(TileA& dest, int i, int j, const Scalar& src, AdjTileA& adj_dest, int adj_i, int adj_j, Scalar& adj_src)
+inline CUDA_CALLABLE void adj_assign(
+    TileA WP_THREAD& dest,
+    int i,
+    int j,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
+    int adj_i,
+    int adj_j,
+    Scalar WP_THREAD& adj_src
+)
 {
     tile_element_adj_assign(dest, adj_src, i, j);
 }
 template <typename TileA, typename AdjTileA, typename Scalar>
 inline CUDA_CALLABLE void adj_assign(
-    TileA& dest,
+    TileA WP_THREAD& dest,
     int i,
     int j,
     int k,
-    const Scalar& src,
-    AdjTileA& adj_dest,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
     int adj_i,
     int adj_j,
     int adj_k,
-    Scalar& adj_src
+    Scalar WP_THREAD& adj_src
 )
 {
     tile_element_adj_assign(dest, adj_src, i, j, k);
 }
 template <typename TileA, typename AdjTileA, typename Scalar>
 inline CUDA_CALLABLE void adj_assign(
-    TileA& dest,
+    TileA WP_THREAD& dest,
     int i,
     int j,
     int k,
     int l,
-    const Scalar& src,
-    AdjTileA& adj_dest,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
     int adj_i,
     int adj_j,
     int adj_k,
     int adj_l,
-    Scalar& adj_src
+    Scalar WP_THREAD& adj_src
 )
 {
     tile_element_adj_assign(dest, adj_src, i, j, k, l);
 }
 template <typename TileA, typename AdjTileA, typename Scalar>
 inline CUDA_CALLABLE void adj_assign(
-    TileA& dest,
+    TileA WP_THREAD& dest,
     int i,
     int j,
     int k,
     int l,
     int m,
-    const Scalar& src,
-    AdjTileA& adj_dest,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
     int adj_i,
     int adj_j,
     int adj_k,
     int adj_l,
     int adj_m,
-    Scalar& adj_src
+    Scalar WP_THREAD& adj_src
 )
 {
     tile_element_adj_assign(dest, adj_src, i, j, k, l, m);
 }
 template <typename TileA, typename AdjTileA, typename Scalar>
 inline CUDA_CALLABLE void adj_assign(
-    TileA& dest,
+    TileA WP_THREAD& dest,
     int i,
     int j,
     int k,
     int l,
     int m,
     int n,
-    const Scalar& src,
-    AdjTileA& adj_dest,
+    const Scalar WP_THREAD& src,
+    AdjTileA WP_THREAD& adj_dest,
     int adj_i,
     int adj_j,
     int adj_k,
     int adj_l,
     int adj_m,
     int adj_n,
-    Scalar& adj_src
+    Scalar WP_THREAD& adj_src
 )
 {
     tile_element_adj_assign(dest, adj_src, i, j, k, l, m, n);
 }
 
 template <typename TileA, typename TileB, int N>
-inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, const tile_coord_t<N>& offset)
+inline CUDA_CALLABLE void
+tile_assign(TileA WP_THREAD& dest, TileB WP_THREAD& src, const tile_coord_t<N> WP_THREAD& offset)
 {
     // Snapshot the source into registers before any thread writes the
     // destination: dest may be a view overlapping src (e.g. t[1:] = t[:-1]),
@@ -5749,7 +6369,8 @@ inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, const tile_coord_
 }
 
 template <typename TileA, typename T, typename Layout, int N>
-inline CUDA_CALLABLE void tile_assign(TileA& dest, tile_register_t<T, Layout>& src, const tile_coord_t<N>& offset)
+inline CUDA_CALLABLE void
+tile_assign(TileA WP_THREAD& dest, tile_register_t<T, Layout> WP_THREAD& src, const tile_coord_t<N> WP_THREAD& offset)
 {
     WP_PRAGMA_UNROLL
     for (int reg = 0; reg < Layout::NumRegs; ++reg) {
@@ -5767,11 +6388,11 @@ inline CUDA_CALLABLE void tile_assign(TileA& dest, tile_register_t<T, Layout>& s
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB, int N, int AdjN>
 inline CUDA_CALLABLE void adj_tile_assign(
-    TileA& dest,
-    TileB& src,
+    TileA WP_THREAD& dest,
+    TileB WP_THREAD& src,
     tile_coord_t<N> offset,
-    AdjTileA& adj_dest,
-    AdjTileB& adj_src,
+    AdjTileA WP_THREAD& adj_dest,
+    AdjTileB WP_THREAD& adj_src,
     tile_coord_t<AdjN> adj_offset
 )
 {
@@ -5841,11 +6462,11 @@ template <
     int N,
     int AdjN>
 inline CUDA_CALLABLE void adj_tile_assign(
-    TileA& dest,
-    tile_register_t<T, Layout>& src,
+    TileA WP_THREAD& dest,
+    tile_register_t<T, Layout> WP_THREAD& src,
     tile_coord_t<N> offset,
-    AdjTileA& adj_dest,
-    tile_register_t<AdjT, AdjLayout>& adj_src,
+    AdjTileA WP_THREAD& adj_dest,
+    tile_register_t<AdjT, AdjLayout> WP_THREAD& adj_src,
     tile_coord_t<AdjN> adj_offset
 )
 {
@@ -5883,45 +6504,78 @@ inline CUDA_CALLABLE void adj_tile_assign(
 // codegen entry points, which emit calls like `tile_assign(dest, src, i, j, k)`
 // a better approach here would be for codegen to just directly generate `tile_assign(dest, src, tile_coord(i, j, k))`
 // i.e.: call the above implementation methods directly, then we could remove these overloads
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, int i)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_assign(TileA WP_THREAD& dest, TileB WP_THREAD& src, int i)
 {
     tile_assign(dest, src, tile_coord(i));
 }
-template <typename TileA, typename TileB> inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, int i, int j)
+template <typename TileA, typename TileB>
+inline CUDA_CALLABLE void tile_assign(TileA WP_THREAD& dest, TileB WP_THREAD& src, int i, int j)
 {
     tile_assign(dest, src, tile_coord(i, j));
 }
 template <typename TileA, typename TileB>
-inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, int i, int j, int k)
+inline CUDA_CALLABLE void tile_assign(TileA WP_THREAD& dest, TileB WP_THREAD& src, int i, int j, int k)
 {
     tile_assign(dest, src, tile_coord(i, j, k));
 }
 template <typename TileA, typename TileB>
-inline CUDA_CALLABLE void tile_assign(TileA& dest, TileB& src, int i, int j, int k, int l)
+inline CUDA_CALLABLE void tile_assign(TileA WP_THREAD& dest, TileB WP_THREAD& src, int i, int j, int k, int l)
 {
     tile_assign(dest, src, tile_coord(i, j, k, l));
 }
 
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
-inline CUDA_CALLABLE void adj_tile_assign(TileA& dest, TileB& src, int i, AdjTileA& adj_dest, AdjTileB& adj_src, int)
+inline CUDA_CALLABLE void adj_tile_assign(
+    TileA WP_THREAD& dest, TileB WP_THREAD& src, int i, AdjTileA WP_THREAD& adj_dest, AdjTileB WP_THREAD& adj_src, int
+)
 {
     adj_tile_assign(dest, src, tile_coord(i), adj_dest, adj_src, tile_coord(0));
 }
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
-inline CUDA_CALLABLE void
-adj_tile_assign(TileA& dest, TileB& src, int i, int j, AdjTileA& adj_dest, AdjTileB& adj_src, int, int)
+inline CUDA_CALLABLE void adj_tile_assign(
+    TileA WP_THREAD& dest,
+    TileB WP_THREAD& src,
+    int i,
+    int j,
+    AdjTileA WP_THREAD& adj_dest,
+    AdjTileB WP_THREAD& adj_src,
+    int,
+    int
+)
 {
     adj_tile_assign(dest, src, tile_coord(i, j), adj_dest, adj_src, tile_coord(0));
 }
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
-inline CUDA_CALLABLE void
-adj_tile_assign(TileA& dest, TileB& src, int i, int j, int k, AdjTileA& adj_dest, AdjTileB& adj_src, int, int, int)
+inline CUDA_CALLABLE void adj_tile_assign(
+    TileA WP_THREAD& dest,
+    TileB WP_THREAD& src,
+    int i,
+    int j,
+    int k,
+    AdjTileA WP_THREAD& adj_dest,
+    AdjTileB WP_THREAD& adj_src,
+    int,
+    int,
+    int
+)
 {
     adj_tile_assign(dest, src, tile_coord(i, j, k), adj_dest, adj_src, tile_coord(0));
 }
 template <typename TileA, typename TileB, typename AdjTileA, typename AdjTileB>
 inline CUDA_CALLABLE void adj_tile_assign(
-    TileA& dest, TileB& src, int i, int j, int k, int l, AdjTileA& adj_dest, AdjTileB& adj_src, int, int, int, int
+    TileA WP_THREAD& dest,
+    TileB WP_THREAD& src,
+    int i,
+    int j,
+    int k,
+    int l,
+    AdjTileA WP_THREAD& adj_dest,
+    AdjTileB WP_THREAD& adj_src,
+    int,
+    int,
+    int,
+    int
 )
 {
     adj_tile_assign(dest, src, tile_coord(i, j, k, l), adj_dest, adj_src, tile_coord(0));
@@ -5929,7 +6583,7 @@ inline CUDA_CALLABLE void adj_tile_assign(
 
 
 template <typename TileA, typename TileB, typename TileC>
-inline CUDA_CALLABLE TileC& tile_diag_add(TileA& a, TileB& b, TileC& c)
+inline CUDA_CALLABLE TileC WP_THREAD& tile_diag_add(TileA WP_THREAD& a, TileB WP_THREAD& b, TileC WP_THREAD& c)
 {
     using ShapeA = typename TileA::Layout::Shape;
     using ShapeB = typename TileB::Layout::Shape;
@@ -5952,8 +6606,15 @@ inline CUDA_CALLABLE TileC& tile_diag_add(TileA& a, TileB& b, TileC& c)
 }
 
 template <typename TileA, typename TileB, typename TileC, typename AdjTileA, typename AdjTileB, typename AdjTileC>
-inline CUDA_CALLABLE void
-adj_tile_diag_add(TileA& a, TileB& b, TileC& c, AdjTileA& adj_a, AdjTileB& adj_b, AdjTileC& adj_c, AdjTileC& adj_ret)
+inline CUDA_CALLABLE void adj_tile_diag_add(
+    TileA WP_THREAD& a,
+    TileB WP_THREAD& b,
+    TileC WP_THREAD& c,
+    AdjTileA WP_THREAD& adj_a,
+    AdjTileB WP_THREAD& adj_b,
+    AdjTileC WP_THREAD& adj_c,
+    AdjTileC WP_THREAD& adj_ret
+)
 {
     // MISSINGADJOINT: adj_a += adj_ret (element-wise); adj_b += diagonal of adj_ret
 }
@@ -5964,10 +6625,11 @@ adj_tile_diag_add(TileA& a, TileB& b, TileC& c, AdjTileA& adj_a, AdjTileB& adj_b
 // ---------------------------------------------------------
 
 template <typename T, int Capacity> struct tile_stack_t {
+    WP_TILE_ARENA_MEMBER
     static_assert(Capacity > 0, "tile_stack_t capacity must be positive");
 
-    T* data;
-    int* count;
+    T WP_TILE_SHARED* data;
+    int WP_TILE_SHARED* count;
 
     // Default constructor: null pointers so the destructor is a safe no-op.
     // Used for adjoint variables which are never allocated.
@@ -5981,7 +6643,7 @@ template <typename T, int Capacity> struct tile_stack_t {
     // is a no-op. Required because the user-declared destructor suppresses
     // implicit move generation, leaving only a copy constructor that would
     // cause a double-free if NRVO is not applied in tile_stack_alloc().
-    inline CUDA_CALLABLE tile_stack_t(tile_stack_t&& other)
+    inline CUDA_CALLABLE tile_stack_t(tile_stack_t WP_THREAD&& other)
         : data(other.data)
         , count(other.count)
     {
@@ -5991,17 +6653,30 @@ template <typename T, int Capacity> struct tile_stack_t {
 
     // Delete copy constructor: copying would duplicate the shared-memory
     // pointers and cause a double-free when both objects are destroyed.
-    tile_stack_t(const tile_stack_t&) = delete;
+    tile_stack_t(const tile_stack_t WP_THREAD&) = delete;
 
     // Assignment from int: initialize count and zero data.
     // Follows the tile pattern where operator= handles initialization
     // (cinit allocates, the forward call triggers init via assignment).
-    inline CUDA_CALLABLE tile_stack_t& operator=(int)
+    inline CUDA_CALLABLE tile_stack_t WP_THREAD& operator=(int)
     {
+#if defined(__CUDA_ARCH__)
         if (WP_TILE_THREAD_IDX == 0)
             *count = 0;
         for (int i = WP_TILE_THREAD_IDX; i < Capacity; i += WP_TILE_BLOCK_DIM)
             data[i] = T {};
+#else
+        // Redundant initialization keeps the stack valid if lane 0, or any
+        // sparse subset of lanes, returned before construction.
+        *count = 0;
+        if constexpr (WP_TILE_BLOCK_DIM == 1) {
+            for (int i = WP_TILE_THREAD_IDX; i < Capacity; i += WP_TILE_BLOCK_DIM)
+                data[i] = T {};
+        } else {
+            for (int i = 0; i < Capacity; ++i)
+                data[i] = T {};
+        }
+#endif
         WP_TILE_SYNC();
         return *this;
     }
@@ -6012,19 +6687,23 @@ template <typename T, int Capacity> struct tile_stack_t {
         // Null-pointer guard: adjoint variables are default-constructed with
         // null pointers and must not decrement the allocator.
         if (count)
-            tile_shared_storage_t::alloc(-tile_align(sizeof(int)));
+            WP_TILE_ALLOC(-tile_align(sizeof(int)));
         if (data)
-            tile_shared_storage_t::alloc(-tile_align(sizeof(T) * Capacity));
+            WP_TILE_ALLOC(-tile_align(sizeof(T) * Capacity));
     }
 };
 
 // Allocate-only factory -- called from cinit() at declaration time.
 // Data and count are left uninitialized; the forward call initializes via operator=(int).
-template <typename T, int Capacity> inline CUDA_CALLABLE tile_stack_t<T, Capacity> tile_stack_alloc()
+template <typename T, int Capacity>
+inline CUDA_CALLABLE tile_stack_t<T, Capacity> tile_stack_alloc(WP_TILE_ARENA_PARAM0)
 {
     tile_stack_t<T, Capacity> s;
-    s.data = (T*)tile_shared_storage_t::alloc(sizeof(T) * Capacity);
-    s.count = (int*)tile_shared_storage_t::alloc(sizeof(int));
+#if defined(__METAL_VERSION__)
+    s._wp_arena = _wp_arena;
+#endif
+    s.data = (T WP_TILE_SHARED*)WP_TILE_ALLOC(sizeof(T) * Capacity);
+    s.count = (int WP_TILE_SHARED*)WP_TILE_ALLOC(sizeof(int));
     return s;
 }
 
@@ -6032,7 +6711,7 @@ template <typename T, int Capacity> inline CUDA_CALLABLE tile_stack_t<T, Capacit
 template <typename T, int Capacity> inline CUDA_CALLABLE int tile_stack_init() { return int {}; }
 
 template <typename T, int Capacity>
-inline CUDA_CALLABLE int tile_stack_push(tile_stack_t<T, Capacity>& s, T value, bool has_value)
+inline CUDA_CALLABLE int tile_stack_push(tile_stack_t<T, Capacity> WP_THREAD& s, T value, bool has_value)
 {
     // Leading barrier: ensures any preceding tile_stack_count reads of s.count
     // are complete before this thread writes to s.count via atomic_add.
@@ -6050,14 +6729,19 @@ inline CUDA_CALLABLE int tile_stack_push(tile_stack_t<T, Capacity>& s, T value, 
     // Non-atomic clamp is safe: the preceding barrier guarantees all atomics are
     // complete, and the following barrier ensures all threads see the clamped value
     // before any subsequent operation.
+#if defined(__CUDA_ARCH__)
     if (WP_TILE_THREAD_IDX == 0 && *s.count > Capacity)
+#else
+    if (*s.count > Capacity)
+#endif
         *s.count = Capacity;
     WP_TILE_SYNC();
     return (has_value && idx >= 0 && idx < Capacity) ? idx : -1;
 }
 
 template <typename T, int Capacity>
-inline CUDA_CALLABLE void tile_stack_pop(tile_stack_t<T, Capacity>& s, T& out_value, int& out_slot)
+inline CUDA_CALLABLE void
+tile_stack_pop(tile_stack_t<T, Capacity> WP_THREAD& s, T WP_THREAD& out_value, int WP_THREAD& out_slot)
 {
     // Leading barrier: see tile_stack_push comment.
     WP_TILE_SYNC();
@@ -6072,21 +6756,29 @@ inline CUDA_CALLABLE void tile_stack_pop(tile_stack_t<T, Capacity>& s, T& out_va
     WP_TILE_SYNC();
     // Count may be deeply negative (all threads decrement atomically).
     // Non-atomic clamp is safe: barriers bracket this write (see push comment).
+#if defined(__CUDA_ARCH__)
     if (WP_TILE_THREAD_IDX == 0 && *s.count < 0)
+#else
+    if (*s.count < 0)
+#endif
         *s.count = 0;
     WP_TILE_SYNC();
 }
 
-template <typename T, int Capacity> inline CUDA_CALLABLE void tile_stack_clear(tile_stack_t<T, Capacity>& s)
+template <typename T, int Capacity> inline CUDA_CALLABLE void tile_stack_clear(tile_stack_t<T, Capacity> WP_THREAD& s)
 {
     // Leading barrier: see tile_stack_push comment.
     WP_TILE_SYNC();
+#if defined(__CUDA_ARCH__)
     if (WP_TILE_THREAD_IDX == 0)
         *s.count = 0;
+#else
+    *s.count = 0;
+#endif
     WP_TILE_SYNC();
 }
 
-template <typename T, int Capacity> inline CUDA_CALLABLE int tile_stack_count(tile_stack_t<T, Capacity>& s)
+template <typename T, int Capacity> inline CUDA_CALLABLE int tile_stack_count(tile_stack_t<T, Capacity> WP_THREAD& s)
 {
     // No WP_TILE_SYNC() needed here. Every operation that writes s.count
     // (tile_stack_init, tile_stack_push, tile_stack_pop, tile_stack_clear)

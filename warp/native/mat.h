@@ -24,7 +24,8 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
                 data[i][j] = s;
     }
 
-    template <typename OtherType> inline explicit CUDA_CALLABLE mat_t(const mat_t<Rows, Cols, OtherType>& other)
+    template <typename OtherType>
+    inline explicit CUDA_CALLABLE mat_t(const mat_t<Rows, Cols, OtherType> WP_THREAD& other)
     {
         for (unsigned i = 0; i < Rows; ++i)
             for (unsigned j = 0; j < Cols; ++j)
@@ -141,7 +142,7 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
         data[3][3] = m33;
     }
 
-    inline CUDA_CALLABLE mat_t(const initializer_array<Rows * Cols, Type>& l)
+    inline CUDA_CALLABLE mat_t(const initializer_array<Rows * Cols, Type> WP_THREAD& l)
     {
         for (unsigned i = 0; i < Rows; ++i) {
             for (unsigned j = 0; j < Cols; ++j) {
@@ -150,7 +151,7 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
         }
     }
 
-    inline CUDA_CALLABLE mat_t(const initializer_array<Cols, vec_t<Rows, Type>>& l)
+    inline CUDA_CALLABLE mat_t(const initializer_array<Cols, vec_t<Rows, Type>> WP_THREAD& l)
     {
         for (unsigned j = 0; j < Cols; ++j) {
             for (unsigned i = 0; i < Rows; ++i) {
@@ -192,25 +193,25 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
     CUDA_CALLABLE vec_t<Cols, Type> get_row(int index) const
     {
         index = normalize_row_index(index);
-        return reinterpret_cast<const vec_t<Cols, Type>&>(data[index]);
+        return reinterpret_cast<const vec_t<Cols, Type> WP_THREAD&>(data[index]);
     }
 
-    CUDA_CALLABLE void set_row(int index, const vec_t<Cols, Type>& v)
+    CUDA_CALLABLE void set_row(int index, const vec_t<Cols, Type> WP_THREAD& v)
     {
         index = normalize_row_index(index);
-        reinterpret_cast<vec_t<Cols, Type>&>(data[index]) = v;
+        reinterpret_cast<vec_t<Cols, Type> WP_THREAD&>(data[index]) = v;
     }
 
     // Returns a mutable reference to row ``index`` as a ``vec_t``.
-    CUDA_CALLABLE vec_t<Cols, Type>& row_ref(int index)
+    CUDA_CALLABLE vec_t<Cols, Type> WP_THREAD& row_ref(int index)
     {
         index = normalize_row_index(index);
-        return reinterpret_cast<vec_t<Cols, Type>&>(data[index]);
+        return reinterpret_cast<vec_t<Cols, Type> WP_THREAD&>(data[index]);
     }
 
     // Returns a mutable reference to element ``(row, col)`` with negative-index
     // normalization.
-    CUDA_CALLABLE Type& element_ref(int row, int col)
+    CUDA_CALLABLE Type WP_THREAD& element_ref(int row, int col)
     {
         row = normalize_row_index(row);
         col = normalize_col_index(col);
@@ -226,12 +227,44 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
         return ret;
     }
 
-    CUDA_CALLABLE void set_col(int index, const vec_t<Rows, Type>& v)
+    CUDA_CALLABLE void set_col(int index, const vec_t<Rows, Type> WP_THREAD& v)
     {
         for (unsigned i = 0; i < Rows; ++i) {
             data[i][index] = v[i];
         }
     }
+
+#if defined(__METAL_VERSION__)
+    // Metal member functions are bound to an address space; shared tiles keep matrices in
+    // threadgroup memory and arrays in device memory, so mirror the accessors for both.
+#define WP_MAT_SPACE_ACCESSORS(space)                                                                 \
+    vec_t<Cols, Type> get_row(int index) const space                                                   \
+    {                                                                                                  \
+        index = normalize_row_index(index);                                                            \
+        vec_t<Cols, Type> r;                                                                           \
+        for (unsigned c = 0; c < Cols; ++c)                                                            \
+            r[c] = data[index][c];                                                                     \
+        return r;                                                                                      \
+    }                                                                                                  \
+    void set_row(int index, const vec_t<Cols, Type> WP_THREAD& v) space                                \
+    {                                                                                                  \
+        index = normalize_row_index(index);                                                            \
+        for (unsigned c = 0; c < Cols; ++c)                                                            \
+            data[index][c] = v[c];                                                                     \
+    }                                                                                                  \
+    vec_t<Cols, Type> space& row_ref(int index) space                                                  \
+    {                                                                                                  \
+        index = normalize_row_index(index);                                                            \
+        return reinterpret_cast<vec_t<Cols, Type> space&>(data[index]);                                \
+    }                                                                                                  \
+    Type space& element_ref(int row, int col) space                                                    \
+    {                                                                                                  \
+        return data[normalize_row_index(row)][normalize_col_index(col)];                               \
+    }
+    WP_MAT_SPACE_ACCESSORS(threadgroup)
+    WP_MAT_SPACE_ACCESSORS(device)
+#undef WP_MAT_SPACE_ACCESSORS
+#endif
 
     // row major storage assumed to be compatible with PyTorch
     Type data[Rows < 1 ? 1 : Rows][Cols < 1 ? 1 : Cols];
@@ -239,11 +272,11 @@ template <unsigned Rows, unsigned Cols, typename Type> struct mat_t {
 
 // Type trait to detect if a type is a mat_t
 template <typename T> struct is_matrix {
-    static constexpr bool value = false;
+    static WP_CONSTANT constexpr bool value = false;
 };
 
 template <unsigned Rows, unsigned Cols, typename Type> struct is_matrix<mat_t<Rows, Cols, Type>> {
-    static constexpr bool value = true;
+    static WP_CONSTANT constexpr bool value = true;
 };
 
 template <typename Type> inline CUDA_CALLABLE mat_t<2, 2, Type> matrix_from_cols(vec_t<2, Type> c0, vec_t<2, Type> c1)
@@ -309,7 +342,8 @@ matrix_from_cols(vec_t<4, Type> c0, vec_t<4, Type> c1, vec_t<4, Type> c2, vec_t<
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> matrix_from_cols(const initializer_array<Cols, vec_t<Rows, Type>>& l)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+matrix_from_cols(const initializer_array<Cols, vec_t<Rows, Type>> WP_THREAD& l)
 {
     mat_t<Rows, Cols, Type> m;
     for (unsigned j = 0; j < Cols; ++j) {
@@ -384,7 +418,8 @@ matrix_from_rows(vec_t<4, Type> r0, vec_t<4, Type> r1, vec_t<4, Type> r2, vec_t<
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> matrix_from_rows(const initializer_array<Rows, vec_t<Cols, Type>>& l)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+matrix_from_rows(const initializer_array<Rows, vec_t<Cols, Type>> WP_THREAD& l)
 {
     mat_t<Rows, Cols, Type> m;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -406,7 +441,8 @@ template <unsigned Rows, typename Type> inline CUDA_CALLABLE mat_t<Rows, Rows, T
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE bool operator==(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE bool
+operator==(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
@@ -417,7 +453,7 @@ inline CUDA_CALLABLE bool operator==(const mat_t<Rows, Cols, Type>& a, const mat
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator-(const mat_t<Rows, Cols, Type>& x)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator-(const mat_t<Rows, Cols, Type> WP_THREAD& x)
 {
     mat_t<Rows, Cols, Type> ret;
     for (unsigned i = 0; i < Rows; ++i)
@@ -428,34 +464,41 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator-(const mat_t<Rows, Cols, T
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-CUDA_CALLABLE inline mat_t<Rows, Cols, Type> pos(const mat_t<Rows, Cols, Type>& x)
+CUDA_CALLABLE inline mat_t<Rows, Cols, Type> pos(const mat_t<Rows, Cols, Type> WP_THREAD& x)
 {
     return x;
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-CUDA_CALLABLE inline void
-adj_pos(const mat_t<Rows, Cols, Type>& x, mat_t<Rows, Cols, Type>& adj_x, const mat_t<Rows, Cols, Type>& adj_ret)
+CUDA_CALLABLE inline void adj_pos(
+    const mat_t<Rows, Cols, Type> WP_THREAD& x,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_x,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
+)
 {
     adj_x += adj_ret;
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-CUDA_CALLABLE inline mat_t<Rows, Cols, Type> neg(const mat_t<Rows, Cols, Type>& x)
+CUDA_CALLABLE inline mat_t<Rows, Cols, Type> neg(const mat_t<Rows, Cols, Type> WP_THREAD& x)
 {
     return -x;
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-CUDA_CALLABLE inline void
-adj_neg(const mat_t<Rows, Cols, Type>& x, mat_t<Rows, Cols, Type>& adj_x, const mat_t<Rows, Cols, Type>& adj_ret)
+CUDA_CALLABLE inline void adj_neg(
+    const mat_t<Rows, Cols, Type> WP_THREAD& x,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_x,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
+)
 {
     adj_x -= adj_ret;
 }
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_add(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_add(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -467,7 +510,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_add(mat_t<Rows, Cols, Type>*
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_and(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_and(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -479,7 +523,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_and(mat_t<Rows, Cols, Type>*
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_or(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_or(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -491,7 +536,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_or(mat_t<Rows, Cols, Type>* 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_xor(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_xor(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -503,7 +549,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_xor(mat_t<Rows, Cols, Type>*
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_min(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_min(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -515,7 +562,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_min(mat_t<Rows, Cols, Type>*
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_max(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+atomic_max(mat_t<Rows, Cols, Type> WP_DEVICE* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
@@ -528,10 +576,10 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_max(mat_t<Rows, Cols, Type>*
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_atomic_minmax(
-    mat_t<Rows, Cols, Type>* addr,
-    mat_t<Rows, Cols, Type>* adj_addr,
-    const mat_t<Rows, Cols, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_value
+    mat_t<Rows, Cols, Type> WP_DEVICE* addr,
+    mat_t<Rows, Cols, Type> WP_DEVICE* adj_addr,
+    const mat_t<Rows, Cols, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_value
 )
 {
     for (unsigned i = 0; i < Rows; ++i)
@@ -540,7 +588,7 @@ inline CUDA_CALLABLE void adj_atomic_minmax(
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<Cols, Type> extract(const mat_t<Rows, Cols, Type>& m, int row)
+inline CUDA_CALLABLE vec_t<Cols, Type> extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, int row)
 {
     vec_t<Cols, Type> ret;
 
@@ -562,7 +610,7 @@ inline CUDA_CALLABLE vec_t<Cols, Type> extract(const mat_t<Rows, Cols, Type>& m,
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE Type extract(const mat_t<Rows, Cols, Type>& m, int row, int col)
+inline CUDA_CALLABLE Type extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -587,7 +635,7 @@ inline CUDA_CALLABLE Type extract(const mat_t<Rows, Cols, Type>& m, int row, int
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE mat_t<RowSliceLength, ColSliceLength, Type>
-extract(const mat_t<Rows, Cols, Type>& m, slice_t row_slice)
+extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -620,7 +668,8 @@ extract(const mat_t<Rows, Cols, Type>& m, slice_t row_slice)
 }
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<RowSliceLength, Type> extract(const mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col)
+inline CUDA_CALLABLE vec_t<RowSliceLength, Type>
+extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -656,7 +705,8 @@ inline CUDA_CALLABLE vec_t<RowSliceLength, Type> extract(const mat_t<Rows, Cols,
 }
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<ColSliceLength, Type> extract(const mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice)
+inline CUDA_CALLABLE vec_t<ColSliceLength, Type>
+extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -693,7 +743,7 @@ inline CUDA_CALLABLE vec_t<ColSliceLength, Type> extract(const mat_t<Rows, Cols,
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE mat_t<RowSliceLength, ColSliceLength, Type>
-extract(const mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice)
+extract(const mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, slice_t col_slice)
 {
     mat_t<RowSliceLength, ColSliceLength, Type> ret;
 
@@ -734,7 +784,7 @@ extract(const mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice)
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<Cols, Type>* index(mat_t<Rows, Cols, Type>& m, int row)
+inline CUDA_CALLABLE vec_t<Cols, Type> WP_THREAD* index(mat_t<Rows, Cols, Type> WP_THREAD& m, int row)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -747,11 +797,11 @@ inline CUDA_CALLABLE vec_t<Cols, Type>* index(mat_t<Rows, Cols, Type>& m, int ro
         row += Rows;
     }
 
-    return reinterpret_cast<vec_t<Cols, Type>*>(&m.data[row]);
+    return reinterpret_cast<vec_t<Cols, Type> WP_THREAD*>(&m.data[row]);
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE Type* index(mat_t<Rows, Cols, Type>& m, int row, int col)
+inline CUDA_CALLABLE Type WP_THREAD* index(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -776,11 +826,11 @@ inline CUDA_CALLABLE Type* index(mat_t<Rows, Cols, Type>& m, int row, int col)
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_index(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    const mat_t<Rows, Cols, Type>& adj_m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
-    const vec_t<Cols, Type>& adj_value
+    const vec_t<Cols, Type> WP_THREAD& adj_value
 )
 {
     // nop
@@ -788,10 +838,10 @@ inline CUDA_CALLABLE void adj_index(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_index(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
-    const mat_t<Rows, Cols, Type>& adj_m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
     int adj_col,
     Type adj_value
@@ -801,36 +851,67 @@ inline CUDA_CALLABLE void adj_index(
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<Cols, Type>* indexref(mat_t<Rows, Cols, Type>* m, int row)
+inline CUDA_CALLABLE vec_t<Cols, Type> WP_THREAD* indexref(mat_t<Rows, Cols, Type> WP_THREAD* m, int row)
 {
     row = mat_t<Rows, Cols, Type>::normalize_row_index(row);
 
-    return reinterpret_cast<vec_t<Cols, Type>*>(&(m->data[row]));
+    return reinterpret_cast<vec_t<Cols, Type> WP_THREAD*>(&(m->data[row]));
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_indexref(
-    mat_t<Rows, Cols, Type>* m, int row, mat_t<Rows, Cols, Type>& adj_m, int adj_row, const vec_t<Cols, Type>& adj_value
+    mat_t<Rows, Cols, Type> WP_THREAD* m,
+    int row,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int adj_row,
+    const vec_t<Cols, Type> WP_THREAD& adj_value
 )
 {
     // nop
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE Type* indexref(mat_t<Rows, Cols, Type>* m, int row, int col)
+inline CUDA_CALLABLE Type WP_THREAD* indexref(mat_t<Rows, Cols, Type> WP_THREAD* m, int row, int col)
 {
     return &m->element_ref(row, col);
 }
 
+#if defined(__METAL__)
+// element references into device memory (array elements and struct members)
+template <unsigned Rows, unsigned Cols, typename Type>
+inline vec_t<Cols, Type> WP_DEVICE* index(mat_t<Rows, Cols, Type> WP_DEVICE& m, int row)
+{
+    return reinterpret_cast<vec_t<Cols, Type> WP_DEVICE*>(&m.data[row < 0 ? row + (int)Rows : row]);
+}
+
+template <unsigned Rows, unsigned Cols, typename Type>
+inline Type WP_DEVICE* index(mat_t<Rows, Cols, Type> WP_DEVICE& m, int row, int col)
+{
+    return &m.data[row < 0 ? row + (int)Rows : row][col < 0 ? col + (int)Cols : col];
+}
+
+template <unsigned Rows, unsigned Cols, typename Type>
+inline vec_t<Cols, Type> WP_DEVICE* indexref(mat_t<Rows, Cols, Type> WP_DEVICE* m, int row)
+{
+    return index(*m, row);
+}
+
+template <unsigned Rows, unsigned Cols, typename Type>
+inline Type WP_DEVICE* indexref(mat_t<Rows, Cols, Type> WP_DEVICE* m, int row, int col)
+{
+    return index(*m, row, col);
+}
+#endif
+
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_indexref(
-    mat_t<Rows, Cols, Type>* m,
+    mat_t<Rows, Cols, Type> WP_THREAD* m,
     int row,
     int col,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
     int adj_col,
-    const Type& adj_value
+    const Type WP_THREAD& adj_value
 )
 {
     // nop
@@ -838,7 +919,7 @@ inline CUDA_CALLABLE void adj_indexref(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -863,7 +944,7 @@ inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type>& m, int row, int c
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -883,8 +964,11 @@ inline CUDA_CALLABLE void add_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-add_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void add_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -915,8 +999,9 @@ add_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength,
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-add_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void add_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -950,8 +1035,9 @@ add_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSli
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-add_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void add_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -986,7 +1072,10 @@ add_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSli
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void add_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -1027,14 +1116,14 @@ inline CUDA_CALLABLE void add_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
     Type value,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
     int adj_col,
-    Type& adj_value
+    Type WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1061,12 +1150,12 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    vec_t<Cols, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
+    vec_t<Cols, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
-    vec_t<Cols, Type>& adj_value
+    vec_t<Cols, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1088,12 +1177,12 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     static_assert(
@@ -1126,14 +1215,14 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     int col,
-    vec_t<RowSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    int& adj_col,
-    vec_t<RowSliceLength, Type>& adj_value
+    vec_t<RowSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    int WP_THREAD& adj_col,
+    vec_t<RowSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1169,14 +1258,14 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     slice_t col_slice,
-    vec_t<ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    slice_t& adj_col_slice,
-    vec_t<ColSliceLength, Type>& adj_value
+    vec_t<ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    slice_t WP_THREAD& adj_col_slice,
+    vec_t<ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1212,14 +1301,14 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     slice_t col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    slice_t& adj_col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    slice_t WP_THREAD& adj_col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -1259,7 +1348,7 @@ inline CUDA_CALLABLE void adj_add_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1284,7 +1373,7 @@ inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type>& m, int row, int c
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1304,8 +1393,11 @@ inline CUDA_CALLABLE void sub_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-sub_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void sub_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -1336,8 +1428,9 @@ sub_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength,
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-sub_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void sub_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -1371,8 +1464,9 @@ sub_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSli
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-sub_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void sub_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1407,7 +1501,10 @@ sub_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSli
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void sub_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -1448,14 +1545,14 @@ inline CUDA_CALLABLE void sub_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
     Type value,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
     int adj_col,
-    Type& adj_value
+    Type WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1482,12 +1579,12 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    vec_t<Cols, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
+    vec_t<Cols, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
-    vec_t<Cols, Type>& adj_value
+    vec_t<Cols, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1509,12 +1606,12 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     static_assert(
@@ -1547,14 +1644,14 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     int col,
-    vec_t<RowSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    int& adj_col,
-    vec_t<RowSliceLength, Type>& adj_value
+    vec_t<RowSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    int WP_THREAD& adj_col,
+    vec_t<RowSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1590,14 +1687,14 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     slice_t col_slice,
-    vec_t<ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    slice_t& adj_col_slice,
-    vec_t<ColSliceLength, Type>& adj_value
+    vec_t<ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    slice_t WP_THREAD& adj_col_slice,
+    vec_t<ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -1633,14 +1730,14 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     slice_t col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    slice_t& adj_col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    slice_t WP_THREAD& adj_col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -1680,7 +1777,7 @@ inline CUDA_CALLABLE void adj_sub_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void bit_and_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1705,7 +1802,8 @@ inline CUDA_CALLABLE void bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, i
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void
+bit_and_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1725,8 +1823,11 @@ inline CUDA_CALLABLE void bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, v
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_and_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_and_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -1757,8 +1858,9 @@ bit_and_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLen
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_and_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_and_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -1792,8 +1894,9 @@ bit_and_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<Ro
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_and_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1828,7 +1931,10 @@ bit_and_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<Co
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void bit_and_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -1868,7 +1974,7 @@ inline CUDA_CALLABLE void bit_and_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void bit_or_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1893,7 +1999,8 @@ inline CUDA_CALLABLE void bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, in
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void
+bit_or_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -1913,8 +2020,11 @@ inline CUDA_CALLABLE void bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, ve
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_or_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_or_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -1945,8 +2055,9 @@ bit_or_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLeng
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_or_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_or_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -1980,8 +2091,9 @@ bit_or_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<Row
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_or_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2016,7 +2128,10 @@ bit_or_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<Col
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void bit_or_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -2056,7 +2171,7 @@ inline CUDA_CALLABLE void bit_or_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void bit_xor_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2081,7 +2196,8 @@ inline CUDA_CALLABLE void bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, i
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void
+bit_xor_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2101,8 +2217,11 @@ inline CUDA_CALLABLE void bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, v
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_xor_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_xor_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -2133,8 +2252,9 @@ bit_xor_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLen
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_xor_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_xor_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -2168,8 +2288,9 @@ bit_xor_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<Ro
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void bit_xor_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2204,7 +2325,10 @@ bit_xor_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<Co
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void bit_xor_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -2244,7 +2368,7 @@ inline CUDA_CALLABLE void bit_xor_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void assign_inplace(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE void assign_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2269,7 +2393,8 @@ inline CUDA_CALLABLE void assign_inplace(mat_t<Rows, Cols, Type>& m, int row, in
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void assign_inplace(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE void
+assign_inplace(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2289,8 +2414,11 @@ inline CUDA_CALLABLE void assign_inplace(mat_t<Rows, Cols, Type>& m, int row, ve
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-assign_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void assign_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     static_assert(
         RowSliceLength == 0 ? ColSliceLength == 0 : ColSliceLength == Cols,
@@ -2321,8 +2449,9 @@ assign_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLeng
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-assign_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE void assign_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (col < -(int)Cols || col >= (int)Cols) {
@@ -2356,8 +2485,9 @@ assign_inplace(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<Row
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-assign_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE void assign_inplace(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2392,7 +2522,10 @@ assign_inplace(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<Col
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void assign_inplace(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -2433,14 +2566,14 @@ inline CUDA_CALLABLE void assign_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
     Type value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    int& adj_col,
-    Type& adj_value
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    int WP_THREAD& adj_col,
+    Type WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -2467,12 +2600,12 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    vec_t<Cols, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    vec_t<Cols, Type>& adj_value
+    vec_t<Cols, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    vec_t<Cols, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -2494,12 +2627,12 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     static_assert(
@@ -2532,14 +2665,14 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     int col,
-    vec_t<RowSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    int& adj_col,
-    vec_t<RowSliceLength, Type>& adj_value
+    vec_t<RowSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    int WP_THREAD& adj_col,
+    vec_t<RowSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -2575,14 +2708,14 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     slice_t col_slice,
-    vec_t<ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    slice_t& adj_col_slice,
-    vec_t<ColSliceLength, Type>& adj_value
+    vec_t<ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    slice_t WP_THREAD& adj_col_slice,
+    vec_t<ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
 #ifndef NDEBUG
@@ -2618,14 +2751,14 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_inplace(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     slice_t col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    slice_t& adj_col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    slice_t WP_THREAD& adj_col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -2665,7 +2798,8 @@ inline CUDA_CALLABLE void adj_assign_inplace(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(mat_t<Rows, Cols, Type>& m, int row, int col, Type value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+assign_copy(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, int col, Type value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2692,7 +2826,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(mat_t<Rows, Cols, Type>
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(mat_t<Rows, Cols, Type>& m, int row, vec_t<Cols, Type>& value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+assign_copy(mat_t<Rows, Cols, Type> WP_THREAD& m, int row, vec_t<Cols, Type> WP_THREAD& value)
 {
 #ifndef NDEBUG
     if (row < -(int)Rows || row >= (int)Rows) {
@@ -2714,8 +2849,11 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(mat_t<Rows, Cols, Type>
 
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
-assign_copy(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
+)
 {
     mat_t<Rows, Cols, Type> ret(m);
     assign_inplace(ret, row_slice, value);
@@ -2724,8 +2862,9 @@ assign_copy(mat_t<Rows, Cols, Type>& m, slice_t row_slice, mat_t<RowSliceLength,
 
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
-assign_copy(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type>& value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, slice_t row_slice, int col, vec_t<RowSliceLength, Type> WP_THREAD& value
+)
 {
     mat_t<Rows, Cols, Type> ret(m);
     assign_inplace(ret, row_slice, col, value);
@@ -2734,8 +2873,9 @@ assign_copy(mat_t<Rows, Cols, Type>& m, slice_t row_slice, int col, vec_t<RowSli
 
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
-assign_copy(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type>& value)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(
+    mat_t<Rows, Cols, Type> WP_THREAD& m, int row, slice_t col_slice, vec_t<ColSliceLength, Type> WP_THREAD& value
+)
 {
     mat_t<Rows, Cols, Type> ret(m);
     assign_inplace(ret, row, col_slice, value);
@@ -2745,7 +2885,10 @@ assign_copy(mat_t<Rows, Cols, Type>& m, int row, slice_t col_slice, vec_t<ColSli
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(
-    mat_t<Rows, Cols, Type>& m, slice_t row_slice, slice_t col_slice, mat_t<RowSliceLength, ColSliceLength, Type>& value
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
+    slice_t row_slice,
+    slice_t col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value
 )
 {
     mat_t<Rows, Cols, Type> ret(m);
@@ -2756,15 +2899,15 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> assign_copy(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
     Type value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    int& adj_col,
-    Type& adj_value,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    int WP_THREAD& adj_col,
+    Type WP_THREAD& adj_value,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -2797,13 +2940,13 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    vec_t<Cols, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    vec_t<Cols, Type>& adj_value,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    vec_t<Cols, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    vec_t<Cols, Type> WP_THREAD& adj_value,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -2830,13 +2973,13 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value,
-    mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     static_assert(
@@ -2879,15 +3022,15 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     int col,
-    vec_t<RowSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    int& adj_col,
-    vec_t<RowSliceLength, Type>& adj_value,
-    mat_t<Rows, Cols, Type>& adj_ret
+    vec_t<RowSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    int WP_THREAD& adj_col,
+    vec_t<RowSliceLength, Type> WP_THREAD& adj_value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -2940,15 +3083,15 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     slice_t col_slice,
-    vec_t<ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    int& adj_row,
-    slice_t& adj_col_slice,
-    vec_t<ColSliceLength, Type>& adj_value,
-    mat_t<Rows, Cols, Type>& adj_ret
+    vec_t<ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    int WP_THREAD& adj_row,
+    slice_t WP_THREAD& adj_col_slice,
+    vec_t<ColSliceLength, Type> WP_THREAD& adj_value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -3000,15 +3143,15 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_assign_copy(
-    mat_t<Rows, Cols, Type>& m,
+    mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     slice_t col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& value,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    slice_t& adj_col_slice,
-    mat_t<RowSliceLength, ColSliceLength, Type>& adj_value,
-    mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    slice_t WP_THREAD& adj_col_slice,
+    mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_value,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -3065,7 +3208,7 @@ inline CUDA_CALLABLE void adj_assign_copy(
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline bool CUDA_CALLABLE isfinite(const mat_t<Rows, Cols, Type>& m)
+inline bool CUDA_CALLABLE isfinite(const mat_t<Rows, Cols, Type> WP_THREAD& m)
 {
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
@@ -3074,7 +3217,8 @@ inline bool CUDA_CALLABLE isfinite(const mat_t<Rows, Cols, Type>& m)
     return true;
 }
 
-template <unsigned Rows, unsigned Cols, typename Type> inline bool CUDA_CALLABLE isnan(const mat_t<Rows, Cols, Type>& m)
+template <unsigned Rows, unsigned Cols, typename Type>
+inline bool CUDA_CALLABLE isnan(const mat_t<Rows, Cols, Type> WP_THREAD& m)
 {
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
@@ -3083,7 +3227,8 @@ template <unsigned Rows, unsigned Cols, typename Type> inline bool CUDA_CALLABLE
     return false;
 }
 
-template <unsigned Rows, unsigned Cols, typename Type> inline bool CUDA_CALLABLE isinf(const mat_t<Rows, Cols, Type>& m)
+template <unsigned Rows, unsigned Cols, typename Type>
+inline bool CUDA_CALLABLE isinf(const mat_t<Rows, Cols, Type> WP_THREAD& m)
 {
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
@@ -3093,7 +3238,8 @@ template <unsigned Rows, unsigned Cols, typename Type> inline bool CUDA_CALLABLE
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> add(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+add(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3106,7 +3252,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> add(const mat_t<Rows, Cols, Type>& 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> add(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> add(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3119,7 +3265,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> add(Type a, const mat_t<Rows, Cols,
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> sub(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+sub(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3132,7 +3279,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> sub(const mat_t<Rows, Cols, Type>& 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> sub(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> sub(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3145,7 +3292,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> sub(Type a, const mat_t<Rows, Cols,
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3158,7 +3305,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(const mat_t<Rows, Cols, Type>& 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(Type b, const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(Type b, const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3172,7 +3319,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> div(Type b, const mat_t<Rows, Cols,
 
 // approximate division
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3185,7 +3332,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(const mat_t<Rows, Cols, 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(Type b, const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(Type b, const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3198,7 +3345,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> approx_div(Type b, const mat_t<Rows
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> mul(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> mul(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3211,26 +3358,27 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> mul(const mat_t<Rows, Cols, Type>& 
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> mul(Type b, const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> mul(Type b, const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     return mul(a, b);
 }
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator*(Type b, const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator*(Type b, const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     return mul(a, b);
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator*(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> operator*(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     return mul(a, b);
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<Rows, Type> mul(const mat_t<Rows, Cols, Type>& a, const vec_t<Cols, Type>& b)
+inline CUDA_CALLABLE vec_t<Rows, Type>
+mul(const mat_t<Rows, Cols, Type> WP_THREAD& a, const vec_t<Cols, Type> WP_THREAD& b)
 {
     vec_t<Rows, Type> r = a.get_col(0) * b[0];
     for (unsigned i = 1; i < Cols; ++i) {
@@ -3240,7 +3388,8 @@ inline CUDA_CALLABLE vec_t<Rows, Type> mul(const mat_t<Rows, Cols, Type>& a, con
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE vec_t<Cols, Type> mul(const vec_t<Rows, Type>& b, const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE vec_t<Cols, Type>
+mul(const vec_t<Rows, Type> WP_THREAD& b, const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     vec_t<Cols, Type> r = a.get_row(0) * b[0];
     for (unsigned i = 1; i < Rows; ++i) {
@@ -3251,14 +3400,38 @@ inline CUDA_CALLABLE vec_t<Cols, Type> mul(const vec_t<Rows, Type>& b, const mat
 
 template <typename T> inline CUDA_CALLABLE T muladd(T a, T b, T c) { return c + a * b; }
 template <> inline CUDA_CALLABLE float muladd(float a, float b, float c) { return fmaf(a, b, c); }
+#if !defined(WP_NO_FLOAT64)
 template <> inline CUDA_CALLABLE double muladd(double a, double b, double c) { return fma(a, b, c); }
+#endif  // !WP_NO_FLOAT64
 
 
 template <unsigned Rows, unsigned Cols, unsigned ColsOut, typename Type>
 inline CUDA_CALLABLE mat_t<Rows, ColsOut, Type>
-mul(const mat_t<Rows, Cols, Type>& a, const mat_t<Cols, ColsOut, Type>& b)
+mul(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Cols, ColsOut, Type> WP_THREAD& b)
 {
     mat_t<Rows, ColsOut, Type> t(0);
+#if defined(__METAL_VERSION__)
+    // Apple's GPU compiler (GPUCompiler 32023, macOS 26.5) miscompiles kernels in which several fully
+    // unrolled and inlined 4x4 products meet: results computed later in the function come out as zero,
+    // which showed as zero gradients from adj_mul() and adj_inverse(). The same source is correct at -O1,
+    // with -fno-unroll-loops, or with -fno-inline-functions. Keep large products as loops; the constant
+    // condition leaves the smaller ones, 3x3 above all, unrolled as before.
+    if (Rows * Cols * ColsOut >= 64) {
+        _Pragma("nounroll") for (unsigned i = 0; i < Rows; ++i)
+        {
+            _Pragma("nounroll") for (unsigned j = 0; j < ColsOut; ++j)
+            {
+                Type sum(0.0);
+                _Pragma("nounroll") for (unsigned k = 0; k < Cols; ++k)
+                {
+                    sum = muladd<Type>(a.data[i][k], b.data[k][j], sum);
+                }
+                t.data[i][j] = sum;
+            }
+        }
+        return t;
+    }
+#endif
     for (unsigned i = 0; i < Rows; ++i) {
         for (unsigned j = 0; j < ColsOut; ++j) {
             Type sum(0.0);
@@ -3276,7 +3449,8 @@ mul(const mat_t<Rows, Cols, Type>& a, const mat_t<Cols, ColsOut, Type>& b)
 
 // bitwise AND
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+bit_and(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3289,7 +3463,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(const mat_t<Rows, Cols, Typ
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3302,7 +3476,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(const mat_t<Rows, Cols, Typ
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3316,7 +3490,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_and(Type a, const mat_t<Rows, C
 
 // bitwise OR
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+bit_or(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3329,7 +3504,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3342,7 +3517,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3356,7 +3531,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_or(Type a, const mat_t<Rows, Co
 
 // bitwise XOR
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+bit_xor(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3369,7 +3545,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(const mat_t<Rows, Cols, Typ
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3382,7 +3558,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(const mat_t<Rows, Cols, Typ
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3396,7 +3572,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> bit_xor(Type a, const mat_t<Rows, C
 
 // left shift
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+lshift(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3409,7 +3586,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3422,7 +3599,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3436,7 +3613,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> lshift(Type a, const mat_t<Rows, Co
 
 // right shift
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+rshift(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3449,7 +3627,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(const mat_t<Rows, Cols, Type>& a, Type b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(const mat_t<Rows, Cols, Type> WP_THREAD& a, Type b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3462,7 +3640,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(Type a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(Type a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3476,7 +3654,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> rshift(Type a, const mat_t<Rows, Co
 
 // invert
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> invert(const mat_t<Rows, Cols, Type>& m)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type> invert(const mat_t<Rows, Cols, Type> WP_THREAD& m)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3489,7 +3667,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> invert(const mat_t<Rows, Cols, Type
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE Type ddot(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE Type ddot(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     // double dot product between a and b:
     Type r(0);
@@ -3502,14 +3680,15 @@ inline CUDA_CALLABLE Type ddot(const mat_t<Rows, Cols, Type>& a, const mat_t<Row
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE Type tensordot(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE Type
+tensordot(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     // corresponds to `np.tensordot()` with all axes being contracted
     return ddot(a, b);
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Cols, Rows, Type> transpose(const mat_t<Rows, Cols, Type>& a)
+inline CUDA_CALLABLE mat_t<Cols, Rows, Type> transpose(const mat_t<Rows, Cols, Type> WP_THREAD& a)
 {
     mat_t<Cols, Rows, Type> t;
     for (unsigned i = 0; i < Cols; ++i) {
@@ -3522,12 +3701,12 @@ inline CUDA_CALLABLE mat_t<Cols, Rows, Type> transpose(const mat_t<Rows, Cols, T
 }
 
 // Only implementing determinants for 2x2, 3x3 and 4x4 matrices for now...
-template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<2, 2, Type>& m)
+template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<2, 2, Type> WP_THREAD& m)
 {
     return m.data[0][0] * m.data[1][1] - m.data[1][0] * m.data[0][1];
 }
 
-template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<3, 3, Type>& m)
+template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<3, 3, Type> WP_THREAD& m)
 {
     return dot(
         vec_t<3, Type>(m.data[0][0], m.data[0][1], m.data[0][2]),
@@ -3540,13 +3719,13 @@ template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<3, 3,
 
 // Adapted from USD - see licenses/usd-LICENSE.txt
 // Copyright 2016 Pixar
-template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<4, 4, Type>& m)
+template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<4, 4, Type> WP_THREAD& m)
 {
     Type x00, x01, x02, x03;
     Type x10, x11, x12, x13;
     Type x20, x21, x22, x23;
     Type x30, x31, x32, x33;
-    double y01, y02, y03, y12, y13, y23;
+    wide_float y01, y02, y03, y12, y13, y23;
     Type z00, z10, z20, z30;
 
     // Pickle 1st two columns of matrix into registers
@@ -3592,11 +3771,11 @@ template <typename Type> inline CUDA_CALLABLE Type determinant(const mat_t<4, 4,
     z00 = x11 * y23 - x21 * y13 + x31 * y12;
 
     // compute 4x4 determinant & its reciprocal
-    double det = x30 * z30 + x20 * z20 + x10 * z10 + x00 * z00;
+    wide_float det = x30 * z30 + x20 * z20 + x10 * z10 + x00 * z00;
     return det;
 }
 
-template <unsigned Rows, typename Type> inline CUDA_CALLABLE Type trace(const mat_t<Rows, Rows, Type>& m)
+template <unsigned Rows, typename Type> inline CUDA_CALLABLE Type trace(const mat_t<Rows, Rows, Type> WP_THREAD& m)
 {
     Type ret = m.data[0][0];
     for (unsigned i = 1; i < Rows; ++i) {
@@ -3606,7 +3785,7 @@ template <unsigned Rows, typename Type> inline CUDA_CALLABLE Type trace(const ma
 }
 
 template <unsigned Rows, typename Type>
-inline CUDA_CALLABLE vec_t<Rows, Type> get_diag(const mat_t<Rows, Rows, Type>& m)
+inline CUDA_CALLABLE vec_t<Rows, Type> get_diag(const mat_t<Rows, Rows, Type> WP_THREAD& m)
 {
     vec_t<Rows, Type> ret;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3616,7 +3795,8 @@ inline CUDA_CALLABLE vec_t<Rows, Type> get_diag(const mat_t<Rows, Rows, Type>& m
 }
 
 // Only implementing inverses for 2x2, 3x3 and 4x4 matrices for now...
-template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<2, 2, Type> inverse_impl(const mat_t<2, 2, Type>& m)
+template <typename Type, bool Approx>
+inline CUDA_CALLABLE mat_t<2, 2, Type> inverse_impl(const mat_t<2, 2, Type> WP_THREAD& m)
 {
     Type det = determinant(m);
     if (det > Type(kEps) || det < -Type(kEps)) {
@@ -3627,12 +3807,13 @@ template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<2, 2, Type> inv
     }
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<2, 2, Type> inverse(const mat_t<2, 2, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<2, 2, Type> inverse(const mat_t<2, 2, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, false>(m);
 }
 
-template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<3, 3, Type> inverse_impl(const mat_t<3, 3, Type>& m)
+template <typename Type, bool Approx>
+inline CUDA_CALLABLE mat_t<3, 3, Type> inverse_impl(const mat_t<3, 3, Type> WP_THREAD& m)
 {
     Type det = determinant(m);
 
@@ -3658,23 +3839,24 @@ template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<3, 3, Type> inv
     }
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> inverse(const mat_t<3, 3, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> inverse(const mat_t<3, 3, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, false>(m);
 }
 
 // Adapted from USD - see licenses/usd-LICENSE.txt
 // Copyright 2016 Pixar
-template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<4, 4, Type> inverse_impl(const mat_t<4, 4, Type>& m)
+template <typename Type, bool Approx>
+inline CUDA_CALLABLE mat_t<4, 4, Type> inverse_impl(const mat_t<4, 4, Type> WP_THREAD& m)
 {
     Type x00, x01, x02, x03;
     Type x10, x11, x12, x13;
     Type x20, x21, x22, x23;
     Type x30, x31, x32, x33;
-    double y01, y02, y03, y12, y13, y23;
+    wide_float y01, y02, y03, y12, y13, y23;
     Type z00, z10, z20, z30;
     Type z01, z11, z21, z31;
-    double z02, z03, z12, z13, z22, z23, z32, z33;
+    wide_float z02, z03, z12, z13, z22, z23, z32, z33;
 
     // Pickle 1st two columns of matrix into registers
     x00 = m.data[0][0];
@@ -3733,12 +3915,12 @@ template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<4, 4, Type> inv
     z01 = x20 * y13 - x30 * y12 - x10 * y23;
 
     // compute 4x4 determinant & its reciprocal
-    double det = x30 * z30 + x20 * z20 + x10 * z10 + x00 * z00;
+    wide_float det = x30 * z30 + x20 * z20 + x10 * z10 + x00 * z00;
 
     if (fabs(det) > kEps) {
         mat_t<4, 4, Type> invm;
 
-        double rcp = Approx ? approx_rcp(det) : 1.0 / det;
+        wide_float rcp = Approx ? approx_rcp(det) : wide_float(1.0) / det;
 
         // Multiply all 3x3 cofactors by reciprocal & transpose
         invm.data[0][0] = Type(z00 * rcp);
@@ -3764,28 +3946,29 @@ template <typename Type, bool Approx> inline CUDA_CALLABLE mat_t<4, 4, Type> inv
     }
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<4, 4, Type> inverse(const mat_t<4, 4, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<4, 4, Type> inverse(const mat_t<4, 4, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, false>(m);
 }
 
 // Approximate inverse using approx_rcp for the determinant reciprocal
-template <typename Type> inline CUDA_CALLABLE mat_t<2, 2, Type> approx_inverse(const mat_t<2, 2, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<2, 2, Type> approx_inverse(const mat_t<2, 2, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, true>(m);
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> approx_inverse(const mat_t<3, 3, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> approx_inverse(const mat_t<3, 3, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, true>(m);
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<4, 4, Type> approx_inverse(const mat_t<4, 4, Type>& m)
+template <typename Type> inline CUDA_CALLABLE mat_t<4, 4, Type> approx_inverse(const mat_t<4, 4, Type> WP_THREAD& m)
 {
     return inverse_impl<Type, true>(m);
 }
 
-template <unsigned Rows, typename Type> inline CUDA_CALLABLE mat_t<Rows, Rows, Type> diag(const vec_t<Rows, Type>& d)
+template <unsigned Rows, typename Type>
+inline CUDA_CALLABLE mat_t<Rows, Rows, Type> diag(const vec_t<Rows, Type> WP_THREAD& d)
 {
     mat_t<Rows, Rows, Type> ret(Type(0));
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3795,7 +3978,8 @@ template <unsigned Rows, typename Type> inline CUDA_CALLABLE mat_t<Rows, Rows, T
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> outer(const vec_t<Rows, Type>& a, const vec_t<Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+outer(const vec_t<Rows, Type> WP_THREAD& a, const vec_t<Cols, Type> WP_THREAD& b)
 {
     // col 0 = a * b[0] etc...
     mat_t<Rows, Cols, Type> ret;
@@ -3808,17 +3992,19 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> outer(const vec_t<Rows, Type>& a, c
     return ret;
 }
 
-template <unsigned Cols, typename Type> inline CUDA_CALLABLE vec_t<Cols, Type> outer(Type a, const vec_t<Cols, Type>& b)
+template <unsigned Cols, typename Type>
+inline CUDA_CALLABLE vec_t<Cols, Type> outer(Type a, const vec_t<Cols, Type> WP_THREAD& b)
 {
     return mul(a, b);
 }
 
-template <unsigned Rows, typename Type> inline CUDA_CALLABLE vec_t<Rows, Type> outer(const vec_t<Rows, Type>& a, Type b)
+template <unsigned Rows, typename Type>
+inline CUDA_CALLABLE vec_t<Rows, Type> outer(const vec_t<Rows, Type> WP_THREAD& a, Type b)
 {
     return mul(a, b);
 }
 
-template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> skew(const vec_t<3, Type>& a)
+template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> skew(const vec_t<3, Type> WP_THREAD& a)
 {
     mat_t<3, 3, Type> out(Type(0), -a[2], a[1], a[2], Type(0), -a[0], -a[1], a[0], Type(0));
 
@@ -3827,7 +4013,8 @@ template <typename Type> inline CUDA_CALLABLE mat_t<3, 3, Type> skew(const vec_t
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> cw_mul(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+cw_mul(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3841,7 +4028,8 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> cw_mul(const mat_t<Rows, Cols, Type
 
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE mat_t<Rows, Cols, Type> cw_div(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b)
+inline CUDA_CALLABLE mat_t<Rows, Cols, Type>
+cw_div(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b)
 {
     mat_t<Rows, Cols, Type> t;
     for (unsigned i = 0; i < Rows; ++i) {
@@ -3854,14 +4042,16 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> cw_div(const mat_t<Rows, Cols, Type
 }
 
 template <typename Type>
-inline CUDA_CALLABLE vec_t<3, Type> transform_point(const mat_t<4, 4, Type>& m, const vec_t<3, Type>& v)
+inline CUDA_CALLABLE vec_t<3, Type>
+transform_point(const mat_t<4, 4, Type> WP_THREAD& m, const vec_t<3, Type> WP_THREAD& v)
 {
     vec_t<4, Type> out = mul(m, vec_t<4, Type>(v[0], v[1], v[2], Type(1)));
     return vec_t<3, Type>(out[0], out[1], out[2]);
 }
 
 template <typename Type>
-inline CUDA_CALLABLE vec_t<3, Type> transform_vector(const mat_t<4, 4, Type>& m, const vec_t<3, Type>& v)
+inline CUDA_CALLABLE vec_t<3, Type>
+transform_vector(const mat_t<4, 4, Type> WP_THREAD& m, const vec_t<3, Type> WP_THREAD& v)
 {
     vec_t<4, Type> out = mul(m, vec_t<4, Type>(v[0], v[1], v[2], 0.f));
     return vec_t<3, Type>(out[0], out[1], out[2]);
@@ -3869,11 +4059,11 @@ inline CUDA_CALLABLE vec_t<3, Type> transform_vector(const mat_t<4, 4, Type>& m,
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
-    const vec_t<Cols, Type>& adj_ret
+    const vec_t<Cols, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -3893,10 +4083,10 @@ inline CUDA_CALLABLE void adj_extract(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline void CUDA_CALLABLE adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     int col,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
     int adj_col,
     Type adj_ret
@@ -3925,11 +4115,11 @@ inline void CUDA_CALLABLE adj_extract(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    const mat_t<RowSliceLength, ColSliceLength, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    const mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_ret
 )
 {
     static_assert(
@@ -3961,13 +4151,13 @@ inline CUDA_CALLABLE void adj_extract(
 
 template <unsigned RowSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     int col,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
     int adj_col,
-    const vec_t<RowSliceLength, Type>& adj_ret
+    const vec_t<RowSliceLength, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -4002,13 +4192,13 @@ inline CUDA_CALLABLE void adj_extract(
 
 template <unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     int row,
     slice_t col_slice,
-    mat_t<Rows, Cols, Type>& adj_m,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
     int adj_row,
-    slice_t& adj_col_slice,
-    const vec_t<ColSliceLength, Type>& adj_ret
+    slice_t WP_THREAD& adj_col_slice,
+    const vec_t<ColSliceLength, Type> WP_THREAD& adj_ret
 )
 {
 #ifndef NDEBUG
@@ -4043,13 +4233,13 @@ inline CUDA_CALLABLE void adj_extract(
 
 template <unsigned RowSliceLength, unsigned ColSliceLength, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_extract(
-    const mat_t<Rows, Cols, Type>& m,
+    const mat_t<Rows, Cols, Type> WP_THREAD& m,
     slice_t row_slice,
     slice_t col_slice,
-    mat_t<Rows, Cols, Type>& adj_m,
-    slice_t& adj_row_slice,
-    slice_t& adj_col_slice,
-    const mat_t<RowSliceLength, ColSliceLength, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_m,
+    slice_t WP_THREAD& adj_row_slice,
+    slice_t WP_THREAD& adj_col_slice,
+    const mat_t<RowSliceLength, ColSliceLength, Type> WP_THREAD& adj_ret
 )
 {
     assert(row_slice.start >= 0 && row_slice.start <= (int)Rows);
@@ -4089,11 +4279,11 @@ inline CUDA_CALLABLE void adj_extract(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_outer(
-    const vec_t<Rows, Type>& a,
-    const vec_t<Cols, Type>& b,
-    vec_t<Rows, Type>& adj_a,
-    vec_t<Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const vec_t<Rows, Type> WP_THREAD& a,
+    const vec_t<Cols, Type> WP_THREAD& b,
+    vec_t<Rows, Type> WP_THREAD& adj_a,
+    vec_t<Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += mul(adj_ret, b);
@@ -4102,11 +4292,11 @@ inline CUDA_CALLABLE void adj_outer(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Rows, Cols, Type>& b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4120,10 +4310,10 @@ inline CUDA_CALLABLE void adj_add(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_add(
     Type a,
-    const mat_t<Rows, Cols, Type>& b,
-    Type& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    Type WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4136,11 +4326,11 @@ inline CUDA_CALLABLE void adj_add(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Rows, Cols, Type>& b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4154,10 +4344,10 @@ inline CUDA_CALLABLE void adj_sub(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_sub(
     Type a,
-    const mat_t<Rows, Cols, Type>& b,
-    Type& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    Type WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4170,11 +4360,11 @@ inline CUDA_CALLABLE void adj_sub(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_div(
-    const mat_t<Rows, Cols, Type>& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
     Type s,
-    mat_t<Rows, Cols, Type>& adj_a,
-    Type& adj_s,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_s,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_s -= tensordot(a, adj_ret) / (s * s);  // - a / s^2
@@ -4189,10 +4379,10 @@ inline CUDA_CALLABLE void adj_div(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_div(
     Type s,
-    const mat_t<Rows, Cols, Type>& a,
-    Type& adj_s,
-    mat_t<Rows, Cols, Type>& adj_a,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    Type WP_THREAD& adj_s,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4206,11 +4396,11 @@ inline CUDA_CALLABLE void adj_div(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_approx_div(
-    const mat_t<Rows, Cols, Type>& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
     Type s,
-    mat_t<Rows, Cols, Type>& adj_a,
-    Type& adj_s,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_s,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_s -= approx_div(tensordot(a, adj_ret), (s * s));
@@ -4225,10 +4415,10 @@ inline CUDA_CALLABLE void adj_approx_div(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_approx_div(
     Type s,
-    const mat_t<Rows, Cols, Type>& a,
-    Type& adj_s,
-    mat_t<Rows, Cols, Type>& adj_a,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    Type WP_THREAD& adj_s,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4242,11 +4432,11 @@ inline CUDA_CALLABLE void adj_approx_div(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mul(
-    const mat_t<Rows, Cols, Type>& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
     Type b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    Type& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4260,10 +4450,10 @@ inline CUDA_CALLABLE void adj_mul(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mul(
     Type b,
-    const mat_t<Rows, Cols, Type>& a,
-    Type& adj_b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    Type WP_THREAD& adj_b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_mul(a, b, adj_a, adj_b, adj_ret);
@@ -4273,8 +4463,8 @@ template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_ddot(
     mat_t<Rows, Cols, Type> a,
     mat_t<Rows, Cols, Type> b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
     const Type adj_ret
 )
 {
@@ -4284,11 +4474,11 @@ inline CUDA_CALLABLE void adj_ddot(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mul(
-    const mat_t<Rows, Cols, Type>& a,
-    const vec_t<Cols, Type>& b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    vec_t<Cols, Type>& adj_b,
-    const vec_t<Rows, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const vec_t<Cols, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    vec_t<Cols, Type> WP_THREAD& adj_b,
+    const vec_t<Rows, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += outer(adj_ret, b);
@@ -4297,11 +4487,11 @@ inline CUDA_CALLABLE void adj_mul(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mul(
-    const vec_t<Rows, Type>& b,
-    const mat_t<Rows, Cols, Type>& a,
-    vec_t<Rows, Type>& adj_b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    const vec_t<Cols, Type>& adj_ret
+    const vec_t<Rows, Type> WP_THREAD& b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    vec_t<Rows, Type> WP_THREAD& adj_b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    const vec_t<Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += outer(b, adj_ret);
@@ -4310,11 +4500,11 @@ inline CUDA_CALLABLE void adj_mul(
 
 template <unsigned Rows, unsigned Cols, unsigned ColsOut, typename Type>
 inline CUDA_CALLABLE void adj_mul(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Cols, ColsOut, Type>& b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Cols, ColsOut, Type>& adj_b,
-    const mat_t<Rows, ColsOut, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Cols, ColsOut, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Cols, ColsOut, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, ColsOut, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += mul(adj_ret, transpose(b));
@@ -4322,37 +4512,48 @@ inline CUDA_CALLABLE void adj_mul(
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-adj_transpose(const mat_t<Rows, Cols, Type>& a, mat_t<Rows, Cols, Type>& adj_a, const mat_t<Cols, Rows, Type>& adj_ret)
+inline CUDA_CALLABLE void adj_transpose(
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    const mat_t<Cols, Rows, Type> WP_THREAD& adj_ret
+)
 {
     adj_a += transpose(adj_ret);
 }
 
 template <unsigned Rows, typename Type>
-inline CUDA_CALLABLE void adj_trace(const mat_t<Rows, Rows, Type>& m, mat_t<Rows, Rows, Type>& adj_m, Type adj_ret)
+inline CUDA_CALLABLE void
+adj_trace(const mat_t<Rows, Rows, Type> WP_THREAD& m, mat_t<Rows, Rows, Type> WP_THREAD& adj_m, Type adj_ret)
 {
     for (unsigned i = 0; i < Rows; ++i)
         adj_m.data[i][i] += adj_ret;
 }
 
 template <unsigned Rows, typename Type>
-inline CUDA_CALLABLE void
-adj_diag(const vec_t<Rows, Type>& d, vec_t<Rows, Type>& adj_d, const mat_t<Rows, Rows, Type>& adj_ret)
+inline CUDA_CALLABLE void adj_diag(
+    const vec_t<Rows, Type> WP_THREAD& d,
+    vec_t<Rows, Type> WP_THREAD& adj_d,
+    const mat_t<Rows, Rows, Type> WP_THREAD& adj_ret
+)
 {
     for (unsigned i = 0; i < Rows; ++i)
         adj_d[i] += adj_ret.data[i][i];
 }
 
 template <unsigned Rows, typename Type>
-inline CUDA_CALLABLE void
-adj_get_diag(const mat_t<Rows, Rows, Type>& m, mat_t<Rows, Rows, Type>& adj_m, const vec_t<Rows, Type>& adj_ret)
+inline CUDA_CALLABLE void adj_get_diag(
+    const mat_t<Rows, Rows, Type> WP_THREAD& m,
+    mat_t<Rows, Rows, Type> WP_THREAD& adj_m,
+    const vec_t<Rows, Type> WP_THREAD& adj_ret
+)
 {
     for (unsigned i = 0; i < Rows; ++i)
         adj_m.data[i][i] += adj_ret[i];
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void adj_determinant(const mat_t<2, 2, Type>& m, mat_t<2, 2, Type>& adj_m, Type adj_ret)
+inline CUDA_CALLABLE void
+adj_determinant(const mat_t<2, 2, Type> WP_THREAD& m, mat_t<2, 2, Type> WP_THREAD& adj_m, Type adj_ret)
 {
     adj_m.data[0][0] += m.data[1][1] * adj_ret;
     adj_m.data[1][1] += m.data[0][0] * adj_ret;
@@ -4361,26 +4562,28 @@ inline CUDA_CALLABLE void adj_determinant(const mat_t<2, 2, Type>& m, mat_t<2, 2
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void adj_determinant(const mat_t<3, 3, Type>& m, mat_t<3, 3, Type>& adj_m, Type adj_ret)
+inline CUDA_CALLABLE void
+adj_determinant(const mat_t<3, 3, Type> WP_THREAD& m, mat_t<3, 3, Type> WP_THREAD& adj_m, Type adj_ret)
 {
-    (vec_t<3, Type>&)adj_m.data[0] += cross(m.get_row(1), m.get_row(2)) * adj_ret;
-    (vec_t<3, Type>&)adj_m.data[1] += cross(m.get_row(2), m.get_row(0)) * adj_ret;
-    (vec_t<3, Type>&)adj_m.data[2] += cross(m.get_row(0), m.get_row(1)) * adj_ret;
+    (vec_t<3, Type> WP_THREAD&)adj_m.data[0] += cross(m.get_row(1), m.get_row(2)) * adj_ret;
+    (vec_t<3, Type> WP_THREAD&)adj_m.data[1] += cross(m.get_row(2), m.get_row(0)) * adj_ret;
+    (vec_t<3, Type> WP_THREAD&)adj_m.data[2] += cross(m.get_row(0), m.get_row(1)) * adj_ret;
 }
 
 // Adapted from USD - see licenses/usd-LICENSE.txt
 // Copyright 2016 Pixar
 template <typename Type>
-inline CUDA_CALLABLE void adj_determinant(const mat_t<4, 4, Type>& m, mat_t<4, 4, Type>& adj_m, Type adj_ret)
+inline CUDA_CALLABLE void
+adj_determinant(const mat_t<4, 4, Type> WP_THREAD& m, mat_t<4, 4, Type> WP_THREAD& adj_m, Type adj_ret)
 {
     Type x00, x01, x02, x03;
     Type x10, x11, x12, x13;
     Type x20, x21, x22, x23;
     Type x30, x31, x32, x33;
-    double y01, y02, y03, y12, y13, y23;
+    wide_float y01, y02, y03, y12, y13, y23;
     Type z00, z10, z20, z30;
     Type z01, z11, z21, z31;
-    double z02, z03, z12, z13, z22, z23, z32, z33;
+    wide_float z02, z03, z12, z13, z22, z23, z32, z33;
 
     // Pickle 1st two columns of matrix into registers
     x00 = m.data[0][0];
@@ -4459,10 +4662,10 @@ inline CUDA_CALLABLE void adj_determinant(const mat_t<4, 4, Type>& m, mat_t<4, 4
 
 template <unsigned Rows, typename Type>
 inline CUDA_CALLABLE void adj_inverse(
-    const mat_t<Rows, Rows, Type>& m,
-    mat_t<Rows, Rows, Type>& ret,
-    mat_t<Rows, Rows, Type>& adj_m,
-    const mat_t<Rows, Rows, Type>& adj_ret
+    const mat_t<Rows, Rows, Type> WP_THREAD& m,
+    mat_t<Rows, Rows, Type> WP_THREAD& ret,
+    mat_t<Rows, Rows, Type> WP_THREAD& adj_m,
+    const mat_t<Rows, Rows, Type> WP_THREAD& adj_ret
 )
 {
     // todo: how to cache this from the forward pass?
@@ -4474,10 +4677,10 @@ inline CUDA_CALLABLE void adj_inverse(
 
 template <unsigned Rows, typename Type>
 inline CUDA_CALLABLE void adj_approx_inverse(
-    const mat_t<Rows, Rows, Type>& m,
-    mat_t<Rows, Rows, Type>& ret,
-    mat_t<Rows, Rows, Type>& adj_m,
-    const mat_t<Rows, Rows, Type>& adj_ret
+    const mat_t<Rows, Rows, Type> WP_THREAD& m,
+    mat_t<Rows, Rows, Type> WP_THREAD& ret,
+    mat_t<Rows, Rows, Type> WP_THREAD& adj_m,
+    const mat_t<Rows, Rows, Type> WP_THREAD& adj_ret
 )
 {
     // Adjoint of approx_inverse is the same as adj_inverse (no division in adjoint formula)
@@ -4486,11 +4689,11 @@ inline CUDA_CALLABLE void adj_approx_inverse(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_transform_point(
-    const mat_t<4, 4, Type>& m,
-    const vec_t<3, Type>& v,
-    mat_t<4, 4, Type>& adj_m,
-    vec_t<3, Type>& adj_v,
-    const vec_t<3, Type>& adj_ret
+    const mat_t<4, 4, Type> WP_THREAD& m,
+    const vec_t<3, Type> WP_THREAD& v,
+    mat_t<4, 4, Type> WP_THREAD& adj_m,
+    vec_t<3, Type> WP_THREAD& adj_v,
+    const vec_t<3, Type> WP_THREAD& adj_ret
 )
 {
     vec_t<4, Type> out = vec_t<4, Type>(v[0], v[1], v[2], 1.f);
@@ -4504,11 +4707,11 @@ inline CUDA_CALLABLE void adj_transform_point(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_transform_vector(
-    const mat_t<4, 4, Type>& m,
-    const vec_t<3, Type>& v,
-    mat_t<4, 4, Type>& adj_m,
-    vec_t<3, Type>& adj_v,
-    const vec_t<3, Type>& adj_ret
+    const mat_t<4, 4, Type> WP_THREAD& m,
+    const vec_t<3, Type> WP_THREAD& v,
+    mat_t<4, 4, Type> WP_THREAD& adj_m,
+    vec_t<3, Type> WP_THREAD& adj_v,
+    const vec_t<3, Type> WP_THREAD& adj_ret
 )
 {
     vec_t<4, Type> out = vec_t<4, Type>(v[0], v[1], v[2], 0.f);
@@ -4521,7 +4724,8 @@ inline CUDA_CALLABLE void adj_transform_vector(
 }
 
 template <typename Type>
-inline CUDA_CALLABLE void adj_skew(const vec_t<3, Type>& a, vec_t<3, Type>& adj_a, const mat_t<3, 3, Type>& adj_ret)
+inline CUDA_CALLABLE void
+adj_skew(const vec_t<3, Type> WP_THREAD& a, vec_t<3, Type> WP_THREAD& adj_a, const mat_t<3, 3, Type> WP_THREAD& adj_ret)
 {
     adj_a[0] += adj_ret.data[2][1] - adj_ret.data[1][2];
     adj_a[1] += adj_ret.data[0][2] - adj_ret.data[2][0];
@@ -4530,11 +4734,11 @@ inline CUDA_CALLABLE void adj_skew(const vec_t<3, Type>& a, vec_t<3, Type>& adj_
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_cw_mul(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Rows, Cols, Type>& b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += cw_mul(b, adj_ret);
@@ -4543,12 +4747,12 @@ inline CUDA_CALLABLE void adj_cw_mul(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_cw_div(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Rows, Cols, Type>& b,
-    mat_t<Rows, Cols, Type>& ret,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    mat_t<Rows, Cols, Type> WP_THREAD& ret,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += cw_div(adj_ret, b);
@@ -4560,11 +4764,11 @@ inline CUDA_CALLABLE void adj_cw_div(
 // The 6-arg adj_cw_div above is for mat/mat which needs ret for the gradient computation.
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_cw_div(
-    const mat_t<Rows, Cols, Type>& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
     Type b,
-    mat_t<Rows, Cols, Type>& adj_a,
-    Type& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    Type WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_div(a, b, adj_a, adj_b, adj_ret);
@@ -4573,10 +4777,10 @@ inline CUDA_CALLABLE void adj_cw_div(
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_cw_div(
     Type a,
-    const mat_t<Rows, Cols, Type>& b,
-    Type& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
+    Type WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_div(a, b, adj_a, adj_b, adj_ret);
@@ -4584,7 +4788,7 @@ inline CUDA_CALLABLE void adj_cw_div(
 
 // adjoint for the constant constructor:
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void adj_mat_t(Type s, Type& adj_s, const mat_t<Rows, Cols, Type>& adj_ret)
+inline CUDA_CALLABLE void adj_mat_t(Type s, Type WP_THREAD& adj_s, const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret)
 {
     for (unsigned i = 0; i < Rows; ++i) {
         for (unsigned j = 0; j < Cols; ++j) {
@@ -4596,9 +4800,9 @@ inline CUDA_CALLABLE void adj_mat_t(Type s, Type& adj_s, const mat_t<Rows, Cols,
 // adjoint for the casting constructor:
 template <unsigned Rows, unsigned Cols, typename Type, typename OtherType>
 inline CUDA_CALLABLE void adj_mat_t(
-    const mat_t<Rows, Cols, OtherType>& other,
-    mat_t<Rows, Cols, OtherType>& adj_other,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const mat_t<Rows, Cols, OtherType> WP_THREAD& other,
+    mat_t<Rows, Cols, OtherType> WP_THREAD& adj_other,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4611,9 +4815,9 @@ inline CUDA_CALLABLE void adj_mat_t(
 // adjoint for the initializer_array scalar constructor:
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mat_t(
-    const initializer_array<Rows * Cols, Type>& cmps,
-    const initializer_array<Rows * Cols, Type*>& adj_cmps,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const initializer_array<Rows * Cols, Type> WP_THREAD& cmps,
+    const initializer_array<Rows * Cols, Type WP_THREAD*> WP_THREAD& adj_cmps,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4629,11 +4833,11 @@ inline CUDA_CALLABLE void adj_mat_t(
     Type m01,
     Type m10,
     Type m11,
-    Type& adj_m00,
-    Type& adj_m01,
-    Type& adj_m10,
-    Type& adj_m11,
-    const mat_t<2, 2, Type>& adj_ret
+    Type WP_THREAD& adj_m00,
+    Type WP_THREAD& adj_m01,
+    Type WP_THREAD& adj_m10,
+    Type WP_THREAD& adj_m11,
+    const mat_t<2, 2, Type> WP_THREAD& adj_ret
 )
 {
     adj_m00 += adj_ret.data[0][0];
@@ -4653,16 +4857,16 @@ inline CUDA_CALLABLE void adj_mat_t(
     Type m20,
     Type m21,
     Type m22,
-    Type& a00,
-    Type& a01,
-    Type& a02,
-    Type& a10,
-    Type& a11,
-    Type& a12,
-    Type& a20,
-    Type& a21,
-    Type& a22,
-    const mat_t<3, 3, Type>& adj_ret
+    Type WP_THREAD& a00,
+    Type WP_THREAD& a01,
+    Type WP_THREAD& a02,
+    Type WP_THREAD& a10,
+    Type WP_THREAD& a11,
+    Type WP_THREAD& a12,
+    Type WP_THREAD& a20,
+    Type WP_THREAD& a21,
+    Type WP_THREAD& a22,
+    const mat_t<3, 3, Type> WP_THREAD& adj_ret
 )
 {
     a00 += adj_ret.data[0][0];
@@ -4695,23 +4899,23 @@ inline CUDA_CALLABLE void adj_mat_t(
     Type m31,
     Type m32,
     Type m33,
-    Type& a00,
-    Type& a01,
-    Type& a02,
-    Type& a03,
-    Type& a10,
-    Type& a11,
-    Type& a12,
-    Type& a13,
-    Type& a20,
-    Type& a21,
-    Type& a22,
-    Type& a23,
-    Type& a30,
-    Type& a31,
-    Type& a32,
-    Type& a33,
-    const mat_t<4, 4, Type>& adj_ret
+    Type WP_THREAD& a00,
+    Type WP_THREAD& a01,
+    Type WP_THREAD& a02,
+    Type WP_THREAD& a03,
+    Type WP_THREAD& a10,
+    Type WP_THREAD& a11,
+    Type WP_THREAD& a12,
+    Type WP_THREAD& a13,
+    Type WP_THREAD& a20,
+    Type WP_THREAD& a21,
+    Type WP_THREAD& a22,
+    Type WP_THREAD& a23,
+    Type WP_THREAD& a30,
+    Type WP_THREAD& a31,
+    Type WP_THREAD& a32,
+    Type WP_THREAD& a33,
+    const mat_t<4, 4, Type> WP_THREAD& adj_ret
 )
 {
     a00 += adj_ret.data[0][0];
@@ -4739,9 +4943,9 @@ inline CUDA_CALLABLE void adj_mat_t(
 // adjoint for the initializer_array vector constructor:
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_mat_t(
-    const initializer_array<Cols, vec_t<Rows, Type>>& cmps,
-    const initializer_array<Cols, vec_t<Rows, Type>*>& adj_cmps,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const initializer_array<Cols, vec_t<Rows, Type>> WP_THREAD& cmps,
+    const initializer_array<Cols, vec_t<Rows, Type> WP_THREAD*> WP_THREAD& adj_cmps,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned j = 0; j < Cols; ++j) {
@@ -4753,11 +4957,11 @@ inline CUDA_CALLABLE void adj_mat_t(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_mat_t(
-    const vec_t<2, Type>& cmps0,
-    const vec_t<2, Type>& cmps1,
-    vec_t<2, Type>& adj_cmps0,
-    vec_t<2, Type>& adj_cmps1,
-    const mat_t<2, 2, Type>& adj_ret
+    const vec_t<2, Type> WP_THREAD& cmps0,
+    const vec_t<2, Type> WP_THREAD& cmps1,
+    vec_t<2, Type> WP_THREAD& adj_cmps0,
+    vec_t<2, Type> WP_THREAD& adj_cmps1,
+    const mat_t<2, 2, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 2; ++i) {
@@ -4768,13 +4972,13 @@ inline CUDA_CALLABLE void adj_mat_t(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_mat_t(
-    const vec_t<3, Type>& cmps0,
-    const vec_t<3, Type>& cmps1,
-    const vec_t<3, Type>& cmps2,
-    vec_t<3, Type>& adj_cmps0,
-    vec_t<3, Type>& adj_cmps1,
-    vec_t<3, Type>& adj_cmps2,
-    const mat_t<3, 3, Type>& adj_ret
+    const vec_t<3, Type> WP_THREAD& cmps0,
+    const vec_t<3, Type> WP_THREAD& cmps1,
+    const vec_t<3, Type> WP_THREAD& cmps2,
+    vec_t<3, Type> WP_THREAD& adj_cmps0,
+    vec_t<3, Type> WP_THREAD& adj_cmps1,
+    vec_t<3, Type> WP_THREAD& adj_cmps2,
+    const mat_t<3, 3, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 3; ++i) {
@@ -4786,15 +4990,15 @@ inline CUDA_CALLABLE void adj_mat_t(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_mat_t(
-    const vec_t<4, Type>& cmps0,
-    const vec_t<4, Type>& cmps1,
-    const vec_t<4, Type>& cmps2,
-    const vec_t<4, Type>& cmps3,
-    vec_t<4, Type>& adj_cmps0,
-    vec_t<4, Type>& adj_cmps1,
-    vec_t<4, Type>& adj_cmps2,
-    vec_t<4, Type>& adj_cmps3,
-    const mat_t<4, 4, Type>& adj_ret
+    const vec_t<4, Type> WP_THREAD& cmps0,
+    const vec_t<4, Type> WP_THREAD& cmps1,
+    const vec_t<4, Type> WP_THREAD& cmps2,
+    const vec_t<4, Type> WP_THREAD& cmps3,
+    vec_t<4, Type> WP_THREAD& adj_cmps0,
+    vec_t<4, Type> WP_THREAD& adj_cmps1,
+    vec_t<4, Type> WP_THREAD& adj_cmps2,
+    vec_t<4, Type> WP_THREAD& adj_cmps3,
+    const mat_t<4, 4, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 4; ++i) {
@@ -4807,11 +5011,11 @@ inline CUDA_CALLABLE void adj_mat_t(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_cols(
-    const vec_t<2, Type>& c0,
-    const vec_t<2, Type>& c1,
-    vec_t<2, Type>& adj_c0,
-    vec_t<2, Type>& adj_c1,
-    const mat_t<2, 2, Type>& adj_ret
+    const vec_t<2, Type> WP_THREAD& c0,
+    const vec_t<2, Type> WP_THREAD& c1,
+    vec_t<2, Type> WP_THREAD& adj_c0,
+    vec_t<2, Type> WP_THREAD& adj_c1,
+    const mat_t<2, 2, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 2; ++i) {
@@ -4822,13 +5026,13 @@ inline CUDA_CALLABLE void adj_matrix_from_cols(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_cols(
-    const vec_t<3, Type>& c0,
-    const vec_t<3, Type>& c1,
-    const vec_t<3, Type>& c2,
-    vec_t<3, Type>& adj_c0,
-    vec_t<3, Type>& adj_c1,
-    vec_t<3, Type>& adj_c2,
-    const mat_t<3, 3, Type>& adj_ret
+    const vec_t<3, Type> WP_THREAD& c0,
+    const vec_t<3, Type> WP_THREAD& c1,
+    const vec_t<3, Type> WP_THREAD& c2,
+    vec_t<3, Type> WP_THREAD& adj_c0,
+    vec_t<3, Type> WP_THREAD& adj_c1,
+    vec_t<3, Type> WP_THREAD& adj_c2,
+    const mat_t<3, 3, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 3; ++i) {
@@ -4840,15 +5044,15 @@ inline CUDA_CALLABLE void adj_matrix_from_cols(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_cols(
-    const vec_t<4, Type>& c0,
-    const vec_t<4, Type>& c1,
-    const vec_t<4, Type>& c2,
-    const vec_t<4, Type>& c3,
-    vec_t<4, Type>& adj_c0,
-    vec_t<4, Type>& adj_c1,
-    vec_t<4, Type>& adj_c2,
-    vec_t<4, Type>& adj_c3,
-    const mat_t<4, 4, Type>& adj_ret
+    const vec_t<4, Type> WP_THREAD& c0,
+    const vec_t<4, Type> WP_THREAD& c1,
+    const vec_t<4, Type> WP_THREAD& c2,
+    const vec_t<4, Type> WP_THREAD& c3,
+    vec_t<4, Type> WP_THREAD& adj_c0,
+    vec_t<4, Type> WP_THREAD& adj_c1,
+    vec_t<4, Type> WP_THREAD& adj_c2,
+    vec_t<4, Type> WP_THREAD& adj_c3,
+    const mat_t<4, 4, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < 4; ++i) {
@@ -4861,9 +5065,9 @@ inline CUDA_CALLABLE void adj_matrix_from_cols(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_cols(
-    const initializer_array<Cols, vec_t<Rows, Type>>& l,
-    const initializer_array<Cols, vec_t<Rows, Type>*>& adj_l,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const initializer_array<Cols, vec_t<Rows, Type>> WP_THREAD& l,
+    const initializer_array<Cols, vec_t<Rows, Type> WP_THREAD*> WP_THREAD& adj_l,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned j = 0; j < Cols; ++j) {
@@ -4875,11 +5079,11 @@ inline CUDA_CALLABLE void adj_matrix_from_cols(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_rows(
-    const vec_t<2, Type>& r0,
-    const vec_t<2, Type>& r1,
-    vec_t<2, Type>& adj_r0,
-    vec_t<2, Type>& adj_r1,
-    const mat_t<2, 2, Type>& adj_ret
+    const vec_t<2, Type> WP_THREAD& r0,
+    const vec_t<2, Type> WP_THREAD& r1,
+    vec_t<2, Type> WP_THREAD& adj_r0,
+    vec_t<2, Type> WP_THREAD& adj_r1,
+    const mat_t<2, 2, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned j = 0; j < 2; ++j) {
@@ -4890,13 +5094,13 @@ inline CUDA_CALLABLE void adj_matrix_from_rows(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_rows(
-    const vec_t<3, Type>& c0,
-    const vec_t<3, Type>& c1,
-    const vec_t<3, Type>& c2,
-    vec_t<3, Type>& adj_c0,
-    vec_t<3, Type>& adj_c1,
-    vec_t<3, Type>& adj_c2,
-    const mat_t<3, 3, Type>& adj_ret
+    const vec_t<3, Type> WP_THREAD& c0,
+    const vec_t<3, Type> WP_THREAD& c1,
+    const vec_t<3, Type> WP_THREAD& c2,
+    vec_t<3, Type> WP_THREAD& adj_c0,
+    vec_t<3, Type> WP_THREAD& adj_c1,
+    vec_t<3, Type> WP_THREAD& adj_c2,
+    const mat_t<3, 3, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned j = 0; j < 3; ++j) {
@@ -4908,15 +5112,15 @@ inline CUDA_CALLABLE void adj_matrix_from_rows(
 
 template <typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_rows(
-    const vec_t<4, Type>& c0,
-    const vec_t<4, Type>& c1,
-    const vec_t<4, Type>& c2,
-    const vec_t<4, Type>& c3,
-    vec_t<4, Type>& adj_c0,
-    vec_t<4, Type>& adj_c1,
-    vec_t<4, Type>& adj_c2,
-    vec_t<4, Type>& adj_c3,
-    const mat_t<4, 4, Type>& adj_ret
+    const vec_t<4, Type> WP_THREAD& c0,
+    const vec_t<4, Type> WP_THREAD& c1,
+    const vec_t<4, Type> WP_THREAD& c2,
+    const vec_t<4, Type> WP_THREAD& c3,
+    vec_t<4, Type> WP_THREAD& adj_c0,
+    vec_t<4, Type> WP_THREAD& adj_c1,
+    vec_t<4, Type> WP_THREAD& adj_c2,
+    vec_t<4, Type> WP_THREAD& adj_c3,
+    const mat_t<4, 4, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned j = 0; j < 4; ++j) {
@@ -4929,9 +5133,9 @@ inline CUDA_CALLABLE void adj_matrix_from_rows(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_matrix_from_rows(
-    const initializer_array<Rows, vec_t<Cols, Type>>& l,
-    const initializer_array<Rows, vec_t<Cols, Type>*>& adj_l,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    const initializer_array<Rows, vec_t<Cols, Type>> WP_THREAD& l,
+    const initializer_array<Rows, vec_t<Cols, Type> WP_THREAD*> WP_THREAD& adj_l,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     for (unsigned i = 0; i < Rows; ++i) {
@@ -4943,20 +5147,20 @@ inline CUDA_CALLABLE void adj_matrix_from_rows(
 
 template <unsigned Rows, unsigned Cols, typename Type>
 CUDA_CALLABLE inline mat_t<Rows, Cols, Type>
-lerp(const mat_t<Rows, Cols, Type>& a, const mat_t<Rows, Cols, Type>& b, Type t)
+lerp(const mat_t<Rows, Cols, Type> WP_THREAD& a, const mat_t<Rows, Cols, Type> WP_THREAD& b, Type t)
 {
     return a * (Type(1) - t) + b * t;
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
 CUDA_CALLABLE inline void adj_lerp(
-    const mat_t<Rows, Cols, Type>& a,
-    const mat_t<Rows, Cols, Type>& b,
+    const mat_t<Rows, Cols, Type> WP_THREAD& a,
+    const mat_t<Rows, Cols, Type> WP_THREAD& b,
     Type t,
-    mat_t<Rows, Cols, Type>& adj_a,
-    mat_t<Rows, Cols, Type>& adj_b,
-    Type& adj_t,
-    const mat_t<Rows, Cols, Type>& adj_ret
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_a,
+    mat_t<Rows, Cols, Type> WP_THREAD& adj_b,
+    Type WP_THREAD& adj_t,
+    const mat_t<Rows, Cols, Type> WP_THREAD& adj_ret
 )
 {
     adj_a += adj_ret * (Type(1) - t);
@@ -4966,135 +5170,167 @@ CUDA_CALLABLE inline void adj_lerp(
 
 // for integral types we do not accumulate gradients
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, int8>* buf, const mat_t<Rows, Cols, int8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, int8> WP_DEVICE* buf, const mat_t<Rows, Cols, int8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, uint8>* buf, const mat_t<Rows, Cols, uint8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, uint8> WP_DEVICE* buf, const mat_t<Rows, Cols, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, int16>* buf, const mat_t<Rows, Cols, int16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, int16> WP_DEVICE* buf, const mat_t<Rows, Cols, int16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, uint16>* buf, const mat_t<Rows, Cols, uint16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, uint16> WP_DEVICE* buf, const mat_t<Rows, Cols, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, int32>* buf, const mat_t<Rows, Cols, int32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, int32> WP_DEVICE* buf, const mat_t<Rows, Cols, int32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, uint32>* buf, const mat_t<Rows, Cols, uint32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, uint32> WP_DEVICE* buf, const mat_t<Rows, Cols, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, int64>* buf, const mat_t<Rows, Cols, int64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, int64> WP_DEVICE* buf, const mat_t<Rows, Cols, int64> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_add(mat_t<Rows, Cols, uint64>* buf, const mat_t<Rows, Cols, uint64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_add(mat_t<Rows, Cols, uint64> WP_DEVICE* buf, const mat_t<Rows, Cols, uint64> WP_THREAD& value)
 {
 }
 
 // for bitwise operations we do not accumulate gradients
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, int8>* buf, const mat_t<Rows, Cols, int8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, int8> WP_DEVICE* buf, const mat_t<Rows, Cols, int8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, uint8>* buf, const mat_t<Rows, Cols, uint8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, uint8> WP_DEVICE* buf, const mat_t<Rows, Cols, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, int16>* buf, const mat_t<Rows, Cols, int16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, int16> WP_DEVICE* buf, const mat_t<Rows, Cols, int16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, uint16>* buf, const mat_t<Rows, Cols, uint16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, uint16> WP_DEVICE* buf, const mat_t<Rows, Cols, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, int32>* buf, const mat_t<Rows, Cols, int32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, int32> WP_DEVICE* buf, const mat_t<Rows, Cols, int32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, uint32>* buf, const mat_t<Rows, Cols, uint32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, uint32> WP_DEVICE* buf, const mat_t<Rows, Cols, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, int64>* buf, const mat_t<Rows, Cols, int64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, int64> WP_DEVICE* buf, const mat_t<Rows, Cols, int64> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_and(mat_t<Rows, Cols, uint64>* buf, const mat_t<Rows, Cols, uint64>& value)
-{
-}
-
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, int8>* buf, const mat_t<Rows, Cols, int8>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, uint8>* buf, const mat_t<Rows, Cols, uint8>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, int16>* buf, const mat_t<Rows, Cols, int16>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, uint16>* buf, const mat_t<Rows, Cols, uint16>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, int32>* buf, const mat_t<Rows, Cols, int32>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, uint32>* buf, const mat_t<Rows, Cols, uint32>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, int64>* buf, const mat_t<Rows, Cols, int64>& value)
-{
-}
-template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_or(mat_t<Rows, Cols, uint64>* buf, const mat_t<Rows, Cols, uint64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_and(mat_t<Rows, Cols, uint64> WP_DEVICE* buf, const mat_t<Rows, Cols, uint64> WP_THREAD& value)
 {
 }
 
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, int8>* buf, const mat_t<Rows, Cols, int8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, int8> WP_DEVICE* buf, const mat_t<Rows, Cols, int8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, uint8>* buf, const mat_t<Rows, Cols, uint8>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, uint8> WP_DEVICE* buf, const mat_t<Rows, Cols, uint8> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, int16>* buf, const mat_t<Rows, Cols, int16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, int16> WP_DEVICE* buf, const mat_t<Rows, Cols, int16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, uint16>* buf, const mat_t<Rows, Cols, uint16>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, uint16> WP_DEVICE* buf, const mat_t<Rows, Cols, uint16> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, int32>* buf, const mat_t<Rows, Cols, int32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, int32> WP_DEVICE* buf, const mat_t<Rows, Cols, int32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, uint32>* buf, const mat_t<Rows, Cols, uint32>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, uint32> WP_DEVICE* buf, const mat_t<Rows, Cols, uint32> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, int64>* buf, const mat_t<Rows, Cols, int64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, int64> WP_DEVICE* buf, const mat_t<Rows, Cols, int64> WP_THREAD& value)
 {
 }
 template <unsigned Rows, unsigned Cols>
-CUDA_CALLABLE inline void adj_atomic_xor(mat_t<Rows, Cols, uint64>* buf, const mat_t<Rows, Cols, uint64>& value)
+CUDA_CALLABLE inline void
+adj_atomic_or(mat_t<Rows, Cols, uint64> WP_DEVICE* buf, const mat_t<Rows, Cols, uint64> WP_THREAD& value)
+{
+}
+
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, int8> WP_DEVICE* buf, const mat_t<Rows, Cols, int8> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, uint8> WP_DEVICE* buf, const mat_t<Rows, Cols, uint8> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, int16> WP_DEVICE* buf, const mat_t<Rows, Cols, int16> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, uint16> WP_DEVICE* buf, const mat_t<Rows, Cols, uint16> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, int32> WP_DEVICE* buf, const mat_t<Rows, Cols, int32> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, uint32> WP_DEVICE* buf, const mat_t<Rows, Cols, uint32> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, int64> WP_DEVICE* buf, const mat_t<Rows, Cols, int64> WP_THREAD& value)
+{
+}
+template <unsigned Rows, unsigned Cols>
+CUDA_CALLABLE inline void
+adj_atomic_xor(mat_t<Rows, Cols, uint64> WP_DEVICE* buf, const mat_t<Rows, Cols, uint64> WP_THREAD& value)
 {
 }
 
@@ -5110,11 +5346,14 @@ using mat22f = mat_t<2, 2, float>;
 using mat33f = mat_t<3, 3, float>;
 using mat44f = mat_t<4, 4, float>;
 
+#if !defined(WP_NO_FLOAT64)
 using mat22d = mat_t<2, 2, double>;
 using mat33d = mat_t<3, 3, double>;
 using mat44d = mat_t<4, 4, double>;
+#endif  // !WP_NO_FLOAT64
 
-inline CUDA_CALLABLE void adj_mat22(vec2 c0, vec2 c1, vec2& a0, vec2& a1, const mat22& adj_ret)
+inline CUDA_CALLABLE void
+adj_mat22(vec2 c0, vec2 c1, vec2 WP_THREAD& a0, vec2 WP_THREAD& a1, const mat22 WP_THREAD& adj_ret)
 {
     a0 += adj_ret.get_col(0);
     a1 += adj_ret.get_col(1);
@@ -5125,11 +5364,11 @@ inline CUDA_CALLABLE void adj_mat22(
     float m01,
     float m10,
     float m11,
-    float& adj_m00,
-    float& adj_m01,
-    float& adj_m10,
-    float& adj_m11,
-    const mat22& adj_ret
+    float WP_THREAD& adj_m00,
+    float WP_THREAD& adj_m01,
+    float WP_THREAD& adj_m10,
+    float WP_THREAD& adj_m11,
+    const mat22 WP_THREAD& adj_ret
 )
 {
     adj_m00 += adj_ret.data[0][0];
@@ -5138,7 +5377,15 @@ inline CUDA_CALLABLE void adj_mat22(
     adj_m11 += adj_ret.data[1][1];
 }
 
-inline CUDA_CALLABLE void adj_mat33(vec3 c0, vec3 c1, vec3 c2, vec3& a0, vec3& a1, vec3& a2, const mat33& adj_ret)
+inline CUDA_CALLABLE void adj_mat33(
+    vec3 c0,
+    vec3 c1,
+    vec3 c2,
+    vec3 WP_THREAD& a0,
+    vec3 WP_THREAD& a1,
+    vec3 WP_THREAD& a2,
+    const mat33 WP_THREAD& adj_ret
+)
 {
     // column constructor
     a0 += adj_ret.get_col(0);
@@ -5156,16 +5403,16 @@ inline CUDA_CALLABLE void adj_mat33(
     float m20,
     float m21,
     float m22,
-    float& a00,
-    float& a01,
-    float& a02,
-    float& a10,
-    float& a11,
-    float& a12,
-    float& a20,
-    float& a21,
-    float& a22,
-    const mat33& adj_ret
+    float WP_THREAD& a00,
+    float WP_THREAD& a01,
+    float WP_THREAD& a02,
+    float WP_THREAD& a10,
+    float WP_THREAD& a11,
+    float WP_THREAD& a12,
+    float WP_THREAD& a20,
+    float WP_THREAD& a21,
+    float WP_THREAD& a22,
+    const mat33 WP_THREAD& adj_ret
 )
 {
     a00 += adj_ret.data[0][0];
@@ -5179,8 +5426,17 @@ inline CUDA_CALLABLE void adj_mat33(
     a22 += adj_ret.data[2][2];
 }
 
-inline CUDA_CALLABLE void
-adj_mat44(vec4 c0, vec4 c1, vec4 c2, vec4 c3, vec4& a0, vec4& a1, vec4& a2, vec4& a3, const mat44& adj_ret)
+inline CUDA_CALLABLE void adj_mat44(
+    vec4 c0,
+    vec4 c1,
+    vec4 c2,
+    vec4 c3,
+    vec4 WP_THREAD& a0,
+    vec4 WP_THREAD& a1,
+    vec4 WP_THREAD& a2,
+    vec4 WP_THREAD& a3,
+    const mat44 WP_THREAD& adj_ret
+)
 {
     // column constructor
     a0 += adj_ret.get_col(0);
@@ -5206,23 +5462,23 @@ inline CUDA_CALLABLE void adj_mat44(
     float m31,
     float m32,
     float m33,
-    float& a00,
-    float& a01,
-    float& a02,
-    float& a03,
-    float& a10,
-    float& a11,
-    float& a12,
-    float& a13,
-    float& a20,
-    float& a21,
-    float& a22,
-    float& a23,
-    float& a30,
-    float& a31,
-    float& a32,
-    float& a33,
-    const mat44& adj_ret
+    float WP_THREAD& a00,
+    float WP_THREAD& a01,
+    float WP_THREAD& a02,
+    float WP_THREAD& a03,
+    float WP_THREAD& a10,
+    float WP_THREAD& a11,
+    float WP_THREAD& a12,
+    float WP_THREAD& a13,
+    float WP_THREAD& a20,
+    float WP_THREAD& a21,
+    float WP_THREAD& a22,
+    float WP_THREAD& a23,
+    float WP_THREAD& a30,
+    float WP_THREAD& a31,
+    float WP_THREAD& a32,
+    float WP_THREAD& a33,
+    const mat44 WP_THREAD& adj_ret
 )
 {
     a00 += adj_ret.data[0][0];
@@ -5246,14 +5502,18 @@ inline CUDA_CALLABLE void adj_mat44(
     a33 += adj_ret.data[3][3];
 }
 
-template <unsigned Rows, unsigned Cols, typename Type> CUDA_CALLABLE inline int len(const mat_t<Rows, Cols, Type>& x)
+template <unsigned Rows, unsigned Cols, typename Type>
+CUDA_CALLABLE inline int len(const mat_t<Rows, Cols, Type> WP_THREAD& x)
 {
     return Rows;
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void
-expect_near(const mat_t<Rows, Cols, Type>& actual, const mat_t<Rows, Cols, Type>& expected, const Type& tolerance)
+inline CUDA_CALLABLE void expect_near(
+    const mat_t<Rows, Cols, Type> WP_THREAD& actual,
+    const mat_t<Rows, Cols, Type> WP_THREAD& expected,
+    const Type WP_THREAD& tolerance
+)
 {
     Type diff(0);
     for (unsigned i = 0; i < Rows; ++i) {

@@ -176,6 +176,7 @@ warp/examples/tile
 
     user_guide/installation
     user_guide/compatibility
+    user_guide/metal
     user_guide/basics
     user_guide/runtime
     user_guide/differentiability
