@@ -384,8 +384,12 @@ template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_bloc
     // On CPU, bvh_query_thread_block_t is aliased to bvh_query_t and is shared by the AABB
     // and ray tiled entry points, so dispatch on the query's stored kind.
     int index = -1;
-    bvh_query_next_dynamic(query, index, FLT_MAX);
-    query.last_query_valid = (index >= 0);
+    // Use the iterator's return value rather than the index it leaves behind: on the 1.17 port Apple's GPU
+    // compiler dropped the index written through the inlined call when the result was ignored.
+    const bool found = bvh_query_next_dynamic(query, index, FLT_MAX);
+    if (!found)
+        index = -1;
+    query.last_query_valid = found;
 
     // Create a tile with the index in the first element, -1 in all others
     // This simulates a single-threaded execution where only thread 0 has work
