@@ -11,11 +11,12 @@
 > **This is a fork of [NVIDIA Warp](https://github.com/NVIDIA/warp) that adds a Metal backend for Apple Silicon GPUs.**
 > It is not affiliated with or endorsed by NVIDIA.
 >
-> - **To use Warp on a Mac GPU**, do not install this fork. Install the [`warp-metal`](https://github.com/DavidDobas/warp-metal)
+> - **To use Warp on a Mac GPU**, do not install this fork. Install the [`warp-metal`](https://github.com/innate-inc/warp-metal)
 >   package next to the official `warp-lang`. It adds the `metal:0` device and is generated from this repository.
-> - **This repository** is where the backend is developed, built and tested, on the branch
->   [`daviddobas/metal-backend`](https://github.com/DavidDobas/warp/tree/daviddobas/metal-backend). It follows
->   NVIDIA's `main` branch, and everything outside the Metal backend is unchanged.
+> - **This repository** is where the backend is developed, built and tested. Its `main` branch follows
+>   NVIDIA's `main` branch, and everything outside the Metal backend is unchanged. Releases for a stable Warp
+>   version are built from a branch on NVIDIA's release tag
+>   ([`release-1.17`](https://github.com/innate-inc/warp/tree/release-1.17) for Warp 1.17.0).
 > - What works, what does not, and how memory is shared with NumPy and PyTorch is described in
 >   [Apple GPUs (Metal)](docs/user_guide/metal.rst).
 
