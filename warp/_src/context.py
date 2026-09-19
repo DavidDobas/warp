@@ -11896,8 +11896,6 @@ def launch(
     else:
         device = runtime.get_device(device)
 
-    block_dim = _resolve_launch_block_dim(device, block_dim)
-
     # check function is a Kernel
     if not isinstance(kernel, Kernel):
         raise RuntimeError("Error launching kernel, can only launch functions decorated with @wp.kernel.")
@@ -11911,6 +11909,9 @@ def launch(
             f"Kernel '{kernel.key}' uses entry_point_abi='{kernel.options['entry_point_abi']}' "
             "and cannot be launched with wp.launch()."
         )
+
+    # after the kernel checks, as in 1.17.0, where they do not depend on the device
+    block_dim = _resolve_launch_block_dim(device, block_dim)
 
     dim, total_dim_size = _normalize_launch_dim(dim)
 

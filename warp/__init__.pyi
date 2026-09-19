@@ -2598,10 +2598,23 @@ def tile_full(shape: int32, value: Any, dtype: Any, storage: str) -> Tile[Any, t
 def tile_from_thread(shape: tuple[int, ...], value: Any, thread_idx: int32, storage: str) -> Tile[Any, tuple[int, ...]]:
     """Allocate a tile filled with a value from a specific thread.
 
-    This function broadcasts a value from one thread to all threads in the block,
-    then creates a tile filled with that broadcast value. This is useful for
-    efficiently sharing a computed result (e.g., from an atomic operation) with
-    all threads in a block using minimal shared memory (only 1 element).
+    This function broadcasts one thread's value to all threads in the block, then
+    creates a tile filled with that broadcast value. It is useful for sharing a
+    computed result (e.g. from an atomic operation) with the whole block. Every thread
+    in the block must call this function.
+
+    ``thread_idx`` is block-local: each block broadcasts from its own lane
+    ``thread_idx``, and it must satisfy ``0 <= thread_idx < wp.block_dim()``. The
+    resulting tile's data type is the type of ``value``.
+
+    On CPU the effective block width is ``1`` unless
+    ``wp.config.enable_cpu_blocks`` is enabled. When enabled, the requested block
+    width is honored and this function broadcasts from the selected CPU lane.
+
+    On a partial CPU block, ``thread_idx`` must identify an active lane. If the
+    selected lane is inactive, no producer executes and the result is undefined.
+    See :ref:`CPU Tile Semantics <cpu_tile_semantics>` for definitions of partial
+    CPU blocks and active lanes.
 
     Args:
         shape: Shape of the output tile
@@ -2662,7 +2675,16 @@ def tile_from_thread(shape: tuple[int, ...], value: Any, thread_idx: int32, stor
 
 @over
 def tile_from_thread(shape: int32, value: Any, thread_idx: int32, storage: str) -> Tile[Any, tuple[int, ...]]:
-    """Allocate a tile filled with a value from a specific thread."""
+    """Allocate a tile filled with a value from a specific thread.
+
+    Overload for 1D tiles: ``shape`` is the number of elements, equivalent to passing
+    ``(shape,)``. See the overload taking a tuple-valued ``shape`` argument for usage
+    details and an example.
+
+    On a partial CPU block, ``thread_idx`` must identify an active lane. If the
+    selected lane is inactive, no producer executes and the result is undefined.
+    See :ref:`CPU Tile Semantics <cpu_tile_semantics>` for definitions of partial
+    CPU blocks and active lanes."""
     ...
 
 @over
@@ -3958,6 +3980,12 @@ def tile_reduce(op: Callable, a: Tile[Scalar, tuple[int, ...]], axis: int32) -> 
 
     Returns:
         A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
+
+    On a partial CPU block, a slice with no active values returns the operation's identity for
+    ``wp.add``, ``wp.mul``, ``wp.min``, and ``wp.max``. Other operators have no declared
+    identity, so an empty slice triggers an assertion instead of returning an arbitrary value.
+    See :ref:`CPU Tile Semantics <cpu_tile_semantics>` for definitions of partial
+    CPU blocks and active lanes.
 
     Example:
 
