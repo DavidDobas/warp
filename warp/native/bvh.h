@@ -36,7 +36,8 @@ template <typename T> CUDA_CALLABLE inline T std_min(T a, T b) { return (b < a) 
 template <typename T> CUDA_CALLABLE inline T std_max(T a, T b) { return (b > a) ? b : a; }
 
 template <unsigned Length, typename Type>
-CUDA_CALLABLE inline vec_t<Length, Type> std_min(const vec_t<Length, Type>& a, const vec_t<Length, Type>& b)
+CUDA_CALLABLE inline vec_t<Length, Type>
+std_min(const vec_t<Length, Type> WP_THREAD& a, const vec_t<Length, Type> WP_THREAD& b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
@@ -46,7 +47,8 @@ CUDA_CALLABLE inline vec_t<Length, Type> std_min(const vec_t<Length, Type>& a, c
 }
 
 template <unsigned Length, typename Type>
-CUDA_CALLABLE inline vec_t<Length, Type> std_max(const vec_t<Length, Type>& a, const vec_t<Length, Type>& b)
+CUDA_CALLABLE inline vec_t<Length, Type>
+std_max(const vec_t<Length, Type> WP_THREAD& a, const vec_t<Length, Type> WP_THREAD& b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
@@ -62,7 +64,7 @@ struct bounds3 {
     {
     }
 
-    CUDA_CALLABLE inline bounds3(const vec3& lower, const vec3& upper)
+    CUDA_CALLABLE inline bounds3(const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
         : lower(lower)
         , upper(upper)
     {
@@ -77,7 +79,7 @@ struct bounds3 {
         upper += vec3(r);
     }
 
-    CUDA_CALLABLE inline void expand(const vec3& r)
+    CUDA_CALLABLE inline void expand(const vec3 WP_THREAD& r)
     {
         lower -= r;
         upper += r;
@@ -88,7 +90,7 @@ struct bounds3 {
         return lower[0] >= upper[0] || lower[1] >= upper[1] || lower[2] >= upper[2];
     }
 
-    CUDA_CALLABLE inline bool overlaps(const vec3& p) const
+    CUDA_CALLABLE inline bool overlaps(const vec3 WP_THREAD& p) const
     {
         if (p[0] < lower[0] || p[1] < lower[1] || p[2] < lower[2] || p[0] > upper[0] || p[1] > upper[1]
             || p[2] > upper[2]) {
@@ -98,7 +100,7 @@ struct bounds3 {
         }
     }
 
-    CUDA_CALLABLE inline bool overlaps(const bounds3& b) const
+    CUDA_CALLABLE inline bool overlaps(const bounds3 WP_THREAD& b) const
     {
         if (lower[0] > b.upper[0] || lower[1] > b.upper[1] || lower[2] > b.upper[2] || upper[0] < b.lower[0]
             || upper[1] < b.lower[1] || upper[2] < b.lower[2]) {
@@ -108,7 +110,7 @@ struct bounds3 {
         }
     }
 
-    CUDA_CALLABLE inline bool overlaps(const vec3& b_lower, const vec3& b_upper) const
+    CUDA_CALLABLE inline bool overlaps(const vec3 WP_THREAD& b_lower, const vec3 WP_THREAD& b_upper) const
     {
         if (lower[0] > b_upper[0] || lower[1] > b_upper[1] || lower[2] > b_upper[2] || upper[0] < b_lower[0]
             || upper[1] < b_lower[1] || upper[2] < b_lower[2]) {
@@ -118,13 +120,13 @@ struct bounds3 {
         }
     }
 
-    CUDA_CALLABLE inline void add_point(const vec3& p)
+    CUDA_CALLABLE inline void add_point(const vec3 WP_THREAD& p)
     {
         lower = std_min(lower, p);
         upper = std_max(upper, p);
     }
 
-    CUDA_CALLABLE inline void add_bounds(const vec3& lower_other, const vec3& upper_other)
+    CUDA_CALLABLE inline void add_bounds(const vec3 WP_THREAD& lower_other, const vec3 WP_THREAD& upper_other)
     {
         // lower_other will only impact the lower of the new bounds
         // upper_other will only impact the upper of the new bounds
@@ -143,17 +145,17 @@ struct bounds3 {
     vec3 upper;
 };
 
-CUDA_CALLABLE inline bounds3 bounds_union(const bounds3& a, const vec3& b)
+CUDA_CALLABLE inline bounds3 bounds_union(const bounds3 WP_THREAD& a, const vec3 WP_THREAD& b)
 {
     return bounds3(std_min(a.lower, b), std_max(a.upper, b));
 }
 
-CUDA_CALLABLE inline bounds3 bounds_union(const bounds3& a, const bounds3& b)
+CUDA_CALLABLE inline bounds3 bounds_union(const bounds3 WP_THREAD& a, const bounds3 WP_THREAD& b)
 {
     return bounds3(std_min(a.lower, b.lower), std_max(a.upper, b.upper));
 }
 
-CUDA_CALLABLE inline bounds3 bounds_intersection(const bounds3& a, const bounds3& b)
+CUDA_CALLABLE inline bounds3 bounds_intersection(const bounds3 WP_THREAD& a, const bounds3 WP_THREAD& b)
 {
     return bounds3(std_max(a.lower, b.lower), std_min(a.upper, b.upper));
 }
@@ -174,14 +176,14 @@ struct BVHPackedNodeHalf {
 };
 
 struct BVH {
-    BVHPackedNodeHalf* node_lowers;
-    BVHPackedNodeHalf* node_uppers;
+    BVHPackedNodeHalf WP_DEVICE* node_lowers;
+    BVHPackedNodeHalf WP_DEVICE* node_uppers;
 
     // used for fast refits
-    int* node_parents;
-    int* node_counts;
+    int WP_DEVICE* node_parents;
+    int WP_DEVICE* node_counts;
     // reordered primitive indices corresponds to the ordering of leaf nodes
-    int* primitive_indices;
+    int WP_DEVICE* primitive_indices;
 
     int max_depth;
     int max_nodes;
@@ -192,22 +194,22 @@ struct BVH {
     // pointer (CPU or GPU) to a single integer index in node_lowers, node_uppers
     // representing the root of the tree, this is not always the first node
     // for bottom-up builders
-    int* root;
+    int WP_DEVICE* root;
 
     // item bounds are not owned by the BVH but by the caller
-    vec3* item_lowers;
-    vec3* item_uppers;
-    int* item_groups;
+    vec3 WP_DEVICE* item_lowers;
+    vec3 WP_DEVICE* item_uppers;
+    int WP_DEVICE* item_groups;
     int num_items;
     int leaf_size;
     int constructor_type;
 
     // cuda context
-    void* context;
+    void WP_DEVICE* context;
 };
 
 
-CUDA_CALLABLE inline BVHPackedNodeHalf make_node(const vec3& bound, int child, bool leaf)
+CUDA_CALLABLE inline BVHPackedNodeHalf make_node(const vec3 WP_THREAD& bound, int child, bool leaf)
 {
     BVHPackedNodeHalf n;
     n.x = bound[0];
@@ -220,7 +222,8 @@ CUDA_CALLABLE inline BVHPackedNodeHalf make_node(const vec3& bound, int child, b
 }
 
 // variation of make_node through volatile pointers used in build_hierarchy
-CUDA_CALLABLE inline void make_node(volatile BVHPackedNodeHalf* n, const vec3& bound, int child, bool leaf)
+CUDA_CALLABLE inline void
+make_node(volatile BVHPackedNodeHalf WP_THREAD* n, const vec3 WP_THREAD& bound, int child, bool leaf)
 {
     n->x = bound[0];
     n->y = bound[1];
@@ -241,7 +244,14 @@ __device__ inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHal
 #endif  // USE_LOAD4
 }
 #else
-inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf* nodes, int index) { return nodes[index]; }
+inline wp::BVHPackedNodeHalf bvh_load_node(const wp::BVHPackedNodeHalf WP_DEVICE* nodes, int index)
+{
+    return nodes[index];
+}
+
+inline int bvh_load_int(const int WP_DEVICE* data, int index) { return data[index]; }
+
+inline vec3 bvh_load_vec3(const vec3 WP_DEVICE* data, int index) { return data[index]; }
 #endif  // __CUDACC__
 
 CUDA_CALLABLE inline int clz(int x)
@@ -276,7 +286,7 @@ template <int dim> CUDA_CALLABLE inline uint32_t morton3(float x, float y, float
 
 // making the class accessible from python
 
-CUDA_CALLABLE inline BVH bvh_get(uint64_t id) { return *(BVH*)(id); }
+CUDA_CALLABLE inline BVH bvh_get(uint64_t id) { return *(BVH WP_DEVICE*)(id); }
 
 CUDA_CALLABLE inline int bvh_get_num_bounds(uint64_t id)
 {
@@ -284,14 +294,14 @@ CUDA_CALLABLE inline int bvh_get_num_bounds(uint64_t id)
     return bvh.num_items;
 }
 
-CUDA_CALLABLE inline int get_leaf_group(const BVH& bvh, int leaf)
+CUDA_CALLABLE inline int get_leaf_group(const BVH WP_THREAD& bvh, int leaf)
 {
     if (!bvh.item_groups)
         return 0;
     return bvh.item_groups[bvh.primitive_indices[bvh.node_lowers[leaf].i]];
 }
 
-CUDA_CALLABLE inline int lower_bound_group(const BVH& bvh, int group)
+CUDA_CALLABLE inline int lower_bound_group(const BVH WP_THREAD& bvh, int group)
 {
     int lo = 0;
     int hi = bvh.num_leaf_nodes;
@@ -311,7 +321,7 @@ CUDA_CALLABLE inline int lower_bound_group(const BVH& bvh, int group)
     return lo;
 }
 
-CUDA_CALLABLE inline int upper_bound_group(const BVH& bvh, int group)
+CUDA_CALLABLE inline int upper_bound_group(const BVH WP_THREAD& bvh, int group)
 {
     int lo = 0;
     int hi = bvh.num_leaf_nodes;
@@ -328,12 +338,13 @@ CUDA_CALLABLE inline int upper_bound_group(const BVH& bvh, int group)
     return lo;
 }
 
-CUDA_CALLABLE inline uint64_t bvh_query_node_pack(const BVHPackedNodeHalf& lower, const BVHPackedNodeHalf& upper)
+CUDA_CALLABLE inline uint64_t
+bvh_query_node_pack(const BVHPackedNodeHalf WP_THREAD& lower, const BVHPackedNodeHalf WP_THREAD& upper)
 {
     return (uint64_t(lower.b) << 62) | (uint64_t(upper.i) << 31) | uint64_t(lower.i);
 }
 
-CUDA_CALLABLE inline uint64_t bvh_query_node_load(const BVH& bvh, int node_index)
+CUDA_CALLABLE inline uint64_t bvh_query_node_load(const BVH WP_THREAD& bvh, int node_index)
 {
     const BVHPackedNodeHalf lower = bvh_load_node(bvh.node_lowers, node_index);
     const BVHPackedNodeHalf upper = bvh_load_node(bvh.node_uppers, node_index);
@@ -346,7 +357,7 @@ CUDA_CALLABLE inline int bvh_query_node_lower_payload(uint64_t node) { return in
 
 CUDA_CALLABLE inline int bvh_query_node_upper_payload(uint64_t node) { return int((node >> 31) & 0x7fffffffu); }
 
-CUDA_CALLABLE inline int lca(int node_a, int node_b, const int* parent)
+CUDA_CALLABLE inline int lca(int node_a, int node_b, const int WP_DEVICE* parent)
 {
     int da = 0, db = 0;
     for (int t = node_a; t != -1; t = parent[t])
@@ -394,9 +405,9 @@ CUDA_CALLABLE inline int bvh_get_group_root(uint64_t id, int group_id)
 // across the block
 struct bvh_stack_t {
     CUDA_CALLABLE inline int operator[](int depth) const { return ptr[depth * WP_TILE_BLOCK_DIM]; }
-    CUDA_CALLABLE inline int& operator[](int depth) { return ptr[depth * WP_TILE_BLOCK_DIM]; }
+    CUDA_CALLABLE inline int WP_THREAD& operator[](int depth) { return ptr[depth * WP_TILE_BLOCK_DIM]; }
 
-    int* ptr;
+    int WP_THREAD* ptr;
 };
 
 // Query kind, used two ways: as the compile-time tag instantiating bvh_query_test and
@@ -424,7 +435,7 @@ struct bvh_query_t {
     }
 
     // Required for adjoint computations.
-    CUDA_CALLABLE inline bvh_query_t& operator+=(const bvh_query_t& other) { return *this; }
+    CUDA_CALLABLE inline bvh_query_t WP_THREAD& operator+=(const bvh_query_t WP_THREAD& other) { return *this; }
 
     BVH bvh;
 
@@ -463,8 +474,12 @@ struct bvh_query_t {
 // The ray variants also apply the max_dist predicate (closed endpoint for capsules,
 // half-open for plain rays, matching the original behavior of each).
 template <BvhQueryKind QUERY_KIND>
-CUDA_CALLABLE inline bool
-bvh_query_test(const bvh_query_t& query, const vec3& node_lower, const vec3& node_upper, const float& max_dist)
+CUDA_CALLABLE inline bool bvh_query_test(
+    const bvh_query_t WP_THREAD& query,
+    const vec3 WP_THREAD& node_lower,
+    const vec3 WP_THREAD& node_upper,
+    const float WP_THREAD& max_dist
+)
 {
     if constexpr (QUERY_KIND == BvhQueryKind::SPHERE) {
         // exact sphere-AABB node test using pre-computed radius_sq
@@ -491,7 +506,8 @@ bvh_query_test(const bvh_query_t& query, const vec3& node_lower, const vec3& nod
 }
 
 
-CUDA_CALLABLE inline bvh_query_t bvh_query(uint64_t id, const vec3& lower, const vec3& upper, int root)
+CUDA_CALLABLE inline bvh_query_t
+bvh_query(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper, int root)
 {
     // initialize empty
     bvh_query_t query;
@@ -517,12 +533,14 @@ CUDA_CALLABLE inline bvh_query_t bvh_query(uint64_t id, const vec3& lower, const
     return query;
 }
 
-CUDA_CALLABLE inline bvh_query_t bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper, int root)
+CUDA_CALLABLE inline bvh_query_t
+bvh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper, int root)
 {
     return bvh_query(id, lower, upper, root);
 }
 
-CUDA_CALLABLE inline bvh_query_t bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir, int root)
+CUDA_CALLABLE inline bvh_query_t
+bvh_query_ray(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, int root)
 {
     bvh_query_t query = bvh_query(id, start, 1.0f / dir, root);
     query.kind = BvhQueryKind::RAY;
@@ -530,7 +548,7 @@ CUDA_CALLABLE inline bvh_query_t bvh_query_ray(uint64_t id, const vec3& start, c
 }
 
 CUDA_CALLABLE inline bvh_query_t
-bvh_query_capsule(uint64_t id, const vec3& start, const vec3& dir, float radius, int root)
+bvh_query_capsule(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir, float radius, int root)
 {
     bvh_query_t query = bvh_query(id, start, 1.0f / dir, root);
     query.kind = BvhQueryKind::CAPSULE;
@@ -541,7 +559,7 @@ bvh_query_capsule(uint64_t id, const vec3& start, const vec3& dir, float radius,
 
 // Sphere query: returns all bounds within `radius` of `center` using an exact sphere-AABB
 // node test. Reuses the shared bvh_query_next() iterator.
-CUDA_CALLABLE inline bvh_query_t bvh_query_sphere(uint64_t id, const vec3& center, float radius, int root)
+CUDA_CALLABLE inline bvh_query_t bvh_query_sphere(uint64_t id, const vec3 WP_THREAD& center, float radius, int root)
 {
     bvh_query_t query = bvh_query(id, center, center, root);
     query.kind = BvhQueryKind::SPHERE;
@@ -554,7 +572,8 @@ CUDA_CALLABLE inline bvh_query_t bvh_query_sphere(uint64_t id, const vec3& cente
 // query type. Each instantiation compiles to a dispatch-free loop (bvh_query_test folds
 // the query-kind branches at compile time), matching the original per-kind behavior.
 template <BvhQueryKind QUERY_KIND>
-CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_next_impl(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     BVH bvh = query.bvh;
 
@@ -567,7 +586,8 @@ CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, co
 
         if (query.primitive_counter == 0) {
             if (!bvh_query_test<QUERY_KIND>(
-                    query, reinterpret_cast<vec3&>(node_lower), reinterpret_cast<vec3&>(node_upper), max_dist
+                    query, reinterpret_cast<vec3 WP_THREAD&>(node_lower), reinterpret_cast<vec3 WP_THREAD&>(node_upper),
+                    max_dist
                 )) {
                 continue;
             }
@@ -598,9 +618,10 @@ CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, co
                 else {
                     query.stack[query.count++] = node_index;
                 }
-                if (!bvh_query_test<QUERY_KIND>(
-                        query, bvh.item_lowers[primitive_index], bvh.item_uppers[primitive_index], max_dist
-                    )) {
+                // Metal cannot bind device-memory references to thread references, so load locals.
+                const vec3 item_lower = bvh_load_vec3(bvh.item_lowers, primitive_index);
+                const vec3 item_upper = bvh_load_vec3(bvh.item_uppers, primitive_index);
+                if (!bvh_query_test<QUERY_KIND>(query, item_lower, item_upper, max_dist)) {
                     continue;
                 }
                 index = primitive_index;
@@ -622,25 +643,29 @@ CUDA_CALLABLE inline bool bvh_query_next_impl(bvh_query_t& query, int& index, co
 // traversal loop per kernel — no runtime dispatch, no code bloat.
 
 // AABB query iterator (backward-compatible; _BvhQueryAabb type, existing callers unchanged)
-CUDA_CALLABLE inline bool bvh_query_next(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_next(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     return bvh_query_next_impl<BvhQueryKind::AABB>(query, index, max_dist);
 }
 
 // Plain ray iterator (_BvhQueryRay type)
-CUDA_CALLABLE inline bool bvh_query_ray_next(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_ray_next(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     return bvh_query_next_impl<BvhQueryKind::RAY>(query, index, max_dist);
 }
 
 // Capsule iterator (_BvhQueryCapsule type)
-CUDA_CALLABLE inline bool bvh_query_capsule_next(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_capsule_next(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     return bvh_query_next_impl<BvhQueryKind::CAPSULE>(query, index, max_dist);
 }
 
 // Sphere iterator (_BvhQuerySphere type)
-CUDA_CALLABLE inline bool bvh_query_sphere_next(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_sphere_next(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     return bvh_query_next_impl<BvhQueryKind::SPHERE>(query, index, max_dist);
 }
@@ -649,7 +674,8 @@ CUDA_CALLABLE inline bool bvh_query_sphere_next(bvh_query_t& query, int& index, 
 // at compile time (a kernel branch merging two kinds, or a function parameter
 // annotated with the parent type), so it dispatches on the kind stored at
 // construction. The statically-typed iterators above never route through here.
-CUDA_CALLABLE inline bool bvh_query_next_dynamic(bvh_query_t& query, int& index, const float& max_dist)
+CUDA_CALLABLE inline bool
+bvh_query_next_dynamic(bvh_query_t WP_THREAD& query, int WP_THREAD& index, const float WP_THREAD& max_dist)
 {
     switch (query.kind) {
     case BvhQueryKind::RAY:
@@ -663,9 +689,9 @@ CUDA_CALLABLE inline bool bvh_query_next_dynamic(bvh_query_t& query, int& index,
     }
 }
 
-CUDA_CALLABLE inline int iter_next(bvh_query_t& query) { return query.bounds_nr; }
+CUDA_CALLABLE inline int iter_next(bvh_query_t WP_THREAD& query) { return query.bounds_nr; }
 
-CUDA_CALLABLE inline bool iter_cmp(bvh_query_t& query)
+CUDA_CALLABLE inline bool iter_cmp(bvh_query_t WP_THREAD& query)
 {
     // The for-loop protocol shares one iter_cmp across all query kinds, so it must
     // dispatch on the stored kind.
@@ -674,29 +700,37 @@ CUDA_CALLABLE inline bool iter_cmp(bvh_query_t& query)
     return finished;
 }
 
-CUDA_CALLABLE inline bvh_query_t iter_reverse(const bvh_query_t& query)
+CUDA_CALLABLE inline bvh_query_t iter_reverse(const bvh_query_t WP_THREAD& query)
 {
     // can't reverse BVH queries, users should not rely on traversal ordering
     return query;
 }
 
-CUDA_CALLABLE bool bvh_get_descriptor(uint64_t id, BVH& bvh);
-CUDA_CALLABLE void bvh_add_descriptor(uint64_t id, const BVH& bvh);
+CUDA_CALLABLE bool bvh_get_descriptor(uint64_t id, BVH WP_THREAD& bvh);
+CUDA_CALLABLE void bvh_add_descriptor(uint64_t id, const BVH WP_THREAD& bvh);
 CUDA_CALLABLE void bvh_rem_descriptor(uint64_t id);
 
 
 void bvh_create_host(
-    vec3* lowers, vec3* uppers, int num_items, int constructor_type, int* groups, int leaf_size, BVH& bvh
+    vec3 WP_THREAD* lowers,
+    vec3 WP_THREAD* uppers,
+    int num_items,
+    int constructor_type,
+    int WP_THREAD* groups,
+    int leaf_size,
+    BVH WP_THREAD& bvh
 );
-void bvh_destroy_host(wp::BVH& bvh);
-void bvh_refit_host(wp::BVH& bvh);
-void cubql_bvh_create_host(vec3* lowers, vec3* uppers, int num_items, int leaf_size, BVH& bvh);
-void cubql_bvh_destroy_host(BVH& bvh);
-void cubql_bvh_refit_host(BVH& bvh);
-void cubql_bvh_rebuild_host(BVH& bvh);
+void bvh_destroy_host(wp::BVH WP_THREAD& bvh);
+void bvh_refit_host(wp::BVH WP_THREAD& bvh);
+void cubql_bvh_create_host(
+    vec3 WP_THREAD* lowers, vec3 WP_THREAD* uppers, int num_items, int leaf_size, BVH WP_THREAD& bvh
+);
+void cubql_bvh_destroy_host(BVH WP_THREAD& bvh);
+void cubql_bvh_refit_host(BVH WP_THREAD& bvh);
+void cubql_bvh_rebuild_host(BVH WP_THREAD& bvh);
 // reorder a top-down-constructed bvh so its structure accords with a bottom-up tree:
 // all of its leaves nodes are stored as the first bvh.num_leaf_nodes nodes
-void reorder_top_down_bvh(BVH& bvh_host);
+void reorder_top_down_bvh(BVH WP_THREAD& bvh_host);
 
 #if WP_ENABLE_CUDA
 

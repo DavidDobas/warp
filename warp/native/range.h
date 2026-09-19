@@ -68,7 +68,7 @@ CUDA_CALLABLE inline range_t range(int start, int end, int step)
 }
 
 
-CUDA_CALLABLE inline int iter_next(range_t& r)
+CUDA_CALLABLE inline int iter_next(range_t WP_THREAD& r)
 {
     int iter = r.i;
 
@@ -76,7 +76,7 @@ CUDA_CALLABLE inline int iter_next(range_t& r)
     return iter;
 }
 
-CUDA_CALLABLE inline bool iter_cmp(const range_t& r)
+CUDA_CALLABLE inline bool iter_cmp(const range_t WP_THREAD& r)
 {
     // implements for-loop comparison to emulate Python range() loops with negative arguments
     if (r.step == 0)
@@ -90,7 +90,7 @@ CUDA_CALLABLE inline bool iter_cmp(const range_t& r)
         return r.i > r.end;
 }
 
-CUDA_CALLABLE inline range_t iter_reverse(const range_t& r)
+CUDA_CALLABLE inline range_t iter_reverse(const range_t WP_THREAD& r)
 {
     // generates a reverse range, equivalent to reversed(range())
     range_t rev;

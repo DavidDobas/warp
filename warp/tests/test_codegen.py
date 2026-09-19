@@ -2362,7 +2362,7 @@ class TestCodeGen(unittest.TestCase):
             if value == wp.uint32(0):
                 return
 
-        cpu_device = mock.Mock(is_cpu=True)
+        cpu_device = wp.get_device("cpu")
         with mock.patch("warp._src.context.init"):
             with mock.patch.object(wp._src.context.runtime, "get_device", return_value=cpu_device):
                 with self.assertRaisesRegex(RuntimeError, "cannot be launched with wp.launch"):

@@ -224,8 +224,8 @@ running the CMake commands:
     $ cmake --build _build/cmake --parallel
 
 Upon success, the CMake build writes the native libraries to ``warp/bin/``.
-The default CMake build enables CUDA on Linux and Windows, disables CUDA on
-macOS, and builds both ``warp`` and ``warp-clang``. Pass
+The default CMake build enables CUDA on Linux and Windows, disables CUDA and
+builds the Metal runtime on macOS, and builds both ``warp`` and ``warp-clang``. Pass
 ``-DWARP_ENABLE_CUDA=OFF`` for a CPU-only CMake build. CUDA builds default to a
 single PTX target for fast local builds; use ``CMAKE_CUDA_ARCHITECTURES`` to
 select different GPU architectures. Use ``build_lib.py`` for release builds

@@ -892,7 +892,7 @@ def _bsr_try_native_compress_inplace(src: BsrMatrix, prune_numerical_zeros: bool
     from warp._src.context import runtime  # noqa: PLC0415
 
     try:
-        if src.device.is_cpu:
+        if warp._src.utils._runs_on_host(src.device, "BSR topology operations"):  # CPU, and Metal
             native_func = runtime.core.wp_bsr_compress_inplace_host
         elif src.device.is_cuda:
             native_func = runtime.core.wp_bsr_compress_inplace_device
@@ -955,7 +955,7 @@ def _bsr_try_native_compress_indices_inplace(
     from warp._src.context import runtime  # noqa: PLC0415
 
     try:
-        if src.device.is_cpu:
+        if warp._src.utils._runs_on_host(src.device, "BSR topology operations"):  # CPU, and Metal
             native_func = runtime.core.wp_bsr_compress_inplace_host
         elif src.device.is_cuda:
             native_func = runtime.core.wp_bsr_compress_inplace_device
@@ -1043,7 +1043,7 @@ def _bsr_set_from_triplets_native(
             "readback that cannot be captured. Build the BSR topology outside the captured region."
         )
 
-    if device.is_cpu:
+    if warp._src.utils._runs_on_host(device, "BSR topology operations"):  # CPU, and Metal
         native_func = runtime.core.wp_bsr_matrix_from_triplets_host
     else:
         native_func = runtime.core.wp_bsr_matrix_from_triplets_device
@@ -2703,7 +2703,7 @@ def bsr_set_transpose(
 
         from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
 
-        if dest.values.device.is_cpu:
+        if warp._src.utils._runs_on_host(dest.values.device, "BSR topology operations"):  # CPU, and Metal
             native_func = runtime.core.wp_bsr_transpose_host
         else:
             native_func = runtime.core.wp_bsr_transpose_device
@@ -2790,7 +2790,7 @@ def bsr_set_transpose(
 
         from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
 
-        if dest.values.device.is_cpu:
+        if warp._src.utils._runs_on_host(dest.values.device, "BSR topology operations"):  # CPU, and Metal
             native_func = runtime.core.wp_bsr_transpose_host
         else:
             native_func = runtime.core.wp_bsr_transpose_device

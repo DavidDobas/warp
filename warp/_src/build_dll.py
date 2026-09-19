@@ -852,7 +852,8 @@ def build_dll_for_arch(
             for cpp_path in cpp_paths:
                 cpp_out = cpp_path + _obj_tag + ".o"
                 ld_inputs.append(quote(cpp_out))
-                extra_flags = ""
+                # Objective-C++ sources (the Metal runtime) use ARC
+                extra_flags = " -fobjc-arc" if cpp_path.endswith(".mm") else ""
                 cpp_cmd = f'{cpp_compiler} {cpp_flags}{extra_flags} -c "{cpp_path}" -o "{cpp_out}"'
                 cpp_cmds.append(cpp_cmd)
 
@@ -929,12 +930,16 @@ def build_dll_for_arch(
             opt_undefined = "-Wl,-undefined,dynamic_lookup"
             opt_exclude_libs = ""
             opt_static_runtime = ""
+            # Objective-C++ sources (the Metal runtime) need the Metal and Foundation frameworks
+            has_objc = any(cpp_path.endswith(".mm") for cpp_path in cpp_paths)
+            opt_frameworks = "-framework Metal -framework Foundation -framework IOKit" if has_objc else ""
             if exported_symbols_file is not None:
                 opt_exported_symbols = f'-Wl,-exported_symbols_list,"{exported_symbols_file}"'
         else:
             # -z lazy: pin lazy PLT binding so dlopen(..., RTLD_LAZY) works for non-Python
             # C++ hosts even on distros that flip the default to -z now via RELRO.
             opt_undefined = "-Wl,-z,lazy"
+            opt_frameworks = ""
             opt_exclude_libs = "-Wl,--exclude-libs,ALL"
             opt_static_runtime = f"-static-libstdc++ -static-libgcc -Wl,--version-script={native_dir}/warp.map"
 
@@ -942,7 +947,7 @@ def build_dll_for_arch(
 
         with ScopedTimer("link", active=args.verbose):
             origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
-            link_cmd = f"{cpp_compiler} {version} -shared -Wl,-rpath,'{origin}' {opt_static_runtime} {opt_undefined} {opt_exported_symbols} {opt_exclude_libs}{sanitize_ld} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
+            link_cmd = f"{cpp_compiler} {version} -shared -Wl,-rpath,'{origin}' {opt_static_runtime} {opt_undefined} {opt_exported_symbols} {opt_exclude_libs} {opt_frameworks}{sanitize_ld} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
             run_cmd(link_cmd)
 
             # Platform-specific paths collect all undefined symbol names.

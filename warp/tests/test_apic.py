@@ -2314,7 +2314,8 @@ def test_record_cmd_raw_array_ctype_rejected_during_apic_capture(test, device):
     cmd.set_param_at_index_from_ctype(0, a.__ctype__())
 
     wp.load_module(device=device)
-    with test.assertRaisesRegex(NotImplementedError, "raw array ctype"):
+    # Metal rejects the saveable capture itself, before the raw ctype is reached
+    with test.assertRaisesRegex(NotImplementedError, "raw array ctype|not supported on Metal devices"):
         with wp.ScopedCapture(device=device, apic=True, force_module_load=False):
             cmd.launch()
 

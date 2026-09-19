@@ -342,7 +342,8 @@ def test_dlpack_warp_to_torch(test, device):
     item_size = wp.types.type_size_in_bytes(a.dtype)
 
     test.assertEqual(a.ptr, t.data_ptr())
-    test.assertEqual(a.device, wp.device_from_torch(t.device))
+    # Metal arrays are exported as CPU tensors (unified memory)
+    test.assertEqual(a.device, device if device.is_metal else wp.device_from_torch(t.device))
     test.assertEqual(a.dtype, wp.dtype_from_torch(t.dtype))
     test.assertEqual(a.shape, tuple(t.shape))
     test.assertEqual(a.strides, tuple(s * item_size for s in t.stride()))
@@ -370,7 +371,8 @@ def test_dlpack_warp_to_torch_v2(test, device):
     item_size = wp.types.type_size_in_bytes(a.dtype)
 
     test.assertEqual(a.ptr, t.data_ptr())
-    test.assertEqual(a.device, wp.device_from_torch(t.device))
+    # Metal arrays are exported as CPU tensors (unified memory)
+    test.assertEqual(a.device, device if device.is_metal else wp.device_from_torch(t.device))
     test.assertEqual(a.dtype, wp.dtype_from_torch(t.dtype))
     test.assertEqual(a.shape, tuple(t.shape))
     test.assertEqual(a.strides, tuple(s * item_size for s in t.stride()))

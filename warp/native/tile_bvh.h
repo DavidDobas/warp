@@ -318,7 +318,7 @@ CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_bloc
 
 // CPU version: bvh_query_thread_block_t is aliased to bvh_query_t, so just use regular BVH query
 CUDA_CALLABLE inline bvh_query_thread_block_t
-bvh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& upper)
+bvh_query_aabb_thread_block_impl(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     // On CPU, bvh_query_thread_block_t is just bvh_query_t
     return bvh_query_aabb(id, lower, upper, -1);
@@ -326,7 +326,8 @@ bvh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& upp
 
 // CPU version: single-threaded. bvh_query_thread_block_t is just bvh_query_t and is shared
 // by the AABB and ray tiled entry points, so dispatch on the query's stored kind.
-CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_block_t& query, int& index)
+CUDA_CALLABLE inline bool
+bvh_query_next_thread_block_impl(bvh_query_thread_block_t WP_THREAD& query, int WP_THREAD& index)
 {
     return bvh_query_next_dynamic(query, index, FLT_MAX);
 }
@@ -378,13 +379,17 @@ CUDA_CALLABLE inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, co
 // Each CPU fiber advances an identical private query, but only the register
 // slot owned by logical lane 0 reports a result. This prevents untile() users
 // from observing one externally visible hit per fiber.
-template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_block_t& query)
+template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_block_t WP_THREAD& query)
 {
     // On CPU, bvh_query_thread_block_t is aliased to bvh_query_t and is shared by the AABB
     // and ray tiled entry points, so dispatch on the query's stored kind.
     int index = -1;
-    bvh_query_next_dynamic(query, index, FLT_MAX);
-    query.last_query_valid = (index >= 0);
+    // Use the iterator's return value rather than the index it leaves behind: Apple's GPU compiler
+    // dropped the index written through the inlined call when the result was ignored.
+    const bool found = bvh_query_next_dynamic(query, index, FLT_MAX);
+    if (!found)
+        index = -1;
+    query.last_query_valid = found;
 
     // Create a tile with the index in the first element, -1 in all others
     // This simulates a single-threaded execution where only thread 0 has work
@@ -397,22 +402,23 @@ template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_bloc
     return result;
 }
 
-inline auto tile_bvh_query_next(bvh_query_thread_block_t& query)
+inline auto tile_bvh_query_next(bvh_query_thread_block_t WP_THREAD& query)
 {
     return tile_bvh_query_next_impl<WP_TILE_BLOCK_DIM>(query);
 }
 
-inline bool tile_query_valid(const bvh_query_thread_block_t& query) { return query.last_query_valid; }
+inline bool tile_query_valid(const bvh_query_thread_block_t WP_THREAD& query) { return query.last_query_valid; }
 
 // CPU version: tile_bvh_query_aabb just creates a regular query
-inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
+inline bvh_query_thread_block_t
+tile_bvh_query_aabb(uint64_t id, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     // On CPU, this is just bvh_query_aabb since bvh_query_thread_block_t = bvh_query_t
     return bvh_query_aabb(id, lower, upper, -1);
 }
 
 // CPU version: tile_bvh_query_ray just creates a regular ray query
-inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir)
+inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3 WP_THREAD& start, const vec3 WP_THREAD& dir)
 {
     // On CPU, this is just bvh_query_ray since bvh_query_thread_block_t = bvh_query_t
     return bvh_query_ray(id, start, dir, -1);

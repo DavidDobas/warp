@@ -57,10 +57,84 @@
 
 #ifdef PNANOVDB_CMATH
 #ifndef __CUDACC_RTC__
+#if !defined(PNANOVDB_METAL_MODE)
 #include <math.h>
 #endif
 #endif
+#endif
 
+
+// ------------------------------------------------ Metal ------------------------------------------------------------
+// Warp's Metal backend compiles the C flavour of PNanoVDB with a custom buffer in device memory,
+// thread-space in/out parameters, constant tables and doubles mapped to float (Metal has no double;
+// the 64-bit doubles stored in the grid are converted bit-wise on read).
+#if defined(__METAL_VERSION__)
+#define PNANOVDB_METAL_MODE
+#define PNANOVDB_BUF_CUSTOM
+#define double float
+typedef uint32_t pnanovdb_grid_type_t;
+#define PNANOVDB_GRID_TYPE_GET(grid_typeIn, nameIn) pnanovdb_grid_type_constants[grid_typeIn].nameIn
+typedef struct pnanovdb_buf_t
+{
+    device uint32_t* data;
+} pnanovdb_buf_t;
+static inline pnanovdb_buf_t pnanovdb_make_buf(device uint32_t* data, uint64_t size_in_words)
+{
+    pnanovdb_buf_t ret;
+    ret.data = data;
+    return ret;
+}
+static inline uint32_t pnanovdb_buf_read_uint32(pnanovdb_buf_t buf, uint64_t byte_offset)
+{
+    return buf.data[byte_offset >> 2u];
+}
+static inline uint64_t pnanovdb_buf_read_uint64(pnanovdb_buf_t buf, uint64_t byte_offset)
+{
+    device uint64_t* data64 = (device uint64_t*)buf.data;
+    return data64[byte_offset >> 3u];
+}
+static inline void pnanovdb_buf_write_uint32(pnanovdb_buf_t buf, uint64_t byte_offset, uint32_t value)
+{
+    buf.data[byte_offset >> 2u] = value;
+}
+static inline void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint64_t byte_offset, uint64_t value)
+{
+    device uint64_t* data64 = (device uint64_t*)buf.data;
+    data64[byte_offset >> 3u] = value;
+}
+static inline float pnanovdb_metal_double_bits_to_float(uint64_t v)
+{
+    const uint32_t hi = uint32_t(v >> 32), lo = uint32_t(v);
+    const uint32_t sign = hi & 0x80000000u;
+    const int exp = int((hi >> 20) & 0x7FFu);
+    const uint32_t mant = ((hi & 0xFFFFFu) << 3) | (lo >> 29);  // top 23 of the 52 mantissa bits
+    if (exp == 0)
+        return as_type<float>(sign);  // zero and denormals
+    if (exp == 0x7FF)
+        return as_type<float>(sign | 0x7F800000u | mant);
+    const int e = exp - 1023 + 127;
+    if (e <= 0)
+        return as_type<float>(sign);
+    if (e >= 255)
+        return as_type<float>(sign | 0x7F800000u);
+    return as_type<float>(sign | (uint32_t(e) << 23) | mant);
+}
+static inline uint64_t pnanovdb_metal_float_to_double_bits(float f)
+{
+    const uint32_t b = as_type<uint32_t>(f);
+    const uint32_t sign = b & 0x80000000u;
+    const int exp = int((b >> 23) & 0xFFu);
+    const uint32_t mant = b & 0x7FFFFFu;
+    uint64_t hi;
+    if (exp == 0)
+        hi = sign;
+    else if (exp == 0xFF)
+        hi = uint64_t(sign) | (0x7FFull << 20) | (uint64_t(mant) >> 3);
+    else
+        hi = uint64_t(sign) | (uint64_t(exp - 127 + 1023) << 20) | (uint64_t(mant) >> 3);
+    return (hi << 32) | (uint64_t(mant & 7u) << 29);
+}
+#endif
 // ------------------------------------------------ Buffer -----------------------------------------------------------
 
 #if defined(PNANOVDB_BUF_CUSTOM)
@@ -293,11 +367,18 @@ void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value
 #define PNANOVDB_STRUCT_TYPEDEF(X) typedef struct X X;
 #if defined(__CUDA_ARCH__)
 #define PNANOVDB_STATIC_CONST constexpr __constant__
+#elif defined(PNANOVDB_METAL_MODE)
+#define PNANOVDB_STATIC_CONST constant
 #else
 #define PNANOVDB_STATIC_CONST static const
 #endif
+#if defined(PNANOVDB_METAL_MODE)
+#define PNANOVDB_INOUT(X) thread X*
+#define PNANOVDB_IN(X) const thread X*
+#else
 #define PNANOVDB_INOUT(X) X*
 #define PNANOVDB_IN(X) const X*
+#endif
 #define PNANOVDB_DEREF(X) (*X)
 #define PNANOVDB_REF(X) &X
 #elif defined(PNANOVDB_HLSL)
@@ -348,9 +429,21 @@ PNANOVDB_FORCE_INLINE pnanovdb_int64_t pnanovdb_uint64_as_int64(pnanovdb_uint64_
 PNANOVDB_FORCE_INLINE pnanovdb_uint64_t pnanovdb_int64_as_uint64(pnanovdb_int64_t v) { return (pnanovdb_uint64_t)v; }
 PNANOVDB_FORCE_INLINE pnanovdb_uint32_t pnanovdb_int32_as_uint32(pnanovdb_int32_t v) { return (pnanovdb_uint32_t)v; }
 PNANOVDB_FORCE_INLINE float pnanovdb_uint32_as_float(pnanovdb_uint32_t v) { float vf; pnanovdb_memcpy(&vf, &v, sizeof(vf)); return vf; }
+#if defined(PNANOVDB_METAL_MODE)
+PNANOVDB_FORCE_INLINE pnanovdb_uint32_t pnanovdb_float_as_uint32(float v) { return as_type<pnanovdb_uint32_t>(v); }
+#else
 PNANOVDB_FORCE_INLINE pnanovdb_uint32_t pnanovdb_float_as_uint32(float v) { return *((pnanovdb_uint32_t*)(&v)); }
+#endif
+#if defined(PNANOVDB_METAL_MODE)
+PNANOVDB_FORCE_INLINE double pnanovdb_uint64_as_double(pnanovdb_uint64_t v) { return pnanovdb_metal_double_bits_to_float(v); }
+#else
 PNANOVDB_FORCE_INLINE double pnanovdb_uint64_as_double(pnanovdb_uint64_t v) { double vf; pnanovdb_memcpy(&vf, &v, sizeof(vf)); return vf; }
+#endif
+#if defined(PNANOVDB_METAL_MODE)
+PNANOVDB_FORCE_INLINE pnanovdb_uint64_t pnanovdb_double_as_uint64(double v) { return pnanovdb_metal_float_to_double_bits(v); }
+#else
 PNANOVDB_FORCE_INLINE pnanovdb_uint64_t pnanovdb_double_as_uint64(double v) { return *((pnanovdb_uint64_t*)(&v)); }
+#endif
 PNANOVDB_FORCE_INLINE pnanovdb_uint32_t pnanovdb_uint64_low(pnanovdb_uint64_t v) { return (pnanovdb_uint32_t)v; }
 PNANOVDB_FORCE_INLINE pnanovdb_uint32_t pnanovdb_uint64_high(pnanovdb_uint64_t v) { return (pnanovdb_uint32_t)(v >> 32u); }
 PNANOVDB_FORCE_INLINE pnanovdb_uint64_t pnanovdb_uint32_as_uint64(pnanovdb_uint32_t x, pnanovdb_uint32_t y) { return ((pnanovdb_uint64_t)x) | (((pnanovdb_uint64_t)y) << 32u); }
@@ -3388,3 +3481,6 @@ PNANOVDB_FORCE_INLINE pnanovdb_bool_t pnanovdb_hdda_zero_crossing(
 #endif
 
 #endif // end of NANOVDB_PNANOVDB_H_HAS_BEEN_INCLUDED
+#if defined(PNANOVDB_METAL_MODE)
+#undef double
+#endif

@@ -13,12 +13,41 @@
 #define __restrict__ __restrict
 #endif
 
-#if !defined(__CUDACC__)
+#if defined(__METAL_VERSION__)
+// Metal compiles real calls (with a thread-memory stack frame) for anything it decides not to
+// inline, which is ruinous for kernels with a few multi-dimensional array accesses. GPU code is
+// fully inlined on CUDA anyway, so ask for the same here.
+// Applied to generated kernel bodies and user functions only: forcing it on every library
+// function crashes the Metal compiler backend on some kernels.
+#define WP_FORCE_INLINE __attribute__((always_inline))
+#define CUDA_CALLABLE
+#define CUDA_CALLABLE_DEVICE
+#elif !defined(__CUDACC__)
+#define WP_FORCE_INLINE
 #define CUDA_CALLABLE
 #define CUDA_CALLABLE_DEVICE
 #else
+#define WP_FORCE_INLINE
 #define CUDA_CALLABLE __host__ __device__
 #define CUDA_CALLABLE_DEVICE __device__
+#endif
+
+// Address-space qualifiers for pointer and reference declarators. Metal requires
+// an explicit address space on every pointer and reference; CUDA and C++ do not.
+#if defined(__METAL_VERSION__)
+#define WP_METAL 1
+#define WP_THREAD thread
+#define WP_DEVICE device
+#define WP_THREADGROUP threadgroup
+#define WP_CONSTANT constant
+#define WP_TILE_SHARED threadgroup  // address space of shared tile storage
+#else
+#define WP_METAL 0
+#define WP_THREAD
+#define WP_DEVICE
+#define WP_THREADGROUP
+#define WP_CONSTANT
+#define WP_TILE_SHARED
 #endif
 
 // Cross-compiler inline control for generated functions and native helpers.
@@ -87,7 +116,16 @@ namespace wp {
 
 // numeric types (used from generated kernels)
 typedef float float32;
+#if !defined(WP_NO_FLOAT64)
 typedef double float64;
+#endif  // !WP_NO_FLOAT64
+
+// Widest floating-point type available on the target; used for internal accumulation.
+#if defined(WP_NO_FLOAT64)
+typedef float wide_float;
+#else
+typedef double wide_float;
+#endif
 
 typedef int8_t int8;
 typedef uint8_t uint8;
@@ -103,7 +141,7 @@ typedef uint64_t uint64;
 
 
 // matches Python string type for constant strings
-typedef const char* str;
+typedef const char WP_CONSTANT* str;
 
 
 struct half;
@@ -119,50 +157,65 @@ struct half {
     // cppcheck-suppress uninitMemberVar
     half() = default;
 
-    CUDA_CALLABLE inline half(float f) { *this = float_to_half(f); }
+    CUDA_CALLABLE inline half(float f)
+        : u(float_to_half(f).u)
+    {
+    }
 
     unsigned short u;
 
-    CUDA_CALLABLE inline bool operator==(const half& h) const
+    CUDA_CALLABLE inline bool operator==(const half WP_THREAD& h) const
     {
         // Use float32 to get IEEE 754 behavior in case of a NaN
         return float32(h) == float32(*this);
     }
 
-    CUDA_CALLABLE inline bool operator!=(const half& h) const
+    CUDA_CALLABLE inline bool operator!=(const half WP_THREAD& h) const
     {
         // Use float32 to get IEEE 754 behavior in case of a NaN
         return float32(h) != float32(*this);
     }
-    CUDA_CALLABLE inline bool operator>(const half& h) const { return half_to_float(*this) > half_to_float(h); }
-    CUDA_CALLABLE inline bool operator>=(const half& h) const { return half_to_float(*this) >= half_to_float(h); }
-    CUDA_CALLABLE inline bool operator<(const half& h) const { return half_to_float(*this) < half_to_float(h); }
-    CUDA_CALLABLE inline bool operator<=(const half& h) const { return half_to_float(*this) <= half_to_float(h); }
+    CUDA_CALLABLE inline bool operator>(const half WP_THREAD& h) const
+    {
+        return half_to_float(*this) > half_to_float(h);
+    }
+    CUDA_CALLABLE inline bool operator>=(const half WP_THREAD& h) const
+    {
+        return half_to_float(*this) >= half_to_float(h);
+    }
+    CUDA_CALLABLE inline bool operator<(const half WP_THREAD& h) const
+    {
+        return half_to_float(*this) < half_to_float(h);
+    }
+    CUDA_CALLABLE inline bool operator<=(const half WP_THREAD& h) const
+    {
+        return half_to_float(*this) <= half_to_float(h);
+    }
 
     CUDA_CALLABLE inline bool operator!() const { return float32(*this) == 0; }
 
-    CUDA_CALLABLE inline half operator*=(const half& h)
+    CUDA_CALLABLE inline half operator*=(const half WP_THREAD& h)
     {
         half prod = half(float32(*this) * float32(h));
         this->u = prod.u;
         return *this;
     }
 
-    CUDA_CALLABLE inline half operator/=(const half& h)
+    CUDA_CALLABLE inline half operator/=(const half WP_THREAD& h)
     {
         half quot = half(float32(*this) / float32(h));
         this->u = quot.u;
         return *this;
     }
 
-    CUDA_CALLABLE inline half operator+=(const half& h)
+    CUDA_CALLABLE inline half operator+=(const half WP_THREAD& h)
     {
         half sum = half(float32(*this) + float32(h));
         this->u = sum.u;
         return *this;
     }
 
-    CUDA_CALLABLE inline half operator-=(const half& h)
+    CUDA_CALLABLE inline half operator-=(const half WP_THREAD& h)
     {
         half diff = half(float32(*this) - float32(h));
         this->u = diff.u;
@@ -170,7 +223,15 @@ struct half {
     }
 
     CUDA_CALLABLE inline operator float32() const { return float32(half_to_float(*this)); }
+#if defined(__METAL_VERSION__)
+    // Member functions are per address space on Metal: values read straight from tile (threadgroup)
+    // or array (device) memory, as in mixed-precision tile_matmul(), convert without a thread copy.
+    inline operator float32() const threadgroup { return float32(half_to_float(*this)); }
+    inline operator float32() const device { return float32(half_to_float(*this)); }
+#endif
+#if !defined(WP_NO_FLOAT64)
     CUDA_CALLABLE inline operator float64() const { return float64(half_to_float(*this)); }
+#endif  // !WP_NO_FLOAT64
     CUDA_CALLABLE inline operator int8() const { return int8(half_to_float(*this)); }
     CUDA_CALLABLE inline operator uint8() const { return uint8(half_to_float(*this)); }
     CUDA_CALLABLE inline operator int16() const { return int16(half_to_float(*this)); }
@@ -184,6 +245,14 @@ struct half {
 static_assert(sizeof(half) == 2, "Size of half / float16 type must be 2-bytes");
 
 typedef half float16;
+
+#if defined(__METAL_VERSION__)
+// Global scope next to the other wp_metal_atomic_* overloads (metal_atomics.h is included before builtin.h), and
+// outside the WP_NO_BFLOAT16 guard below so modules without bfloat16 keep the atomic half path.
+}  // namespace wp
+inline wp::half wp_metal_atomic_add(device wp::half* p, wp::half v) { return wp_metal_atomic_add_half16(p, v); }
+namespace wp {
+#endif
 
 #ifndef WP_NO_BFLOAT16
 
@@ -204,33 +273,51 @@ struct wp_bfloat16 {
     unsigned short u;
 
     // Comparison operators — promote to float for IEEE 754 NaN/zero semantics (same as half)
-    CUDA_CALLABLE inline bool operator==(const wp_bfloat16& other) const { return float32(*this) == float32(other); }
-    CUDA_CALLABLE inline bool operator!=(const wp_bfloat16& other) const { return float32(*this) != float32(other); }
-    CUDA_CALLABLE inline bool operator>(const wp_bfloat16& other) const { return float32(*this) > float32(other); }
-    CUDA_CALLABLE inline bool operator>=(const wp_bfloat16& other) const { return float32(*this) >= float32(other); }
-    CUDA_CALLABLE inline bool operator<(const wp_bfloat16& other) const { return float32(*this) < float32(other); }
-    CUDA_CALLABLE inline bool operator<=(const wp_bfloat16& other) const { return float32(*this) <= float32(other); }
+    CUDA_CALLABLE inline bool operator==(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) == float32(other);
+    }
+    CUDA_CALLABLE inline bool operator!=(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) != float32(other);
+    }
+    CUDA_CALLABLE inline bool operator>(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) > float32(other);
+    }
+    CUDA_CALLABLE inline bool operator>=(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) >= float32(other);
+    }
+    CUDA_CALLABLE inline bool operator<(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) < float32(other);
+    }
+    CUDA_CALLABLE inline bool operator<=(const wp_bfloat16 WP_THREAD& other) const
+    {
+        return float32(*this) <= float32(other);
+    }
     CUDA_CALLABLE inline bool operator!() const { return float32(*this) == 0; }
 
-    CUDA_CALLABLE inline wp_bfloat16& operator*=(wp_bfloat16 other)
+    CUDA_CALLABLE inline wp_bfloat16 WP_THREAD& operator*=(wp_bfloat16 other)
     {
         wp_bfloat16 tmp = float_to_bfloat16(bfloat16_to_float(*this) * bfloat16_to_float(other));
         u = tmp.u;
         return *this;
     }
-    CUDA_CALLABLE inline wp_bfloat16& operator/=(wp_bfloat16 other)
+    CUDA_CALLABLE inline wp_bfloat16 WP_THREAD& operator/=(wp_bfloat16 other)
     {
         wp_bfloat16 tmp = float_to_bfloat16(bfloat16_to_float(*this) / bfloat16_to_float(other));
         u = tmp.u;
         return *this;
     }
-    CUDA_CALLABLE inline wp_bfloat16& operator+=(wp_bfloat16 other)
+    CUDA_CALLABLE inline wp_bfloat16 WP_THREAD& operator+=(wp_bfloat16 other)
     {
         wp_bfloat16 tmp = float_to_bfloat16(bfloat16_to_float(*this) + bfloat16_to_float(other));
         u = tmp.u;
         return *this;
     }
-    CUDA_CALLABLE inline wp_bfloat16& operator-=(wp_bfloat16 other)
+    CUDA_CALLABLE inline wp_bfloat16 WP_THREAD& operator-=(wp_bfloat16 other)
     {
         wp_bfloat16 tmp = float_to_bfloat16(bfloat16_to_float(*this) - bfloat16_to_float(other));
         u = tmp.u;
@@ -239,7 +326,13 @@ struct wp_bfloat16 {
 
     // Conversion operators — non-explicit, using Warp type aliases (same as half)
     CUDA_CALLABLE inline operator float32() const { return bfloat16_to_float(*this); }
+#if defined(__METAL_VERSION__)
+    inline operator float32() const threadgroup { return bfloat16_to_float(*this); }
+    inline operator float32() const device { return bfloat16_to_float(*this); }
+#endif
+#if !defined(WP_NO_FLOAT64)
     CUDA_CALLABLE inline operator float64() const { return static_cast<float64>(bfloat16_to_float(*this)); }
+#endif  // !WP_NO_FLOAT64
     CUDA_CALLABLE inline operator int8() const { return static_cast<int8>(bfloat16_to_float(*this)); }
     CUDA_CALLABLE inline operator uint8() const { return static_cast<uint8>(bfloat16_to_float(*this)); }
     CUDA_CALLABLE inline operator int16() const { return static_cast<int16>(bfloat16_to_float(*this)); }
@@ -249,6 +342,15 @@ struct wp_bfloat16 {
     CUDA_CALLABLE inline operator int64() const { return static_cast<int64>(bfloat16_to_float(*this)); }
     CUDA_CALLABLE inline operator uint64() const { return static_cast<uint64>(bfloat16_to_float(*this)); }
 };
+
+#if defined(__METAL_VERSION__)
+}  // namespace wp
+inline wp::wp_bfloat16 wp_metal_atomic_add(device wp::wp_bfloat16* p, wp::wp_bfloat16 v)
+{
+    return wp_metal_atomic_add_half16(p, v);
+}
+namespace wp {
+#endif
 
 static_assert(sizeof(wp_bfloat16) == 2, "Size of wp_bfloat16 / bfloat16 type must be 2-bytes");
 
@@ -266,12 +368,14 @@ inline __device__ float approx_rcp(float a)
     return r;
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline __device__ double approx_rcp(double a)
 {
     double r;
     asm("rcp.approx.ftz.f64 %0, %1;" : "=d"(r) : "d"(a));
     return r;
 }
+#endif  // !WP_NO_FLOAT64
 
 inline __device__ float16 approx_rcp(float16 a)
 {
@@ -289,11 +393,13 @@ inline __device__ float approx_div(float a, float b)
     return r;
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline __device__ double approx_div(double a, double b)
 {
     // No div.approx.f64 in PTX; use rcp then multiply
     return a * approx_rcp(b);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline __device__ float16 approx_div(float16 a, float16 b)
 {
@@ -308,10 +414,14 @@ inline __device__ bfloat16 approx_div(bfloat16 a, bfloat16 b) { return bfloat16(
 
 // CPU fallbacks: exact division
 inline CUDA_CALLABLE float approx_rcp(float a) { return 1.0f / a; }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double approx_rcp(double a) { return 1.0 / a; }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE float16 approx_rcp(float16 a) { return float16(1.0f / float(a)); }
 inline CUDA_CALLABLE float approx_div(float a, float b) { return a / b; }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double approx_div(double a, double b) { return a / b; }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE float16 approx_div(float16 a, float16 b) { return float16(float(a) / float(b)); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 approx_rcp(bfloat16 a) { return bfloat16(1.0f / float(a)); }
@@ -384,6 +494,29 @@ CUDA_CALLABLE inline wp_bfloat16 float_to_bfloat16(float x)
 CUDA_CALLABLE inline float bfloat16_to_float(wp_bfloat16 x) { return wp_bfloat16_bits_to_float_sw(x.u); }
 #endif  // WP_NO_BFLOAT16
 
+#elif defined(__METAL_VERSION__)
+
+// bit casts instead of pointer punning: the Metal compiler folds the punned form to zero for constants
+CUDA_CALLABLE inline half float_to_half(float x)
+{
+    half h;
+    h.u = as_type<unsigned short>(_Float16(x));
+    return h;
+}
+
+CUDA_CALLABLE inline float half_to_float(half h) { return float(as_type<_Float16>(h.u)); }
+
+#ifndef WP_NO_BFLOAT16
+CUDA_CALLABLE inline wp_bfloat16 float_to_bfloat16(float x)
+{
+    wp_bfloat16 h;
+    h.u = wp_float_to_bfloat16_bits_sw(x);
+    return h;
+}
+
+CUDA_CALLABLE inline float bfloat16_to_float(wp_bfloat16 h) { return wp_bfloat16_bits_to_float_sw(h.u); }
+#endif  // WP_NO_BFLOAT16
+
 #elif defined(__clang__)
 
 // _Float16 is Clang's native half-precision floating-point type
@@ -391,12 +524,12 @@ CUDA_CALLABLE inline half float_to_half(float x)
 {
 
     _Float16 f16 = static_cast<_Float16>(x);
-    return *reinterpret_cast<half*>(&f16);
+    return *reinterpret_cast<half WP_THREAD*>(&f16);
 }
 
 CUDA_CALLABLE inline float half_to_float(half h)
 {
-    _Float16 f16 = *reinterpret_cast<_Float16*>(&h);
+    _Float16 f16 = *reinterpret_cast<_Float16 WP_THREAD*>(&h);
     return static_cast<float>(f16);
 }
 
@@ -457,9 +590,11 @@ inline CUDA_CALLABLE half operator*(half a, float b) { return float_to_half(half
 
 inline CUDA_CALLABLE half operator*(float a, half b) { return float_to_half(a * half_to_float(b)); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE half operator*(half a, double b) { return float_to_half(half_to_float(a) * b); }
 
 inline CUDA_CALLABLE half operator*(double a, half b) { return float_to_half(a * half_to_float(b)); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half operator/(half a, half b) { return float_to_half(half_to_float(a) / half_to_float(b)); }
 
@@ -548,6 +683,7 @@ inline CUDA_CALLABLE wp_bfloat16 operator*(float a, wp_bfloat16 b)
 {
     return float_to_bfloat16(a * bfloat16_to_float(b));
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE wp_bfloat16 operator*(wp_bfloat16 a, double b)
 {
     return float_to_bfloat16(bfloat16_to_float(a) * static_cast<float>(b));
@@ -556,37 +692,66 @@ inline CUDA_CALLABLE wp_bfloat16 operator*(double a, wp_bfloat16 b)
 {
     return float_to_bfloat16(static_cast<float>(a) * bfloat16_to_float(b));
 }
+#endif  // !WP_NO_FLOAT64
 #endif  // WP_NO_BFLOAT16
 
 
 template <typename TRet, typename T> inline CUDA_CALLABLE TRet cast(T a)
 {
     static_assert(sizeof(TRet) == sizeof(T), "source and destination must have the same size");
-    return *reinterpret_cast<TRet*>(&a);
+    return *reinterpret_cast<TRet WP_THREAD*>(&a);
 }
 
 template <typename T> CUDA_CALLABLE inline float cast_float(T x) { return (float)(x); }
 
 template <typename T> CUDA_CALLABLE inline int cast_int(T x) { return (int)(x); }
 
-template <typename T> CUDA_CALLABLE inline void adj_cast_float(T x, T& adj_x, float adj_ret) { }
+template <typename T> CUDA_CALLABLE inline void adj_cast_float(T x, T WP_THREAD& adj_x, float adj_ret) { }
 
-CUDA_CALLABLE inline void adj_cast_float(float16 x, float16& adj_x, float adj_ret) { adj_x += float16(adj_ret); }
+CUDA_CALLABLE inline void adj_cast_float(float16 x, float16 WP_THREAD& adj_x, float adj_ret)
+{
+    adj_x += float16(adj_ret);
+}
 #ifndef WP_NO_BFLOAT16
-CUDA_CALLABLE inline void adj_cast_float(bfloat16 x, bfloat16& adj_x, float adj_ret) { adj_x += bfloat16(adj_ret); }
+CUDA_CALLABLE inline void adj_cast_float(bfloat16 x, bfloat16 WP_THREAD& adj_x, float adj_ret)
+{
+    adj_x += bfloat16(adj_ret);
+}
 #endif
-CUDA_CALLABLE inline void adj_cast_float(float32 x, float32& adj_x, float adj_ret) { adj_x += float32(adj_ret); }
-CUDA_CALLABLE inline void adj_cast_float(float64 x, float64& adj_x, float adj_ret) { adj_x += float64(adj_ret); }
+CUDA_CALLABLE inline void adj_cast_float(float32 x, float32 WP_THREAD& adj_x, float adj_ret)
+{
+    adj_x += float32(adj_ret);
+}
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline void adj_cast_float(float64 x, float64 WP_THREAD& adj_x, float adj_ret)
+{
+    adj_x += float64(adj_ret);
+}
+#endif  // !WP_NO_FLOAT64
 
-template <typename T> CUDA_CALLABLE inline void adj_cast_int(T x, T& adj_x, int adj_ret) { }
+template <typename T> CUDA_CALLABLE inline void adj_cast_int(T x, T WP_THREAD& adj_x, int adj_ret) { }
 
 
-template <typename T> CUDA_CALLABLE inline void adj_float16(T x, T& adj_x, float16 adj_ret) { adj_x += T(adj_ret); }
+template <typename T> CUDA_CALLABLE inline void adj_float16(T x, T WP_THREAD& adj_x, float16 adj_ret)
+{
+    adj_x += T(adj_ret);
+}
 #ifndef WP_NO_BFLOAT16
-template <typename T> CUDA_CALLABLE inline void adj_bfloat16(T x, T& adj_x, bfloat16 adj_ret) { adj_x += T(adj_ret); }
+template <typename T> CUDA_CALLABLE inline void adj_bfloat16(T x, T WP_THREAD& adj_x, bfloat16 adj_ret)
+{
+    adj_x += T(adj_ret);
+}
 #endif
-template <typename T> CUDA_CALLABLE inline void adj_float32(T x, T& adj_x, float32 adj_ret) { adj_x += T(adj_ret); }
-template <typename T> CUDA_CALLABLE inline void adj_float64(T x, T& adj_x, float64 adj_ret) { adj_x += T(adj_ret); }
+template <typename T> CUDA_CALLABLE inline void adj_float32(T x, T WP_THREAD& adj_x, float32 adj_ret)
+{
+    adj_x += T(adj_ret);
+}
+#if !defined(WP_NO_FLOAT64)
+template <typename T> CUDA_CALLABLE inline void adj_float64(T x, T WP_THREAD& adj_x, float64 adj_ret)
+{
+    adj_x += T(adj_ret);
+}
+#endif  // !WP_NO_FLOAT64
 
 
 #define kEps 0.0f
@@ -609,26 +774,26 @@ inline CUDA_CALLABLE T bit_xor(T a, T b) { return a^b; } \
 inline CUDA_CALLABLE T lshift(T a, T b) { return a<<b; } \
 inline CUDA_CALLABLE T rshift(T a, T b) { return a>>b; } \
 inline CUDA_CALLABLE T invert(T x) { return ~x; } \
-inline CUDA_CALLABLE void adj_mul(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_abs(T x, T adj_x, T& adj_ret) { } \
-inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { } \
-inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_nonzero(T x, T& adj_x, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_atomic_minmax(T* buf, T* adj_buf, const T& value, T& adj_value) { } \
-inline CUDA_CALLABLE void adj_bit_and(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_bit_or(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_bit_xor(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_lshift(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_rshift(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_invert(T x, T adj_x, T& adj_ret) { }
+inline CUDA_CALLABLE void adj_mul(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_add(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_sub(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_mod(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_min(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_max(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_abs(T x, T adj_x, T WP_THREAD& adj_ret) { } \
+inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T WP_THREAD& adj_ret) { } \
+inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T WP_THREAD& adj_x, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_floordiv(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_step(T x, T WP_THREAD& adj_x, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_nonzero(T x, T WP_THREAD& adj_x, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_atomic_minmax(T WP_DEVICE* buf, T WP_DEVICE* adj_buf, const T WP_THREAD& value, T WP_THREAD& adj_value) { } \
+inline CUDA_CALLABLE void adj_bit_and(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_bit_or(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_bit_xor(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_lshift(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_rshift(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { } \
+inline CUDA_CALLABLE void adj_invert(T x, T adj_x, T WP_THREAD& adj_ret) { }
 
 inline CUDA_CALLABLE int8 abs(int8 x) { return ::abs(x); }
 inline CUDA_CALLABLE int16 abs(int16 x) { return ::abs(x); }
@@ -670,30 +835,39 @@ inline CUDA_CALLABLE uint64 sign(uint64 x) { return 1; }
 
 
 // Catch-all for non-float, non-integer types
-template <typename T> inline bool CUDA_CALLABLE isfinite(const T&) { return true; }
+template <typename T> inline bool CUDA_CALLABLE isfinite(const T WP_THREAD&) { return true; }
 
 inline bool CUDA_CALLABLE isfinite(half x) { return ::isfinite(float(x)); }
 #ifndef WP_NO_BFLOAT16
 inline bool CUDA_CALLABLE isfinite(bfloat16 x) { return ::isfinite(float(x)); }
 #endif
 inline bool CUDA_CALLABLE isfinite(float x) { return ::isfinite(x); }
+#if !defined(WP_NO_FLOAT64)
 inline bool CUDA_CALLABLE isfinite(double x) { return ::isfinite(x); }
+#endif  // !WP_NO_FLOAT64
 
 inline bool CUDA_CALLABLE isnan(half x) { return ::isnan(float(x)); }
 #ifndef WP_NO_BFLOAT16
 inline bool CUDA_CALLABLE isnan(bfloat16 x) { return ::isnan(float(x)); }
 #endif
 inline bool CUDA_CALLABLE isnan(float x) { return ::isnan(x); }
+#if !defined(WP_NO_FLOAT64)
 inline bool CUDA_CALLABLE isnan(double x) { return ::isnan(x); }
+#endif  // !WP_NO_FLOAT64
 
 inline bool CUDA_CALLABLE isinf(half x) { return ::isinf(float(x)); }
 #ifndef WP_NO_BFLOAT16
 inline bool CUDA_CALLABLE isinf(bfloat16 x) { return ::isinf(float(x)); }
 #endif
 inline bool CUDA_CALLABLE isinf(float x) { return ::isinf(x); }
+#if !defined(WP_NO_FLOAT64)
 inline bool CUDA_CALLABLE isinf(double x) { return ::isinf(x); }
+#endif  // !WP_NO_FLOAT64
 
-template <typename T> inline CUDA_CALLABLE void print(const T&) { printf("<type without print implementation>\n"); }
+template <typename T> inline CUDA_CALLABLE void print(const T WP_THREAD&)
+{
+    printf("<type without print implementation>\n");
+}
 
 inline CUDA_CALLABLE void print(float16 f) { printf("%g\n", half_to_float(f)); }
 
@@ -703,7 +877,9 @@ inline CUDA_CALLABLE void print(bfloat16 f) { printf("%g\n", bfloat16_to_float(f
 
 inline CUDA_CALLABLE void print(float f) { printf("%g\n", f); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE void print(double f) { printf("%g\n", f); }
+#endif  // !WP_NO_FLOAT64
 
 
 // Native fmin/fmax helpers used by min/max/clamp on float types. C semantics:
@@ -727,6 +903,7 @@ inline CUDA_CALLABLE float _wp_native_fmin(float a, float b)
     return (a <= b) ? a : ((b == b) ? b : a);
 #endif
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double _wp_native_fmin(double a, double b)
 {
 #if defined(__CUDA_ARCH__)
@@ -735,6 +912,7 @@ inline CUDA_CALLABLE double _wp_native_fmin(double a, double b)
     return (a <= b) ? a : ((b == b) ? b : a);
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE half _wp_native_fmin(half a, half b) { return half(_wp_native_fmin(float(a), float(b))); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 _wp_native_fmin(bfloat16 a, bfloat16 b)
@@ -751,6 +929,7 @@ inline CUDA_CALLABLE float _wp_native_fmax(float a, float b)
     return (a >= b) ? a : ((b == b) ? b : a);
 #endif
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double _wp_native_fmax(double a, double b)
 {
 #if defined(__CUDA_ARCH__)
@@ -759,6 +938,7 @@ inline CUDA_CALLABLE double _wp_native_fmax(double a, double b)
     return (a >= b) ? a : ((b == b) ? b : a);
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE half _wp_native_fmax(half a, half b) { return half(_wp_native_fmax(float(a), float(b))); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b)
@@ -785,17 +965,17 @@ inline CUDA_CALLABLE T sign(T x) { return x < T(0) ? -1 : 1; } \
 inline CUDA_CALLABLE T step(T x) { return x < T(0) ? T(1) : T(0); }\
 inline CUDA_CALLABLE T nonzero(T x) { return x == T(0) ? T(0) : T(1); }\
 inline CUDA_CALLABLE T clamp(T x, T a, T b) { return _wp_native_fmin(_wp_native_fmax(a, x), b); }\
-inline CUDA_CALLABLE void adj_abs(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_abs(T x, T WP_THREAD& adj_x, T adj_ret) \
 {\
     if (x < T(0))\
         adj_x -= adj_ret;\
     else\
         adj_x += adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_mul(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += b*adj_ret; adj_b += a*adj_ret; } \
-inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b += adj_ret; } \
-inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b -= adj_ret; } \
-inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
+inline CUDA_CALLABLE void adj_mul(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { adj_a += b*adj_ret; adj_b += a*adj_ret; } \
+inline CUDA_CALLABLE void adj_add(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { adj_a += adj_ret; adj_b += adj_ret; } \
+inline CUDA_CALLABLE void adj_sub(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) { adj_a += adj_ret; adj_b -= adj_ret; } \
+inline CUDA_CALLABLE void adj_min(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) \
 { \
     /* Forward returns: NaN if both NaN; the non-NaN if exactly one is NaN; */ \
     /* the smaller otherwise. Route gradient to the operand the forward picked. */ \
@@ -808,7 +988,7 @@ inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
     else \
         adj_b += adj_ret; \
 } \
-inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
+inline CUDA_CALLABLE void adj_max(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) \
 { \
     if (::isnan(float(a))) \
         adj_b += adj_ret; \
@@ -819,16 +999,16 @@ inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
     else \
         adj_b += adj_ret; \
 } \
-inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
+inline CUDA_CALLABLE void adj_floordiv(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at integer points) */ \
 } \
-inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret){ adj_a += adj_ret; }\
-inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) \
+inline CUDA_CALLABLE void adj_mod(T a, T b, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret){ adj_a += adj_ret; }\
+inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T WP_THREAD& adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at x = 0) */ \
 }\
-inline CUDA_CALLABLE void adj_copysign(T x, T y, T& adj_x, T& adj_y, T adj_ret) \
+inline CUDA_CALLABLE void adj_copysign(T x, T y, T WP_THREAD& adj_x, T WP_THREAD& adj_y, T adj_ret) \
 { \
     /* copysign(x, y) = |x| * sign(y). d/dx is +1 when signs of x and y agree, */ \
     /* -1 otherwise. d/dy is 0 almost everywhere -- the result depends on y    */ \
@@ -840,15 +1020,15 @@ inline CUDA_CALLABLE void adj_copysign(T x, T y, T& adj_x, T& adj_y, T adj_ret) 
     else \
         adj_x -= adj_ret; \
 } \
-inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_step(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at x = 0) */ \
 }\
-inline CUDA_CALLABLE void adj_nonzero(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_nonzero(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at x = 0) */ \
 }\
-inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret)\
+inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T WP_THREAD& adj_x, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret)\
 {\
     /* Forward expands to fmin(fmax(a, x), b). Apply the chain rule via the */ \
     /* already-correct adj_min / adj_max: their routing handles every NaN   */ \
@@ -869,7 +1049,7 @@ inline CUDA_CALLABLE T div(T a, T b)\
     })\
     return a/b;\
 }\
-inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret)\
+inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret)\
 {\
     adj_a += adj_ret/b;\
     adj_b -= adj_ret*(ret)/b;\
@@ -896,6 +1076,7 @@ inline CUDA_CALLABLE float copysign(float x, float y)
     return ::copysignf(x, y);
 #endif
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double copysign(double x, double y)
 {
 #if !defined(__CUDA_ARCH__) && (defined(__GNUC__) || defined(__clang__))
@@ -904,6 +1085,7 @@ inline CUDA_CALLABLE double copysign(double x, double y)
     return ::copysign(x, y);
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE half copysign(half x, half y) { return half(copysign(float(x), float(y))); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 copysign(bfloat16 x, bfloat16 y) { return bfloat16(copysign(float(x), float(y))); }
@@ -914,11 +1096,13 @@ DECLARE_FLOAT_OPS(float16)
 DECLARE_FLOAT_OPS(bfloat16)
 #endif
 DECLARE_FLOAT_OPS(float32)
+#if !defined(WP_NO_FLOAT64)
 DECLARE_FLOAT_OPS(float64)
+#endif  // !WP_NO_FLOAT64
 
 // Adjoint for approximate scalar division
 #define DECLARE_ADJ_APPROX_DIV(T) \
-inline CUDA_CALLABLE void adj_approx_div(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret) \
+inline CUDA_CALLABLE void adj_approx_div(T a, T b, T ret, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret) \
 { \
     adj_a += approx_div(adj_ret, b); \
     adj_b -= approx_div(T(adj_ret * ret), b); \
@@ -929,7 +1113,9 @@ DECLARE_ADJ_APPROX_DIV(float16)
 DECLARE_ADJ_APPROX_DIV(bfloat16)
 #endif
 DECLARE_ADJ_APPROX_DIV(float32)
+#if !defined(WP_NO_FLOAT64)
 DECLARE_ADJ_APPROX_DIV(float64)
+#endif  // !WP_NO_FLOAT64
 
 #undef DECLARE_ADJ_APPROX_DIV
 
@@ -970,6 +1156,7 @@ inline CUDA_CALLABLE float32 mod(float32 a, float32 b)
     return fmodf(a, b);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double mod(double a, double b)
 {
 #if FP_CHECK
@@ -980,6 +1167,7 @@ inline CUDA_CALLABLE double mod(double a, double b)
 #endif
     return fmod(a, b);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half log(half a)
 {
@@ -1003,6 +1191,7 @@ inline CUDA_CALLABLE float log(float a)
     return ::logf(a);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double log(double a)
 {
 #if FP_CHECK
@@ -1013,6 +1202,7 @@ inline CUDA_CALLABLE double log(double a)
 #endif
     return ::log(a);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half log2(half a)
 {
@@ -1038,6 +1228,7 @@ inline CUDA_CALLABLE float log2(float a)
     return ::log2f(a);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double log2(double a)
 {
 #if FP_CHECK
@@ -1049,6 +1240,7 @@ inline CUDA_CALLABLE double log2(double a)
 
     return ::log2(a);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half log10(half a)
 {
@@ -1074,6 +1266,7 @@ inline CUDA_CALLABLE float log10(float a)
     return ::log10f(a);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double log10(double a)
 {
 #if FP_CHECK
@@ -1085,6 +1278,7 @@ inline CUDA_CALLABLE double log10(double a)
 
     return ::log10(a);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half exp(half a)
 {
@@ -1108,6 +1302,7 @@ inline CUDA_CALLABLE float exp(float a)
 #endif
     return result;
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double exp(double a)
 {
     double result = ::exp(a);
@@ -1119,6 +1314,7 @@ inline CUDA_CALLABLE double exp(double a)
 #endif
     return result;
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half pow(half a, half b)
 {
@@ -1144,6 +1340,7 @@ inline CUDA_CALLABLE float pow(float a, float b)
     return result;
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double pow(double a, double b)
 {
     double result = ::pow(a, b);
@@ -1155,6 +1352,7 @@ inline CUDA_CALLABLE double pow(double a, double b)
 #endif
     return result;
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half floordiv(half a, half b)
 {
@@ -1178,6 +1376,7 @@ inline CUDA_CALLABLE float floordiv(float a, float b)
     return floorf(a / b);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double floordiv(double a, double b)
 {
 #if FP_CHECK
@@ -1188,18 +1387,23 @@ inline CUDA_CALLABLE double floordiv(double a, double b)
 #endif
     return ::floor(a / b);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half erf(half a) { return erff(float(a)); }
 
 inline CUDA_CALLABLE float erf(float a) { return erff(a); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double erf(double a) { return ::erf(a); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half erfc(half a) { return erfcf(float(a)); }
 
 inline CUDA_CALLABLE float erfc(float a) { return erfcf(a); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double erfc(double a) { return ::erfc(a); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half erfinv(half a)
 {
@@ -1223,6 +1427,7 @@ inline CUDA_CALLABLE float erfinv(float a)
     return ::erfinvf(a);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double erfinv(double a)
 {
 #if FP_CHECK
@@ -1233,6 +1438,7 @@ inline CUDA_CALLABLE double erfinv(double a)
 #endif
     return ::erfinv(a);
 }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half erfcinv(half a)
 {
@@ -1256,6 +1462,7 @@ inline CUDA_CALLABLE float erfcinv(float a)
     return ::erfcinvf(a);
 }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double erfcinv(double a)
 {
 #if FP_CHECK
@@ -1266,38 +1473,43 @@ inline CUDA_CALLABLE double erfcinv(double a)
 #endif
     return ::erfcinv(a);
 }
+#endif  // !WP_NO_FLOAT64
 
-inline CUDA_CALLABLE void adj_erf(half a, half& adj_a, half adj_ret)
+inline CUDA_CALLABLE void adj_erf(half a, half WP_THREAD& adj_a, half adj_ret)
 {
     adj_a += half(M_2_SQRT_PI_F * ::expf(-float(a) * float(a))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erf(float a, float& adj_a, float adj_ret)
+inline CUDA_CALLABLE void adj_erf(float a, float WP_THREAD& adj_a, float adj_ret)
 {
     adj_a += M_2_SQRT_PI_F * ::expf(-a * a) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erf(double a, double& adj_a, double adj_ret)
+#if !defined(WP_NO_FLOAT64)
+inline CUDA_CALLABLE void adj_erf(double a, double WP_THREAD& adj_a, double adj_ret)
 {
     adj_a += M_2_SQRT_PI * ::exp(-a * a) * adj_ret;
 }
+#endif  // !WP_NO_FLOAT64
 
-inline CUDA_CALLABLE void adj_erfc(half a, half& adj_a, half adj_ret)
+inline CUDA_CALLABLE void adj_erfc(half a, half WP_THREAD& adj_a, half adj_ret)
 {
     adj_a -= half(M_2_SQRT_PI_F * ::expf(-float(a) * float(a))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfc(float a, float& adj_a, float adj_ret)
+inline CUDA_CALLABLE void adj_erfc(float a, float WP_THREAD& adj_a, float adj_ret)
 {
     adj_a -= M_2_SQRT_PI_F * ::expf(-a * a) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfc(double a, double& adj_a, double adj_ret)
+#if !defined(WP_NO_FLOAT64)
+inline CUDA_CALLABLE void adj_erfc(double a, double WP_THREAD& adj_a, double adj_ret)
 {
     adj_a -= M_2_SQRT_PI * ::exp(-a * a) * adj_ret;
 }
+#endif  // !WP_NO_FLOAT64
 
-inline CUDA_CALLABLE void adj_erfinv(half a, half ret, half& adj_a, half adj_ret)
+inline CUDA_CALLABLE void adj_erfinv(half a, half ret, half WP_THREAD& adj_a, half adj_ret)
 {
 #if FP_CHECK
     if (float(a) < -1.0f || float(a) > 1.0f) {
@@ -1308,7 +1520,7 @@ inline CUDA_CALLABLE void adj_erfinv(half a, half ret, half& adj_a, half adj_ret
     adj_a += half(M_SQRT_PI_F_2 * ::expf(float(ret) * float(ret))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfinv(float a, float ret, float& adj_a, float adj_ret)
+inline CUDA_CALLABLE void adj_erfinv(float a, float ret, float WP_THREAD& adj_a, float adj_ret)
 {
 #if FP_CHECK
     if (a < -1.0f || a > 1.0f) {
@@ -1319,7 +1531,8 @@ inline CUDA_CALLABLE void adj_erfinv(float a, float ret, float& adj_a, float adj
     adj_a += M_SQRT_PI_F_2 * ::expf(ret * ret) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfinv(double a, double ret, double& adj_a, double adj_ret)
+#if !defined(WP_NO_FLOAT64)
+inline CUDA_CALLABLE void adj_erfinv(double a, double ret, double WP_THREAD& adj_a, double adj_ret)
 {
 #if FP_CHECK
     if (a < -1.0 || a > 1.0) {
@@ -1329,8 +1542,9 @@ inline CUDA_CALLABLE void adj_erfinv(double a, double ret, double& adj_a, double
 #endif
     adj_a += M_SQRT_PI_2 * ::exp(ret * ret) * adj_ret;
 }
+#endif  // !WP_NO_FLOAT64
 
-inline CUDA_CALLABLE void adj_erfcinv(half a, half ret, half& adj_a, half adj_ret)
+inline CUDA_CALLABLE void adj_erfcinv(half a, half ret, half WP_THREAD& adj_a, half adj_ret)
 {
 #if FP_CHECK
     if (float(a) < 0.0f || float(a) > 2.0f) {
@@ -1341,7 +1555,7 @@ inline CUDA_CALLABLE void adj_erfcinv(half a, half ret, half& adj_a, half adj_re
     adj_a -= half(M_SQRT_PI_F_2 * ::expf(float(ret) * float(ret))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfcinv(float a, float ret, float& adj_a, float adj_ret)
+inline CUDA_CALLABLE void adj_erfcinv(float a, float ret, float WP_THREAD& adj_a, float adj_ret)
 {
 #if FP_CHECK
     if (a < 0.0f || a > 2.0f) {
@@ -1352,7 +1566,8 @@ inline CUDA_CALLABLE void adj_erfcinv(float a, float ret, float& adj_a, float ad
     adj_a -= M_SQRT_PI_F_2 * ::expf(ret * ret) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfcinv(double a, double ret, double& adj_a, double adj_ret)
+#if !defined(WP_NO_FLOAT64)
+inline CUDA_CALLABLE void adj_erfcinv(double a, double ret, double WP_THREAD& adj_a, double adj_ret)
 {
 #if FP_CHECK
     if (a < 0.0 || a > 2.0) {
@@ -1362,19 +1577,20 @@ inline CUDA_CALLABLE void adj_erfcinv(double a, double ret, double& adj_a, doubl
 #endif
     adj_a -= M_SQRT_PI_2 * ::exp(ret * ret) * adj_ret;
 }
+#endif  // !WP_NO_FLOAT64
 
 #ifndef WP_NO_BFLOAT16
-inline CUDA_CALLABLE void adj_erf(bfloat16 a, bfloat16& adj_a, bfloat16 adj_ret)
+inline CUDA_CALLABLE void adj_erf(bfloat16 a, bfloat16 WP_THREAD& adj_a, bfloat16 adj_ret)
 {
     adj_a += bfloat16(M_2_SQRT_PI_F * ::expf(-float(a) * float(a))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfc(bfloat16 a, bfloat16& adj_a, bfloat16 adj_ret)
+inline CUDA_CALLABLE void adj_erfc(bfloat16 a, bfloat16 WP_THREAD& adj_a, bfloat16 adj_ret)
 {
     adj_a -= bfloat16(M_2_SQRT_PI_F * ::expf(-float(a) * float(a))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfinv(bfloat16 a, bfloat16 ret, bfloat16& adj_a, bfloat16 adj_ret)
+inline CUDA_CALLABLE void adj_erfinv(bfloat16 a, bfloat16 ret, bfloat16 WP_THREAD& adj_a, bfloat16 adj_ret)
 {
 #if FP_CHECK
     if (float(a) < -1.0f || float(a) > 1.0f) {
@@ -1385,7 +1601,7 @@ inline CUDA_CALLABLE void adj_erfinv(bfloat16 a, bfloat16 ret, bfloat16& adj_a, 
     adj_a += bfloat16(M_SQRT_PI_F_2 * ::expf(float(ret) * float(ret))) * adj_ret;
 }
 
-inline CUDA_CALLABLE void adj_erfcinv(bfloat16 a, bfloat16 ret, bfloat16& adj_a, bfloat16 adj_ret)
+inline CUDA_CALLABLE void adj_erfcinv(bfloat16 a, bfloat16 ret, bfloat16 WP_THREAD& adj_a, bfloat16 adj_ret)
 {
 #if FP_CHECK
     if (float(a) < 0.0f || float(a) > 2.0f) {
@@ -1402,7 +1618,9 @@ inline CUDA_CALLABLE float leaky_max(float a, float b, float r) { return max(a, 
 
 inline CUDA_CALLABLE half abs(half x) { return ::fabsf(float(x)); }
 inline CUDA_CALLABLE float abs(float x) { return ::fabsf(x); }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double abs(double x) { return ::fabs(x); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE float acos(float x) { return ::acosf(min(max(x, -1.0f), 1.0f)); }
 inline CUDA_CALLABLE float asin(float x) { return ::asinf(min(max(x, -1.0f), 1.0f)); }
@@ -1411,12 +1629,14 @@ inline CUDA_CALLABLE float atan2(float y, float x) { return ::atan2f(y, x); }
 inline CUDA_CALLABLE float sin(float x) { return ::sinf(x); }
 inline CUDA_CALLABLE float cos(float x) { return ::cosf(x); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double acos(double x) { return ::acos(min(max(x, -1.0), 1.0)); }
 inline CUDA_CALLABLE double asin(double x) { return ::asin(min(max(x, -1.0), 1.0)); }
 inline CUDA_CALLABLE double atan(double x) { return ::atan(x); }
 inline CUDA_CALLABLE double atan2(double y, double x) { return ::atan2(y, x); }
 inline CUDA_CALLABLE double sin(double x) { return ::sin(x); }
 inline CUDA_CALLABLE double cos(double x) { return ::cos(x); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half acos(half x) { return ::acosf(min(max(float(x), -1.0f), 1.0f)); }
 inline CUDA_CALLABLE half asin(half x) { return ::asinf(min(max(float(x), -1.0f), 1.0f)); }
@@ -1436,6 +1656,7 @@ inline CUDA_CALLABLE float sqrt(float x)
 #endif
     return ::sqrtf(x);
 }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double sqrt(double x)
 {
 #if FP_CHECK
@@ -1446,6 +1667,7 @@ inline CUDA_CALLABLE double sqrt(double x)
 #endif
     return ::sqrt(x);
 }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE half sqrt(half x)
 {
 #if FP_CHECK
@@ -1458,7 +1680,9 @@ inline CUDA_CALLABLE half sqrt(half x)
 }
 
 inline CUDA_CALLABLE float cbrt(float x) { return ::cbrtf(x); }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double cbrt(double x) { return ::cbrt(x); }
+#endif  // !WP_NO_FLOAT64
 inline CUDA_CALLABLE half cbrt(half x) { return ::cbrtf(float(x)); }
 
 inline CUDA_CALLABLE float tan(float x) { return ::tanf(x); }
@@ -1468,12 +1692,14 @@ inline CUDA_CALLABLE float tanh(float x) { return ::tanhf(x); }
 inline CUDA_CALLABLE float degrees(float x) { return x * RAD_TO_DEG; }
 inline CUDA_CALLABLE float radians(float x) { return x * DEG_TO_RAD; }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double tan(double x) { return ::tan(x); }
 inline CUDA_CALLABLE double sinh(double x) { return ::sinh(x); }
 inline CUDA_CALLABLE double cosh(double x) { return ::cosh(x); }
 inline CUDA_CALLABLE double tanh(double x) { return ::tanh(x); }
 inline CUDA_CALLABLE double degrees(double x) { return x * RAD_TO_DEG; }
 inline CUDA_CALLABLE double radians(double x) { return x * DEG_TO_RAD; }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half tan(half x) { return ::tanf(float(x)); }
 inline CUDA_CALLABLE half sinh(half x) { return ::sinhf(float(x)); }
@@ -1489,12 +1715,14 @@ inline CUDA_CALLABLE float floor(float x) { return ::floorf(x); }
 inline CUDA_CALLABLE float ceil(float x) { return ::ceilf(x); }
 inline CUDA_CALLABLE float frac(float x) { return x - trunc(x); }
 
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE double round(double x) { return ::round(x); }
 inline CUDA_CALLABLE double rint(double x) { return ::rint(x); }
 inline CUDA_CALLABLE double trunc(double x) { return ::trunc(x); }
 inline CUDA_CALLABLE double floor(double x) { return ::floor(x); }
 inline CUDA_CALLABLE double ceil(double x) { return ::ceil(x); }
 inline CUDA_CALLABLE double frac(double x) { return x - trunc(x); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE half round(half x) { return ::roundf(float(x)); }
 inline CUDA_CALLABLE half rint(half x) { return ::rintf(float(x)); }
@@ -1622,7 +1850,7 @@ inline CUDA_CALLABLE bfloat16 erfcinv(bfloat16 a)
 #endif  // WP_NO_BFLOAT16
 
 #define DECLARE_ADJOINTS(T)\
-inline CUDA_CALLABLE void adj_log(T a, T& adj_a, T adj_ret)\
+inline CUDA_CALLABLE void adj_log(T a, T WP_THREAD& adj_a, T adj_ret)\
 {\
     adj_a += (T(1)/a)*adj_ret;\
     DO_IF_FPCHECK(if (!isfinite(adj_a))\
@@ -1631,7 +1859,7 @@ inline CUDA_CALLABLE void adj_log(T a, T& adj_a, T adj_ret)\
         assert(0);\
     })\
 }\
-inline CUDA_CALLABLE void adj_log2(T a, T& adj_a, T adj_ret)\
+inline CUDA_CALLABLE void adj_log2(T a, T WP_THREAD& adj_a, T adj_ret)\
 { \
     adj_a += (T(1)/a)*(T(1)/log(T(2)))*adj_ret; \
     DO_IF_FPCHECK(if (!isfinite(adj_a))\
@@ -1640,7 +1868,7 @@ inline CUDA_CALLABLE void adj_log2(T a, T& adj_a, T adj_ret)\
         assert(0);\
     })   \
 }\
-inline CUDA_CALLABLE void adj_log10(T a, T& adj_a, T adj_ret)\
+inline CUDA_CALLABLE void adj_log10(T a, T WP_THREAD& adj_a, T adj_ret)\
 {\
     adj_a += (T(1)/a)*(T(1)/log(T(10)))*adj_ret; \
     DO_IF_FPCHECK(if (!isfinite(adj_a))\
@@ -1649,8 +1877,8 @@ inline CUDA_CALLABLE void adj_log10(T a, T& adj_a, T adj_ret)\
         assert(0);\
     })\
 }\
-inline CUDA_CALLABLE void adj_exp(T a, T ret, T& adj_a, T adj_ret) { adj_a += ret*adj_ret; }\
-inline CUDA_CALLABLE void adj_pow(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret)\
+inline CUDA_CALLABLE void adj_exp(T a, T ret, T WP_THREAD& adj_a, T adj_ret) { adj_a += ret*adj_ret; }\
+inline CUDA_CALLABLE void adj_pow(T a, T b, T ret, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T adj_ret)\
 { \
     adj_a += b*pow(a, b-T(1))*adj_ret;\
     adj_b += log(a)*ret*adj_ret;\
@@ -1660,7 +1888,7 @@ inline CUDA_CALLABLE void adj_pow(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret
         assert(0);\
     })\
 }\
-inline CUDA_CALLABLE void adj_leaky_min(T a, T b, T r, T& adj_a, T& adj_b, T& adj_r, T adj_ret)\
+inline CUDA_CALLABLE void adj_leaky_min(T a, T b, T r, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T WP_THREAD& adj_r, T adj_ret)\
 {\
     if (a < b)\
         adj_a += adj_ret;\
@@ -1670,7 +1898,7 @@ inline CUDA_CALLABLE void adj_leaky_min(T a, T b, T r, T& adj_a, T& adj_b, T& ad
         adj_b += adj_ret;\
     }\
 }\
-inline CUDA_CALLABLE void adj_leaky_max(T a, T b, T r, T& adj_a, T& adj_b, T& adj_r, T adj_ret)\
+inline CUDA_CALLABLE void adj_leaky_max(T a, T b, T r, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T WP_THREAD& adj_r, T adj_ret)\
 {\
     if (a > b)\
         adj_a += adj_ret;\
@@ -1680,7 +1908,7 @@ inline CUDA_CALLABLE void adj_leaky_max(T a, T b, T r, T& adj_a, T& adj_b, T& ad
         adj_b += adj_ret;\
     }\
 }\
-inline CUDA_CALLABLE void adj_acos(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_acos(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     T d = sqrt(T(1)-x*x);\
     DO_IF_FPCHECK(adj_x -= (T(1)/d)*adj_ret;\
@@ -1692,7 +1920,7 @@ inline CUDA_CALLABLE void adj_acos(T x, T& adj_x, T adj_ret)\
     DO_IF_NO_FPCHECK(if (d > T(0))\
         adj_x -= (T(1)/d)*adj_ret;)\
 }\
-inline CUDA_CALLABLE void adj_asin(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_asin(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     T d = sqrt(T(1)-x*x);\
     DO_IF_FPCHECK(adj_x += (T(1)/d)*adj_ret;\
@@ -1704,7 +1932,7 @@ inline CUDA_CALLABLE void adj_asin(T x, T& adj_x, T adj_ret)\
     DO_IF_NO_FPCHECK(if (d > T(0))\
         adj_x += (T(1)/d)*adj_ret;)\
 }\
-inline CUDA_CALLABLE void adj_tan(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_tan(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     T cos_x = cos(x);\
     DO_IF_FPCHECK(adj_x += (T(1)/(cos_x*cos_x))*adj_ret;\
@@ -1716,11 +1944,11 @@ inline CUDA_CALLABLE void adj_tan(T x, T& adj_x, T adj_ret)\
     DO_IF_NO_FPCHECK(if (cos_x != T(0))\
         adj_x += (T(1)/(cos_x*cos_x))*adj_ret;)\
 }\
-inline CUDA_CALLABLE void adj_atan(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_atan(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += adj_ret /(x*x + T(1));\
 }\
-inline CUDA_CALLABLE void adj_atan2(T y, T x, T& adj_y, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_atan2(T y, T x, T WP_THREAD& adj_y, T WP_THREAD& adj_x, T adj_ret)\
 {\
     T d = x*x + y*y;\
     DO_IF_FPCHECK(adj_x -= y/d*adj_ret;\
@@ -1736,27 +1964,27 @@ inline CUDA_CALLABLE void adj_atan2(T y, T x, T& adj_y, T& adj_x, T adj_ret)\
         adj_y += (x/d)*adj_ret;\
     })\
 }\
-inline CUDA_CALLABLE void adj_sin(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_sin(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += cos(x)*adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_cos(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_cos(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x -= sin(x)*adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_sinh(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_sinh(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += cosh(x)*adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_cosh(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_cosh(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += sinh(x)*adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_tanh(T x, T ret, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_tanh(T x, T ret, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += (T(1) - ret*ret)*adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_sqrt(T x, T ret, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_sqrt(T x, T ret, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += T(0.5)*(T(1)/ret)*adj_ret;\
     DO_IF_FPCHECK(if (!isfinite(adj_x))\
@@ -1765,7 +1993,7 @@ inline CUDA_CALLABLE void adj_sqrt(T x, T ret, T& adj_x, T adj_ret)\
         assert(0);\
     })\
 }\
-inline CUDA_CALLABLE void adj_cbrt(T x, T ret, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_cbrt(T x, T ret, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += (T(1)/T(3))*(T(1)/(ret*ret))*adj_ret;\
     DO_IF_FPCHECK(if (!isfinite(adj_x))\
@@ -1774,35 +2002,35 @@ inline CUDA_CALLABLE void adj_cbrt(T x, T ret, T& adj_x, T adj_ret)\
         assert(0);\
     })\
 }\
-inline CUDA_CALLABLE void adj_degrees(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_degrees(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += T(RAD_TO_DEG) * adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_radians(T x, T& adj_x, T adj_ret)\
+inline CUDA_CALLABLE void adj_radians(T x, T WP_THREAD& adj_x, T adj_ret)\
 {\
     adj_x += T(DEG_TO_RAD) * adj_ret;\
 }\
-inline CUDA_CALLABLE void adj_round(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_round(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at half-integer points) */ \
 }\
-inline CUDA_CALLABLE void adj_rint(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_rint(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at half-integer points) */ \
 }\
-inline CUDA_CALLABLE void adj_trunc(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_trunc(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at integer points) */ \
 }\
-inline CUDA_CALLABLE void adj_floor(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_floor(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at integer points) */ \
 }\
-inline CUDA_CALLABLE void adj_ceil(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_ceil(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is zero almost everywhere (subgradient at integer points) */ \
 }\
-inline CUDA_CALLABLE void adj_frac(T x, T& adj_x, T adj_ret) \
+inline CUDA_CALLABLE void adj_frac(T x, T WP_THREAD& adj_x, T adj_ret) \
 { \
     /* MISSINGADJOINT: gradient is 1 between integers (subgradient at integer points) */ \
 }
@@ -1812,17 +2040,27 @@ DECLARE_ADJOINTS(float16)
 DECLARE_ADJOINTS(bfloat16)
 #endif
 DECLARE_ADJOINTS(float32)
+#if !defined(WP_NO_FLOAT64)
 DECLARE_ADJOINTS(float64)
+#endif  // !WP_NO_FLOAT64
 
-template <typename C, typename T> CUDA_CALLABLE inline T where(const C& cond, const T& a, const T& b)
+template <typename C, typename T>
+CUDA_CALLABLE inline T where(const C WP_THREAD& cond, const T WP_THREAD& a, const T WP_THREAD& b)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     return (!!cond) ? a : b;
 }
 
 template <typename C, typename TA, typename TB, typename TRet>
-CUDA_CALLABLE inline void
-adj_where(const C& cond, const TA& a, const TB& b, C& adj_cond, TA& adj_a, TB& adj_b, const TRet& adj_ret)
+CUDA_CALLABLE inline void adj_where(
+    const C WP_THREAD& cond,
+    const TA WP_THREAD& a,
+    const TB WP_THREAD& b,
+    C WP_THREAD& adj_cond,
+    TA WP_THREAD& adj_a,
+    TB WP_THREAD& adj_b,
+    const TRet WP_THREAD& adj_ret
+)
 {
     // The double NOT operator !! casts to bool without compiler warnings.
     if (!!cond)
@@ -1831,17 +2069,20 @@ adj_where(const C& cond, const TA& a, const TB& b, C& adj_cond, TA& adj_a, TB& a
         adj_b += adj_ret;
 }
 
-template <typename T> CUDA_CALLABLE inline T copy(const T& src) { return src; }
+template <typename T> CUDA_CALLABLE inline T copy(const T WP_THREAD& src) { return src; }
 
-template <typename T> CUDA_CALLABLE inline void adj_copy(const T& src, T& adj_src, T& adj_dest)
+template <typename T>
+CUDA_CALLABLE inline void adj_copy(const T WP_THREAD& src, T WP_THREAD& adj_src, T WP_THREAD& adj_dest)
 {
     adj_src += adj_dest;
     adj_dest = T {};
 }
 
-template <typename T> CUDA_CALLABLE inline void assign(T& dest, const T& src) { dest = src; }
+template <typename T> CUDA_CALLABLE inline void assign(T WP_THREAD& dest, const T WP_THREAD& src) { dest = src; }
 
-template <typename T> CUDA_CALLABLE inline void adj_assign(T& dest, const T& src, T& adj_dest, T& adj_src)
+template <typename T>
+CUDA_CALLABLE inline void
+adj_assign(T WP_THREAD& dest, const T WP_THREAD& src, T WP_THREAD& adj_dest, T WP_THREAD& adj_src)
 {
     // this is generally a non-differentiable operation since it violates SSA,
     // except in read-modify-write statements which are reversible through backpropagation
@@ -1852,61 +2093,90 @@ template <typename T> CUDA_CALLABLE inline void adj_assign(T& dest, const T& src
 
 // some helpful operator overloads (just for C++ use, these are not adjointed)
 
-template <typename T> CUDA_CALLABLE inline T& operator+=(T& a, const T& b)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& operator+=(T WP_THREAD& a, const T WP_THREAD& b)
 {
     a = add(a, b);
     return a;
 }
 
-template <typename T> CUDA_CALLABLE inline T& operator-=(T& a, const T& b)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& operator-=(T WP_THREAD& a, const T WP_THREAD& b)
 {
     a = sub(a, b);
     return a;
 }
 
-template <typename T> CUDA_CALLABLE inline T& operator&=(T& a, const T& b)
+#if defined(__METAL_VERSION__)
+// Shared tile elements live in threadgroup memory; compute through a thread-local copy.
+template <typename T> inline T threadgroup& operator+=(T threadgroup& a, const T WP_THREAD& b)
+{
+    a = add(T(a), b);
+    return a;
+}
+
+template <typename T> inline T threadgroup& operator-=(T threadgroup& a, const T WP_THREAD& b)
+{
+    a = sub(T(a), b);
+    return a;
+}
+#endif
+
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& operator&=(T WP_THREAD& a, const T WP_THREAD& b)
 {
     a = bit_and(a, b);
     return a;
 }
 
-template <typename T> CUDA_CALLABLE inline T& operator|=(T& a, const T& b)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& operator|=(T WP_THREAD& a, const T WP_THREAD& b)
 {
     a = bit_or(a, b);
     return a;
 }
 
-template <typename T> CUDA_CALLABLE inline T& operator^=(T& a, const T& b)
+template <typename T> CUDA_CALLABLE inline T WP_THREAD& operator^=(T WP_THREAD& a, const T WP_THREAD& b)
 {
     a = bit_xor(a, b);
     return a;
 }
 
-template <typename T> CUDA_CALLABLE inline T operator+(const T& a, const T& b) { return add(a, b); }
+template <typename T> CUDA_CALLABLE inline T operator+(const T WP_THREAD& a, const T WP_THREAD& b) { return add(a, b); }
 
-template <typename T> CUDA_CALLABLE inline T operator-(const T& a, const T& b) { return sub(a, b); }
+template <typename T> CUDA_CALLABLE inline T operator-(const T WP_THREAD& a, const T WP_THREAD& b) { return sub(a, b); }
 
-template <typename T> CUDA_CALLABLE inline T operator&(const T& a, const T& b) { return bit_and(a, b); }
+template <typename T> CUDA_CALLABLE inline T operator&(const T WP_THREAD& a, const T WP_THREAD& b)
+{
+    return bit_and(a, b);
+}
 
-template <typename T> CUDA_CALLABLE inline T operator|(const T& a, const T& b) { return bit_or(a, b); }
+template <typename T> CUDA_CALLABLE inline T operator|(const T WP_THREAD& a, const T WP_THREAD& b)
+{
+    return bit_or(a, b);
+}
 
-template <typename T> CUDA_CALLABLE inline T operator^(const T& a, const T& b) { return bit_xor(a, b); }
+template <typename T> CUDA_CALLABLE inline T operator^(const T WP_THREAD& a, const T WP_THREAD& b)
+{
+    return bit_xor(a, b);
+}
 
-template <typename T> CUDA_CALLABLE inline T pos(const T& x) { return x; }
-template <typename T> CUDA_CALLABLE inline void adj_pos(const T& x, T& adj_x, const T& adj_ret) { adj_x += T(adj_ret); }
+template <typename T> CUDA_CALLABLE inline T pos(const T WP_THREAD& x) { return x; }
+template <typename T>
+CUDA_CALLABLE inline void adj_pos(const T WP_THREAD& x, T WP_THREAD& adj_x, const T WP_THREAD& adj_ret)
+{
+    adj_x += T(adj_ret);
+}
 
 // unary negation implemented as negative multiply, not sure the fp implications of this
 // may be better as 0.0 - x?
-template <typename T> CUDA_CALLABLE inline T neg(const T& x) { return T(0.0) - x; }
-template <typename T> CUDA_CALLABLE inline void adj_neg(const T& x, T& adj_x, const T& adj_ret)
+template <typename T> CUDA_CALLABLE inline T neg(const T WP_THREAD& x) { return T(0.0) - x; }
+template <typename T>
+CUDA_CALLABLE inline void adj_neg(const T WP_THREAD& x, T WP_THREAD& adj_x, const T WP_THREAD& adj_ret)
 {
     adj_x += T(-adj_ret);
 }
 
 // unary boolean negation
-template <typename T> CUDA_CALLABLE inline bool unot(const T& b) { return !b; }
+template <typename T> CUDA_CALLABLE inline bool unot(const T WP_THREAD& b) { return !b; }
 
-static constexpr int LAUNCH_MAX_DIMS = 4;  // should match types.py
+static WP_CONSTANT constexpr int LAUNCH_MAX_DIMS = 4;  // should match types.py
 
 template <int N> struct launch_bounds_t {
     static_assert(N > 0 && N <= LAUNCH_MAX_DIMS, "launch_bounds_t<N> only supports 1-4 dimensions");
@@ -1925,7 +2195,8 @@ struct launch_coord_t {
 };
 
 // unravels a linear thread index to the corresponding launch grid coord (up to 4d)
-template <int N> inline CUDA_CALLABLE launch_coord_t launch_coord(size_t linear, const launch_bounds_t<N>& bounds)
+template <int N>
+inline CUDA_CALLABLE launch_coord_t launch_coord(size_t linear, const launch_bounds_t<N> WP_THREAD& bounds)
 {
     launch_coord_t coord = { 0, 0, 0, 0 };
 
@@ -1963,13 +2234,15 @@ inline CUDA_CALLABLE int block_dim()
 #endif
 }
 
-template <int N> inline CUDA_CALLABLE int tid(size_t index, const launch_bounds_t<N>& bounds)
+template <int N> inline CUDA_CALLABLE int tid(size_t index, const launch_bounds_t<N> WP_THREAD& bounds)
 {
     launch_coord_t coord = launch_coord(index, bounds);
     return static_cast<int>(coord.i);
 }
 
-template <int N> inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, size_t index, const launch_bounds_t<N>& bounds)
+template <int N>
+inline CUDA_CALLABLE_DEVICE void
+tid(int WP_THREAD& i, int WP_THREAD& j, size_t index, const launch_bounds_t<N> WP_THREAD& bounds)
 {
     launch_coord_t coord = launch_coord(index, bounds);
     i = coord.i;
@@ -1977,7 +2250,8 @@ template <int N> inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, size_t ind
 }
 
 template <int N>
-inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, int& k, size_t index, const launch_bounds_t<N>& bounds)
+inline CUDA_CALLABLE_DEVICE void
+tid(int WP_THREAD& i, int WP_THREAD& j, int WP_THREAD& k, size_t index, const launch_bounds_t<N> WP_THREAD& bounds)
 {
     launch_coord_t coord = launch_coord(index, bounds);
     i = coord.i;
@@ -1986,7 +2260,13 @@ inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, int& k, size_t index, const
 }
 
 template <int N>
-inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, int& k, int& l, size_t index, const launch_bounds_t<N>& bounds)
+inline CUDA_CALLABLE_DEVICE void
+tid(int WP_THREAD& i,
+    int WP_THREAD& j,
+    int WP_THREAD& k,
+    int WP_THREAD& l,
+    size_t index,
+    const launch_bounds_t<N> WP_THREAD& bounds)
 {
     launch_coord_t coord = launch_coord(index, bounds);
     i = coord.i;
@@ -1996,8 +2276,8 @@ inline CUDA_CALLABLE_DEVICE void tid(int& i, int& j, int& k, int& l, size_t inde
 }
 
 // should match types.py
-static const int SLICE_BEGIN = (1LL << (sizeof(int) * 8 - 1)) - 1;  // std::numeric_limits<int>::max()
-static const int SLICE_END = -(1LL << (sizeof(int) * 8 - 1));  // std::numeric_limits<int>::min()
+static WP_CONSTANT const int SLICE_BEGIN = (int64(1) << (sizeof(int) * 8 - 1)) - 1;  // std::numeric_limits<int>::max()
+static WP_CONSTANT const int SLICE_END = -(int64(1) << (sizeof(int) * 8 - 1));  // std::numeric_limits<int>::min()
 
 struct slice_t {
     int start;
@@ -2019,7 +2299,7 @@ struct slice_t {
     }
 };
 
-CUDA_CALLABLE inline void slice_assert_step_nonzero(const slice_t& slice)
+CUDA_CALLABLE inline void slice_assert_step_nonzero(const slice_t WP_THREAD& slice)
 {
     if (slice.step != 0) {
         return;
@@ -2033,7 +2313,7 @@ CUDA_CALLABLE inline void slice_assert_step_nonzero(const slice_t& slice)
 #endif
 }
 
-CUDA_CALLABLE inline slice_t slice_adjust_indices(const slice_t& slice, int length)
+CUDA_CALLABLE inline slice_t slice_adjust_indices(const slice_t WP_THREAD& slice, int length)
 {
     slice_assert_step_nonzero(slice);
 
@@ -2056,7 +2336,7 @@ CUDA_CALLABLE inline slice_t slice_adjust_indices(const slice_t& slice, int leng
     return { start, stop, slice.step };
 }
 
-CUDA_CALLABLE inline int slice_get_length_unchecked(const slice_t& slice)
+CUDA_CALLABLE inline int slice_get_length_unchecked(const slice_t WP_THREAD& slice)
 {
     if (slice.step > 0 && slice.start < slice.stop) {
         return 1 + (slice.stop - slice.start - 1) / slice.step;
@@ -2069,15 +2349,17 @@ CUDA_CALLABLE inline int slice_get_length_unchecked(const slice_t& slice)
     return 0;
 }
 
-CUDA_CALLABLE inline int slice_get_length(const slice_t& slice)
+CUDA_CALLABLE inline int slice_get_length(const slice_t WP_THREAD& slice)
 {
     slice_assert_step_nonzero(slice);
     return slice_get_length_unchecked(slice);
 }
 
-template <typename T> inline CUDA_CALLABLE T atomic_add(T* buf, T value)
+template <typename T> inline CUDA_CALLABLE T atomic_add(T WP_DEVICE* buf, T value)
 {
-#if !defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_add(buf, value);
+#elif !defined(__CUDA_ARCH__)
     T old = buf[0];
     buf[0] += value;
     return old;
@@ -2086,9 +2368,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_add(T* buf, T value)
 #endif
 }
 
-template <> inline CUDA_CALLABLE int64 atomic_add(int64* buf, int64 value)
+template <> inline CUDA_CALLABLE int64 atomic_add(int64 WP_DEVICE* buf, int64 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_add(buf, value);
+#elif !defined(__CUDA_ARCH__)
     int64 old = buf[0];
     buf[0] += value;
     return old;
@@ -2100,9 +2384,11 @@ template <> inline CUDA_CALLABLE int64 atomic_add(int64* buf, int64 value)
 #endif
 }
 
-template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
+template <> inline CUDA_CALLABLE float16 atomic_add(float16 WP_DEVICE* buf, float16 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_add(buf, value);
+#elif !defined(__CUDA_ARCH__)
     float16 old = buf[0];
     buf[0] += value;
     return old;
@@ -2135,9 +2421,11 @@ template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
 }
 
 #ifndef WP_NO_BFLOAT16
-template <> inline CUDA_CALLABLE bfloat16 atomic_add(bfloat16* buf, bfloat16 value)
+template <> inline CUDA_CALLABLE bfloat16 atomic_add(bfloat16 WP_DEVICE* buf, bfloat16 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_add(buf, value);
+#elif !defined(__CUDA_ARCH__)
     bfloat16 old = buf[0];
     buf[0] += value;
     return old;
@@ -2167,7 +2455,8 @@ template <> inline CUDA_CALLABLE bfloat16 atomic_add(bfloat16* buf, bfloat16 val
 }
 #endif  // WP_NO_BFLOAT16
 
-template <> inline CUDA_CALLABLE float64 atomic_add(float64* buf, float64 value)
+#if !defined(WP_NO_FLOAT64)
+template <> inline CUDA_CALLABLE float64 atomic_add(float64 WP_DEVICE* buf, float64 value)
 {
 #if !defined(__CUDA_ARCH__)
     float64 old = buf[0];
@@ -2197,10 +2486,13 @@ template <> inline CUDA_CALLABLE float64 atomic_add(float64* buf, float64 value)
 
 #endif  // CUDA compiled by NVRTC
 }
+#endif  // !WP_NO_FLOAT64
 
-template <typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
+template <typename T> inline CUDA_CALLABLE T atomic_min(T WP_DEVICE* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_min(address, val);
+#elif defined(__CUDA_ARCH__)
     return atomicMin(address, val);
 #else
     T old = *address;
@@ -2219,9 +2511,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
 // CAS proceeds -- the stored payload changes, but the value stays NaN.
 // Loop termination is unaffected because the next iteration's `assumed`
 // matches the just-written bits.
-template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
+template <> inline CUDA_CALLABLE float atomic_min(float WP_DEVICE* address, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_min(address, val);
+#elif defined(__CUDA_ARCH__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -2245,7 +2539,8 @@ template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
 }
 
 // emulate atomic double min with atomicCAS()
-template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
+#if !defined(WP_NO_FLOAT64)
+template <> inline CUDA_CALLABLE double atomic_min(double WP_DEVICE* address, double val)
 {
 #if defined(__CUDA_ARCH__)
 
@@ -2269,10 +2564,11 @@ template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
     return old;
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 
 #ifndef WP_NO_BFLOAT16
 // emulate atomic bfloat16 min with atomicCAS()
-template <> inline CUDA_CALLABLE bfloat16 atomic_min(bfloat16* buf, bfloat16 val)
+template <> inline CUDA_CALLABLE bfloat16 atomic_min(bfloat16 WP_DEVICE* buf, bfloat16 val)
 {
 #if !defined(__CUDA_ARCH__)
     bfloat16 old = buf[0];
@@ -2307,9 +2603,11 @@ template <> inline CUDA_CALLABLE bfloat16 atomic_min(bfloat16* buf, bfloat16 val
 }
 #endif  // WP_NO_BFLOAT16
 
-template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
+template <typename T> inline CUDA_CALLABLE T atomic_max(T WP_DEVICE* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_max(address, val);
+#elif defined(__CUDA_ARCH__)
     return atomicMax(address, val);
 #else
     T old = *address;
@@ -2319,9 +2617,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
 }
 
 // emulate atomic float max with atomicCAS()
-template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
+template <> inline CUDA_CALLABLE float atomic_max(float WP_DEVICE* address, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_max(address, val);
+#elif defined(__CUDA_ARCH__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -2345,7 +2645,8 @@ template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
 }
 
 // emulate atomic double max with atomicCAS()
-template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
+#if !defined(WP_NO_FLOAT64)
+template <> inline CUDA_CALLABLE double atomic_max(double WP_DEVICE* address, double val)
 {
 #if defined(__CUDA_ARCH__)
 
@@ -2369,10 +2670,11 @@ template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
     return old;
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 
 #ifndef WP_NO_BFLOAT16
 // emulate atomic bfloat16 max with atomicCAS()
-template <> inline CUDA_CALLABLE bfloat16 atomic_max(bfloat16* buf, bfloat16 val)
+template <> inline CUDA_CALLABLE bfloat16 atomic_max(bfloat16 WP_DEVICE* buf, bfloat16 val)
 {
 #if !defined(__CUDA_ARCH__)
     bfloat16 old = buf[0];
@@ -2415,18 +2717,26 @@ template <> inline CUDA_CALLABLE bfloat16 atomic_max(bfloat16* buf, bfloat16 val
 //
 // Integer overloads are no-ops, generated by DECLARE_INT_OPS. The bool
 // overload is also a no-op.
-template <typename T> CUDA_CALLABLE inline void adj_atomic_minmax(T* addr, T* adj_addr, const T& value, T& adj_value)
+template <typename T>
+CUDA_CALLABLE inline void
+adj_atomic_minmax(T WP_DEVICE* addr, T WP_DEVICE* adj_addr, const T WP_THREAD& value, T WP_THREAD& adj_value)
 {
-    if (value == *addr || (::isnan(float(value)) && ::isnan(float(*addr))))
-        adj_value += *adj_addr;
+    const T current = *addr;  // thread-local copy: addr is device memory on Metal
+    if (value == current || (::isnan(float(value)) && ::isnan(float(current))))
+        adj_value += T(*adj_addr);
 }
 
-CUDA_CALLABLE inline void adj_atomic_minmax(bool* buf, bool* adj_buf, const bool& value, bool& adj_value) { }
-
-
-template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T val)
+CUDA_CALLABLE inline void
+adj_atomic_minmax(bool WP_DEVICE* buf, bool WP_DEVICE* adj_buf, const bool WP_THREAD& value, bool WP_THREAD& adj_value)
 {
-#if defined(__CUDA_ARCH__)
+}
+
+
+template <typename T> inline CUDA_CALLABLE T atomic_cas(T WP_DEVICE* address, T compare, T val)
+{
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_cas(address, compare, val);
+#elif defined(__CUDA_ARCH__)
     return atomicCAS(address, compare, val);
 #else
     T old = *address;
@@ -2437,9 +2747,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T
 #endif
 }
 
-template <> inline CUDA_CALLABLE float atomic_cas(float* address, float compare, float val)
+template <> inline CUDA_CALLABLE float atomic_cas(float WP_DEVICE* address, float compare, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_cas(address, compare, val);
+#elif defined(__CUDA_ARCH__)
     unsigned int compare_bits = __float_as_uint(compare);
     unsigned int val_bits = __float_as_uint(val);
     auto result = atomicCAS(reinterpret_cast<unsigned int*>(address), compare_bits, val_bits);
@@ -2453,7 +2765,8 @@ template <> inline CUDA_CALLABLE float atomic_cas(float* address, float compare,
 #endif
 }
 
-template <> inline CUDA_CALLABLE double atomic_cas(double* address, double compare, double val)
+#if !defined(WP_NO_FLOAT64)
+template <> inline CUDA_CALLABLE double atomic_cas(double WP_DEVICE* address, double compare, double val)
 {
 #if defined(__CUDA_ARCH__)
     unsigned long long int compare_bits = static_cast<unsigned long long int>(__double_as_longlong(compare));
@@ -2468,10 +2781,13 @@ template <> inline CUDA_CALLABLE double atomic_cas(double* address, double compa
     return old;
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 
-template <> inline CUDA_CALLABLE int64 atomic_cas(int64* address, int64 compare, int64 val)
+template <> inline CUDA_CALLABLE int64 atomic_cas(int64 WP_DEVICE* address, int64 compare, int64 val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_cas(address, compare, val);
+#elif defined(__CUDA_ARCH__)
     auto result = atomicCAS(
         reinterpret_cast<unsigned long long int*>(address), static_cast<unsigned long long int>(compare),
         static_cast<unsigned long long int>(val)
@@ -2486,9 +2802,11 @@ template <> inline CUDA_CALLABLE int64 atomic_cas(int64* address, int64 compare,
 #endif
 }
 
-template <typename T> inline CUDA_CALLABLE T atomic_exch(T* address, T val)
+template <typename T> inline CUDA_CALLABLE T atomic_exch(T WP_DEVICE* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_exch(address, val);
+#elif defined(__CUDA_ARCH__)
     return atomicExch(address, val);
 #else
     T old = *address;
@@ -2497,7 +2815,8 @@ template <typename T> inline CUDA_CALLABLE T atomic_exch(T* address, T val)
 #endif
 }
 
-template <> inline CUDA_CALLABLE double atomic_exch(double* address, double val)
+#if !defined(WP_NO_FLOAT64)
+template <> inline CUDA_CALLABLE double atomic_exch(double WP_DEVICE* address, double val)
 {
 #if defined(__CUDA_ARCH__)
     unsigned long long int val_bits = static_cast<unsigned long long int>(__double_as_longlong(val));
@@ -2509,10 +2828,13 @@ template <> inline CUDA_CALLABLE double atomic_exch(double* address, double val)
     return old;
 #endif
 }
+#endif  // !WP_NO_FLOAT64
 
-template <> inline CUDA_CALLABLE int64 atomic_exch(int64* address, int64 val)
+template <> inline CUDA_CALLABLE int64 atomic_exch(int64 WP_DEVICE* address, int64 val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_exch(address, val);
+#elif defined(__CUDA_ARCH__)
     auto result
         = atomicExch(reinterpret_cast<unsigned long long int*>(address), static_cast<unsigned long long int>(val));
     return static_cast<int64>(result);
@@ -2525,22 +2847,32 @@ template <> inline CUDA_CALLABLE int64 atomic_exch(int64* address, int64 val)
 
 
 template <typename T>
-CUDA_CALLABLE inline void
-adj_atomic_cas(T* address, T compare, T val, T* adj_address, T& adj_compare, T& adj_val, T adj_ret)
+CUDA_CALLABLE inline void adj_atomic_cas(
+    T WP_DEVICE* address,
+    T compare,
+    T val,
+    T WP_DEVICE* adj_address,
+    T WP_THREAD& adj_compare,
+    T WP_THREAD& adj_val,
+    T adj_ret
+)
 {
     // Not implemented
 }
 
 template <typename T>
-CUDA_CALLABLE inline void adj_atomic_exch(T* address, T val, T* adj_address, T& adj_val, T adj_ret)
+CUDA_CALLABLE inline void
+adj_atomic_exch(T WP_DEVICE* address, T val, T WP_DEVICE* adj_address, T WP_THREAD& adj_val, T adj_ret)
 {
     // Not implemented
 }
 
 
-template <typename T> inline CUDA_CALLABLE T atomic_and(T* buf, T value)
+template <typename T> inline CUDA_CALLABLE T atomic_and(T WP_DEVICE* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_and(buf, value);
+#elif defined(__CUDA_ARCH__)
     return atomicAnd(buf, value);
 #else
     T old = buf[0];
@@ -2549,9 +2881,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_and(T* buf, T value)
 #endif
 }
 
-template <typename T> inline CUDA_CALLABLE T atomic_or(T* buf, T value)
+template <typename T> inline CUDA_CALLABLE T atomic_or(T WP_DEVICE* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_or(buf, value);
+#elif defined(__CUDA_ARCH__)
     return atomicOr(buf, value);
 #else
     T old = buf[0];
@@ -2560,9 +2894,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_or(T* buf, T value)
 #endif
 }
 
-template <typename T> inline CUDA_CALLABLE T atomic_xor(T* buf, T value)
+template <typename T> inline CUDA_CALLABLE T atomic_xor(T WP_DEVICE* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__METAL_VERSION__)
+    return wp_metal_atomic_xor(buf, value);
+#elif defined(__CUDA_ARCH__)
     return atomicXor(buf, value);
 #else
     T old = buf[0];
@@ -2590,7 +2926,7 @@ namespace wp {
 
 // dot for scalar types just to make some templates compile for scalar/vector
 inline CUDA_CALLABLE float dot(float a, float b) { return mul(a, b); }
-inline CUDA_CALLABLE void adj_dot(float a, float b, float& adj_a, float& adj_b, float adj_ret)
+inline CUDA_CALLABLE void adj_dot(float a, float b, float WP_THREAD& adj_a, float WP_THREAD& adj_b, float adj_ret)
 {
     adj_mul(a, b, adj_a, adj_b, adj_ret);
 }
@@ -2604,7 +2940,7 @@ CUDA_CALLABLE inline T smoothstep(T edge0, T edge1, T x)\
     x = clamp((x - edge0) / (edge1 - edge0), T(0), T(1));\
     return x * x * (T(3) - T(2) * x);\
 }\
-CUDA_CALLABLE inline void adj_smoothstep(T edge0, T edge1, T x, T& adj_edge0, T& adj_edge1, T& adj_x, T adj_ret)\
+CUDA_CALLABLE inline void adj_smoothstep(T edge0, T edge1, T x, T WP_THREAD& adj_edge0, T WP_THREAD& adj_edge1, T WP_THREAD& adj_x, T adj_ret)\
 {\
     T ab = edge0 - edge1;\
     T ax = edge0 - x;\
@@ -2622,11 +2958,11 @@ CUDA_CALLABLE inline void adj_smoothstep(T edge0, T edge1, T x, T& adj_edge0, T&
     adj_edge1 += adj_ret * ((T(6) * ax * ax * xb) / ab4);\
     adj_x     += adj_ret * ((T(6) * ax * bx     ) / ab3);\
 }\
-CUDA_CALLABLE inline T lerp(const T& a, const T& b, T t)\
+CUDA_CALLABLE inline T lerp(const T WP_THREAD& a, const T WP_THREAD& b, T t)\
 {\
     return a*(T(1)-t) + b*t;\
 }\
-CUDA_CALLABLE inline void adj_lerp(const T& a, const T& b, T t, T& adj_a, T& adj_b, T& adj_t, const T& adj_ret)\
+CUDA_CALLABLE inline void adj_lerp(const T WP_THREAD& a, const T WP_THREAD& b, T t, T WP_THREAD& adj_a, T WP_THREAD& adj_b, T WP_THREAD& adj_t, const T WP_THREAD& adj_ret)\
 {\
     adj_a += adj_ret*(T(1)-t);\
     adj_b += adj_ret*t;\
@@ -2638,7 +2974,9 @@ DECLARE_INTERP_FUNCS(float16)
 DECLARE_INTERP_FUNCS(bfloat16)
 #endif
 DECLARE_INTERP_FUNCS(float32)
+#if !defined(WP_NO_FLOAT64)
 DECLARE_INTERP_FUNCS(float64)
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE void print(const str s) { printf("%s\n", s); }
 
@@ -2650,7 +2988,9 @@ inline CUDA_CALLABLE void print(int i) { printf("%d\n", i); }
 
 inline CUDA_CALLABLE void print(long i) { printf("%ld\n", i); }
 
+#if !defined(__METAL_VERSION__)
 inline CUDA_CALLABLE void print(long long i) { printf("%lld\n", i); }
+#endif
 
 inline CUDA_CALLABLE void print(unsigned char i) { printf("%u\n", i); }
 
@@ -2660,9 +3000,17 @@ inline CUDA_CALLABLE void print(unsigned int i) { printf("%u\n", i); }
 
 inline CUDA_CALLABLE void print(unsigned long i) { printf("%lu\n", i); }
 
+#if !defined(__METAL_VERSION__)
 inline CUDA_CALLABLE void print(unsigned long long i) { printf("%llu\n", i); }
+#endif
 
-inline CUDA_CALLABLE void print(bool b) { printf(b ? "True\n" : "False\n"); }
+inline CUDA_CALLABLE void print(bool b)
+{
+    if (b)
+        printf("True\n");
+    else
+        printf("False\n");
+}
 
 template <unsigned Length, typename Type> inline CUDA_CALLABLE void print(vec_t<Length, Type> v)
 {
@@ -2677,7 +3025,8 @@ template <typename Type> inline CUDA_CALLABLE void print(quat_t<Type> i)
     printf("%g %g %g %g\n", float(i.x), float(i.y), float(i.z), float(i.w));
 }
 
-template <unsigned Rows, unsigned Cols, typename Type> inline CUDA_CALLABLE void print(const mat_t<Rows, Cols, Type>& m)
+template <unsigned Rows, unsigned Cols, typename Type>
+inline CUDA_CALLABLE void print(const mat_t<Rows, Cols, Type> WP_THREAD& m)
 {
     for (unsigned i = 0; i < Rows; ++i) {
         for (unsigned j = 0; j < Cols; ++j) {
@@ -2695,7 +3044,7 @@ template <typename Type> inline CUDA_CALLABLE void print(transform_t<Type> t)
     );
 }
 
-template <typename T> inline CUDA_CALLABLE void adj_print(const T& x, const T& adj_x)
+template <typename T> inline CUDA_CALLABLE void adj_print(const T WP_THREAD& x, const T WP_THREAD& adj_x)
 {
     printf("adj: <type without print implementation>\n");
 }
@@ -2706,24 +3055,30 @@ inline CUDA_CALLABLE void adj_print(half x, half adj_x) { printf("adj: %g\n", ha
 inline CUDA_CALLABLE void adj_print(bfloat16 x, bfloat16 adj_x) { printf("adj: %g\n", bfloat16_to_float(adj_x)); }
 #endif
 inline CUDA_CALLABLE void adj_print(float x, float adj_x) { printf("adj: %g\n", adj_x); }
+#if !defined(WP_NO_FLOAT64)
 inline CUDA_CALLABLE void adj_print(double x, double adj_x) { printf("adj: %g\n", adj_x); }
+#endif  // !WP_NO_FLOAT64
 
 inline CUDA_CALLABLE void adj_print(signed char x, signed char adj_x) { printf("adj: %d\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(short x, short adj_x) { printf("adj: %d\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(int x, int adj_x) { printf("adj: %d\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(long x, long adj_x) { printf("adj: %ld\n", adj_x); }
+#if !defined(__METAL_VERSION__)
 inline CUDA_CALLABLE void adj_print(long long x, long long adj_x) { printf("adj: %lld\n", adj_x); }
+#endif
 
 inline CUDA_CALLABLE void adj_print(unsigned char x, unsigned char adj_x) { printf("adj: %u\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(unsigned short x, unsigned short adj_x) { printf("adj: %u\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(unsigned x, unsigned adj_x) { printf("adj: %u\n", adj_x); }
 inline CUDA_CALLABLE void adj_print(unsigned long x, unsigned long adj_x) { printf("adj: %lu\n", adj_x); }
+#if !defined(__METAL_VERSION__)
 inline CUDA_CALLABLE void adj_print(unsigned long long x, unsigned long long adj_x) { printf("adj: %llu\n", adj_x); }
+#endif
 
 inline CUDA_CALLABLE void adj_print(bool x, bool adj_x) { printf("adj: %s\n", (adj_x ? "True" : "False")); }
 
 template <unsigned Length, typename Type>
-inline CUDA_CALLABLE void adj_print(const vec_t<Length, Type>& v, const vec_t<Length, Type>& adj_v)
+inline CUDA_CALLABLE void adj_print(const vec_t<Length, Type> WP_THREAD& v, const vec_t<Length, Type> WP_THREAD& adj_v)
 {
     printf("adj:");
     for (unsigned i = 0; i < Length; i++)
@@ -2732,7 +3087,8 @@ inline CUDA_CALLABLE void adj_print(const vec_t<Length, Type>& v, const vec_t<Le
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
-inline CUDA_CALLABLE void adj_print(const mat_t<Rows, Cols, Type>& m, const mat_t<Rows, Cols, Type>& adj_m)
+inline CUDA_CALLABLE void
+adj_print(const mat_t<Rows, Cols, Type> WP_THREAD& m, const mat_t<Rows, Cols, Type> WP_THREAD& adj_m)
 {
     for (unsigned i = 0; i < Rows; i++) {
         if (i == 0)
@@ -2745,12 +3101,14 @@ inline CUDA_CALLABLE void adj_print(const mat_t<Rows, Cols, Type>& m, const mat_
     }
 }
 
-template <typename Type> inline CUDA_CALLABLE void adj_print(const quat_t<Type>& q, const quat_t<Type>& adj_q)
+template <typename Type>
+inline CUDA_CALLABLE void adj_print(const quat_t<Type> WP_THREAD& q, const quat_t<Type> WP_THREAD& adj_q)
 {
     printf("adj: %g %g %g %g\n", float(adj_q.x), float(adj_q.y), float(adj_q.z), float(adj_q.w));
 }
 
-template <typename Type> inline CUDA_CALLABLE void adj_print(const transform_t<Type>& t, const transform_t<Type>& adj_t)
+template <typename Type>
+inline CUDA_CALLABLE void adj_print(const transform_t<Type> WP_THREAD& t, const transform_t<Type> WP_THREAD& adj_t)
 {
     printf(
         "adj: (%g %g %g) (%g %g %g %g)\n", float(adj_t.p[0]), float(adj_t.p[1]), float(adj_t.p[2]), float(adj_t.q.x),
@@ -2758,9 +3116,9 @@ template <typename Type> inline CUDA_CALLABLE void adj_print(const transform_t<T
     );
 }
 
-inline CUDA_CALLABLE void adj_print(str t, str& adj_t) { printf("adj: %s\n", t); }
+inline CUDA_CALLABLE void adj_print(str t, str WP_THREAD& adj_t) { printf("adj: %s\n", t); }
 
-template <typename T> inline CUDA_CALLABLE void expect_eq(const T& actual, const T& expected)
+template <typename T> inline CUDA_CALLABLE void expect_eq(const T WP_THREAD& actual, const T WP_THREAD& expected)
 {
     if (!(actual == expected)) {
         printf("Error, expect_eq() failed:\n");
@@ -2771,7 +3129,7 @@ template <typename T> inline CUDA_CALLABLE void expect_eq(const T& actual, const
     }
 }
 
-template <typename T> inline CUDA_CALLABLE void expect_neq(const T& actual, const T& expected)
+template <typename T> inline CUDA_CALLABLE void expect_neq(const T WP_THREAD& actual, const T WP_THREAD& expected)
 {
     if (actual == expected) {
         printf("Error, expect_neq() failed:\n");
@@ -2782,7 +3140,9 @@ template <typename T> inline CUDA_CALLABLE void expect_neq(const T& actual, cons
     }
 }
 
-template <typename T> inline CUDA_CALLABLE void expect_near(const T& actual, const T& expected, const T& tolerance)
+template <typename T>
+inline CUDA_CALLABLE void
+expect_near(const T WP_THREAD& actual, const T WP_THREAD& expected, const T WP_THREAD& tolerance)
 {
     if (abs(actual - expected) > tolerance) {
         printf("Error, expect_near() failed with tolerance ");
@@ -2796,7 +3156,8 @@ template <typename T> inline CUDA_CALLABLE void expect_near(const T& actual, con
     }
 }
 
-inline CUDA_CALLABLE void expect_near(const vec3& actual, const vec3& expected, const float& tolerance)
+inline CUDA_CALLABLE void
+expect_near(const vec3 WP_THREAD& actual, const vec3 WP_THREAD& expected, const float WP_THREAD& tolerance)
 {
     const float diff
         = max(max(abs(actual[0] - expected[0]), abs(actual[1] - expected[1])), abs(actual[2] - expected[2]));
@@ -2818,16 +3179,24 @@ inline CUDA_CALLABLE void expect_near(const vec3& actual, const vec3& expected, 
 // include array.h so we have the print, isfinite functions for the inner array types defined
 #include "array.h"
 #include "tuple.h"
-#include "mesh.h"
-#include "bvh.h" 
 #include "svd.h"
-#include "hashgrid.h"
-#include "volume.h"
-#include "texture.h"
 #include "range.h"
 #include "rand.h"
 #include "noise.h"
 #include "matnn.h"
+#include "mesh.h"
+#include "bvh.h"
+#include "texture.h"
+#if defined(__METAL_VERSION__)
+namespace wp {
+// Stand-ins for builtins without a Metal implementation (codegen.METAL_UNSUPPORTED_BUILTIN_PREFIXES);
+// launching a kernel that reaches one raises in Python before any dispatch.
+template <typename R, typename... Args> inline R metal_unsupported(Args...) { return R(); }
+template <typename... Args> inline void metal_unsupported_void(Args...) { }
+}  // namespace wp
+#endif
+#include "volume.h"
+#include "hashgrid.h"
 #include "tile.h"
 #include "tile_matmul.h"
 #include "tile_solve.h"

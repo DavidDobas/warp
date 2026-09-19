@@ -549,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
             "native/mathdx.cpp",
             "native/coloring.cpp",
             "native/deterministic.cpp",
+            "native/metal.mm" if platform.system() == "Darwin" else "native/metal_stub.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 

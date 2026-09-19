@@ -10,6 +10,13 @@ from warp.tests.unittest_utils import *
 kernel_cache = {}
 
 
+def skip_spinlock_on_metal(test, device):
+    # Apple GPUs do not guarantee independent forward progress between SIMD lanes, so a lane holding
+    # the spinlock can starve behind lanes spinning on it and the kernel never terminates.
+    if getattr(wp.get_device(device), "is_metal", False):
+        test.skipTest("spinlocks are not supported on Metal")
+
+
 def getkernel(func, suffix=""):
     key = func.__name__ + "_" + suffix
     if key not in kernel_cache:
@@ -18,6 +25,8 @@ def getkernel(func, suffix=""):
 
 
 def test_atomic_cas(test, device, dtype, register_kernels=False):
+    if not register_kernels:
+        skip_spinlock_on_metal(test, device)
     warp_type = wp.dtype_from_numpy(np.dtype(dtype))
 
     @wp.func
@@ -72,6 +81,8 @@ def test_atomic_cas(test, device, dtype, register_kernels=False):
 
 
 def test_atomic_cas_2d(test, device, dtype, register_kernels=False):
+    if not register_kernels:
+        skip_spinlock_on_metal(test, device)
     warp_type = wp.dtype_from_numpy(np.dtype(dtype))
 
     @wp.func
@@ -126,6 +137,8 @@ def test_atomic_cas_2d(test, device, dtype, register_kernels=False):
 
 
 def test_atomic_cas_3d(test, device, dtype, register_kernels=False):
+    if not register_kernels:
+        skip_spinlock_on_metal(test, device)
     warp_type = wp.dtype_from_numpy(np.dtype(dtype))
 
     @wp.func
@@ -216,6 +229,8 @@ def create_spinlock_test_4d(dtype):
 
 
 def test_atomic_cas_4d(test, device, dtype, register_kernels=False):
+    if not register_kernels:
+        skip_spinlock_on_metal(test, device)
     warp_type = wp.dtype_from_numpy(np.dtype(dtype))
 
     @wp.func

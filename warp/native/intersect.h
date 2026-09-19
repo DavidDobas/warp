@@ -7,7 +7,8 @@
 
 namespace wp {
 
-CUDA_CALLABLE inline vec3 closest_point_to_aabb(const vec3& p, const vec3& lower, const vec3& upper)
+CUDA_CALLABLE inline vec3
+closest_point_to_aabb(const vec3 WP_THREAD& p, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper)
 {
     vec3 c;
 
@@ -41,7 +42,9 @@ CUDA_CALLABLE inline vec3 closest_point_to_aabb(const vec3& p, const vec3& lower
     return c;
 }
 
-CUDA_CALLABLE inline vec2 closest_point_to_triangle(const vec3& a, const vec3& b, const vec3& c, const vec3& p)
+CUDA_CALLABLE inline vec2 closest_point_to_triangle(
+    const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, const vec3 WP_THREAD& p
+)
 {
     vec3 ab = b - a;
     vec3 ac = c - a;
@@ -108,7 +111,9 @@ CUDA_CALLABLE inline vec2 closest_point_to_triangle(const vec3& a, const vec3& b
     return vec2(u, v);
 }
 
-CUDA_CALLABLE inline vec2 furthest_point_to_triangle(const vec3& a, const vec3& b, const vec3& c, const vec3& p)
+CUDA_CALLABLE inline vec2 furthest_point_to_triangle(
+    const vec3 WP_THREAD& a, const vec3 WP_THREAD& b, const vec3 WP_THREAD& c, const vec3 WP_THREAD& p
+)
 {
     vec3 pa = p - a;
     vec3 pb = p - b;
@@ -124,8 +129,13 @@ CUDA_CALLABLE inline vec2 furthest_point_to_triangle(const vec3& a, const vec3& 
     return vec2(0.0f, 0.0f);  // c is furthest
 }
 
-CUDA_CALLABLE inline bool
-intersect_ray_aabb(const vec3& pos, const vec3& rcp_dir, const vec3& lower, const vec3& upper, float& t)
+CUDA_CALLABLE inline bool intersect_ray_aabb(
+    const vec3 WP_THREAD& pos,
+    const vec3 WP_THREAD& rcp_dir,
+    const vec3 WP_THREAD& lower,
+    const vec3 WP_THREAD& upper,
+    float WP_THREAD& t
+)
 {
     float l1, l2, lmin, lmax;
 
@@ -156,7 +166,12 @@ intersect_ray_aabb(const vec3& pos, const vec3& rcp_dir, const vec3& lower, cons
 // outside [lower[i], upper[i]], otherwise leave the interval unconstrained for
 // that axis.
 CUDA_CALLABLE inline bool intersect_ray_aabb_robust(
-    const vec3& pos, const vec3& dir, const vec3& rcp_dir, const vec3& lower, const vec3& upper, float& t
+    const vec3 WP_THREAD& pos,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& rcp_dir,
+    const vec3 WP_THREAD& lower,
+    const vec3 WP_THREAD& upper,
+    float WP_THREAD& t
 )
 {
     float lmin = -FLT_MAX;
@@ -180,8 +195,12 @@ CUDA_CALLABLE inline bool intersect_ray_aabb_robust(
     return hit;
 }
 
-CUDA_CALLABLE inline bool
-intersect_aabb_aabb(const vec3& a_lower, const vec3& a_upper, const vec3& b_lower, const vec3& b_upper)
+CUDA_CALLABLE inline bool intersect_aabb_aabb(
+    const vec3 WP_THREAD& a_lower,
+    const vec3 WP_THREAD& a_upper,
+    const vec3 WP_THREAD& b_lower,
+    const vec3 WP_THREAD& b_upper
+)
 {
     if (a_lower[0] > b_upper[0] || a_lower[1] > b_upper[1] || a_lower[2] > b_upper[2] || a_upper[0] < b_lower[0]
         || a_upper[1] < b_lower[1] || a_upper[2] < b_lower[2]) {
@@ -193,8 +212,9 @@ intersect_aabb_aabb(const vec3& a_lower, const vec3& a_upper, const vec3& b_lowe
 
 // Sphere-AABB overlap: squared distance from the sphere center to the AABB <= radius_sq.
 // Takes pre-computed radius_sq to avoid recomputing it per node during traversal.
-CUDA_CALLABLE inline bool
-intersect_sphere_aabb(const vec3& center, float radius_sq, const vec3& lower, const vec3& upper)
+CUDA_CALLABLE inline bool intersect_sphere_aabb(
+    const vec3 WP_THREAD& center, float radius_sq, const vec3 WP_THREAD& lower, const vec3 WP_THREAD& upper
+)
 {
     // squared distance from center to the AABB, accumulated per axis (Ericson, RTCD):
     // branchless, and avoids materializing the closest point
@@ -206,17 +226,17 @@ intersect_sphere_aabb(const vec3& center, float radius_sq, const vec3& lower, co
 
 // Moller and Trumbore's method
 CUDA_CALLABLE inline bool intersect_ray_tri_moller(
-    const vec3& p,
-    const vec3& dir,
-    const vec3& a,
-    const vec3& b,
-    const vec3& c,
-    float& t,
-    float& u,
-    float& v,
-    float& w,
-    float& sign,
-    vec3* normal
+    const vec3 WP_THREAD& p,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& a,
+    const vec3 WP_THREAD& b,
+    const vec3 WP_THREAD& c,
+    float WP_THREAD& t,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
+    float WP_THREAD& w,
+    float WP_THREAD& sign,
+    vec3 WP_THREAD* normal
 )
 {
     vec3 ab = b - a;
@@ -250,17 +270,17 @@ CUDA_CALLABLE inline bool intersect_ray_tri_moller(
 
 
 CUDA_CALLABLE inline bool intersect_ray_tri_rtcd(
-    const vec3& p,
-    const vec3& dir,
-    const vec3& a,
-    const vec3& b,
-    const vec3& c,
-    float& t,
-    float& u,
-    float& v,
-    float& w,
-    float& sign,
-    vec3* normal
+    const vec3 WP_THREAD& p,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& a,
+    const vec3 WP_THREAD& b,
+    const vec3 WP_THREAD& c,
+    float WP_THREAD& t,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
+    float WP_THREAD& w,
+    float WP_THREAD& sign,
+    vec3 WP_THREAD* normal
 )
 {
     const vec3 ab = b - a;
@@ -309,9 +329,9 @@ CUDA_CALLABLE inline bool intersect_ray_tri_rtcd(
 #ifndef __CUDA_ARCH__
 
 // these are provided as built-ins by CUDA
-inline float __int_as_float(int i) { return *reinterpret_cast<float*>(&i); }
+inline float __int_as_float(int i) { return *reinterpret_cast<float WP_THREAD*>(&i); }
 
-inline int __float_as_int(float f) { return *reinterpret_cast<int*>(&f); }
+inline int __float_as_int(float f) { return *reinterpret_cast<int WP_THREAD*>(&f); }
 
 #endif
 
@@ -342,16 +362,16 @@ CUDA_CALLABLE inline float diff_product(float a, float b, float c, float d)
 
 // http://jcgt.org/published/0002/01/05/
 CUDA_CALLABLE inline bool intersect_ray_tri_woop(
-    const vec3& p,
-    const vec3& dir,
-    const vec3& a,
-    const vec3& b,
-    const vec3& c,
-    float& t,
-    float& u,
-    float& v,
-    float& sign,
-    vec3* normal
+    const vec3 WP_THREAD& p,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& a,
+    const vec3 WP_THREAD& b,
+    const vec3 WP_THREAD& c,
+    float WP_THREAD& t,
+    float WP_THREAD& u,
+    float WP_THREAD& v,
+    float WP_THREAD& sign,
+    vec3 WP_THREAD* normal
 )
 {
     // todo: precompute for ray
@@ -392,14 +412,14 @@ CUDA_CALLABLE inline bool intersect_ray_tri_woop(
     float W = diff_product(Bx, Ay, By, Ax);
 
     if (U == 0.0f || V == 0.0f || W == 0.0f) {
-        double CxBy = (double)Cx * (double)By;
-        double CyBx = (double)Cy * (double)Bx;
+        wide_float CxBy = (wide_float)Cx * (wide_float)By;
+        wide_float CyBx = (wide_float)Cy * (wide_float)Bx;
         U = (float)(CxBy - CyBx);
-        double AxCy = (double)Ax * (double)Cy;
-        double AyCx = (double)Ay * (double)Cx;
+        wide_float AxCy = (wide_float)Ax * (wide_float)Cy;
+        wide_float AyCx = (wide_float)Ay * (wide_float)Cx;
         V = (float)(AxCy - AyCx);
-        double BxAy = (double)Bx * (double)Ay;
-        double ByAx = (double)By * (double)Ax;
+        wide_float BxAy = (wide_float)Bx * (wide_float)Ay;
+        wide_float ByAx = (wide_float)By * (wide_float)Ax;
         W = (float)(BxAy - ByAx);
     }
 
@@ -444,27 +464,27 @@ CUDA_CALLABLE inline bool intersect_ray_tri_woop(
 }
 
 CUDA_CALLABLE inline void adj_intersect_ray_tri_woop(
-    const vec3& p,
-    const vec3& dir,
-    const vec3& a,
-    const vec3& b,
-    const vec3& c,
+    const vec3 WP_THREAD& p,
+    const vec3 WP_THREAD& dir,
+    const vec3 WP_THREAD& a,
+    const vec3 WP_THREAD& b,
+    const vec3 WP_THREAD& c,
     float t,
     float u,
     float v,
     float sign,
-    const vec3& normal,
-    vec3& adj_p,
-    vec3& adj_dir,
-    vec3& adj_a,
-    vec3& adj_b,
-    vec3& adj_c,
-    float& adj_t,
-    float& adj_u,
-    float& adj_v,
-    float& adj_sign,
-    vec3& adj_normal,
-    bool& adj_ret
+    const vec3 WP_THREAD& normal,
+    vec3 WP_THREAD& adj_p,
+    vec3 WP_THREAD& adj_dir,
+    vec3 WP_THREAD& adj_a,
+    vec3 WP_THREAD& adj_b,
+    vec3 WP_THREAD& adj_c,
+    float WP_THREAD& adj_t,
+    float WP_THREAD& adj_u,
+    float WP_THREAD& adj_v,
+    float WP_THREAD& adj_sign,
+    vec3 WP_THREAD& adj_normal,
+    bool WP_THREAD& adj_ret
 )
 {
 
@@ -510,14 +530,14 @@ CUDA_CALLABLE inline void adj_intersect_ray_tri_woop(
     float W = Bx * Ay - By * Ax;
 
     if (U == 0.0f || V == 0.0f || W == 0.0f) {
-        double CxBy = (double)Cx * (double)By;
-        double CyBx = (double)Cy * (double)Bx;
+        wide_float CxBy = (wide_float)Cx * (wide_float)By;
+        wide_float CyBx = (wide_float)Cy * (wide_float)Bx;
         U = (float)(CxBy - CyBx);
-        double AxCy = (double)Ax * (double)Cy;
-        double AyCx = (double)Ay * (double)Cx;
+        wide_float AxCy = (wide_float)Ax * (wide_float)Cy;
+        wide_float AyCx = (wide_float)Ay * (wide_float)Cx;
         V = (float)(AxCy - AyCx);
-        double BxAy = (double)Bx * (double)Ay;
-        double ByAx = (double)By * (double)Ax;
+        wide_float BxAy = (wide_float)Bx * (wide_float)Ay;
+        wide_float ByAx = (wide_float)By * (wide_float)Ax;
         W = (float)(BxAy - ByAx);
     }
 
@@ -678,27 +698,43 @@ CUDA_CALLABLE inline void adj_intersect_ray_tri_woop(
 // Möller's method
 #include "intersect_tri.h"
 
-CUDA_CALLABLE inline int intersect_tri_tri(vec3& v0, vec3& v1, vec3& v2, vec3& u0, vec3& u1, vec3& u2)
+CUDA_CALLABLE inline int intersect_tri_tri(
+    vec3 WP_THREAD& v0,
+    vec3 WP_THREAD& v1,
+    vec3 WP_THREAD& v2,
+    vec3 WP_THREAD& u0,
+    vec3 WP_THREAD& u1,
+    vec3 WP_THREAD& u2
+)
 {
     return NoDivTriTriIsect<float>(&v0[0], &v1[0], &v2[0], &u0[0], &u1[0], &u2[0]);
 }
 
 
-CUDA_CALLABLE inline int intersect_tri_tri(vec3d& v0, vec3d& v1, vec3d& v2, vec3d& u0, vec3d& u1, vec3d& u2)
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline int intersect_tri_tri(
+    vec3d WP_THREAD& v0,
+    vec3d WP_THREAD& v1,
+    vec3d WP_THREAD& v2,
+    vec3d WP_THREAD& u0,
+    vec3d WP_THREAD& u1,
+    vec3d WP_THREAD& u2
+)
 {
     return NoDivTriTriIsect<double>(&v0[0], &v1[0], &v2[0], &u0[0], &u1[0], &u2[0]);
 }
+#endif  // !WP_NO_FLOAT64
 
 CUDA_CALLABLE inline void adj_closest_point_to_triangle(
-    const vec3& var_a,
-    const vec3& var_b,
-    const vec3& var_c,
-    const vec3& var_p,
-    vec3& adj_a,
-    vec3& adj_b,
-    vec3& adj_c,
-    vec3& adj_p,
-    vec2& adj_ret
+    const vec3 WP_THREAD& var_a,
+    const vec3 WP_THREAD& var_b,
+    const vec3 WP_THREAD& var_c,
+    const vec3 WP_THREAD& var_p,
+    vec3 WP_THREAD& adj_a,
+    vec3 WP_THREAD& adj_b,
+    vec3 WP_THREAD& adj_c,
+    vec3 WP_THREAD& adj_p,
+    vec2 WP_THREAD& adj_ret
 )
 {
 
@@ -859,172 +895,214 @@ CUDA_CALLABLE inline void adj_closest_point_to_triangle(
     vec2 adj_75 = 0;
     //---------
     // forward
-    var_0 = wp::sub(var_b, var_a);
-    var_1 = wp::sub(var_c, var_a);
-    var_2 = wp::sub(var_p, var_a);
-    var_3 = wp::dot(var_0, var_2);
-    var_4 = wp::dot(var_1, var_2);
-    var_6 = (var_3 <= var_5);
-    var_7 = (var_4 <= var_5);
-    var_8 = var_6 && var_7;
-    if (var_8) {
-        var_10 = wp::vec2(var_9, var_5);
-        goto label0;
-    }
-    var_11 = wp::sub(var_p, var_b);
-    var_12 = wp::dot(var_0, var_11);
-    var_13 = wp::dot(var_1, var_11);
-    var_14 = (var_12 >= var_5);
-    var_15 = (var_13 <= var_12);
-    var_16 = var_14 && var_15;
-    if (var_16) {
-        var_17 = wp::vec2(var_5, var_9);
-        goto label1;
-    }
-    var_18 = wp::where(var_16, var_17, var_10);
-    var_19 = wp::mul(var_3, var_13);
-    var_20 = wp::mul(var_12, var_4);
-    var_21 = wp::sub(var_19, var_20);
-    var_22 = wp::sub(var_3, var_12);
-    var_23 = wp::div(var_3, var_22);
-    var_24 = (var_21 <= var_5);
-    var_25 = (var_3 >= var_5);
-    var_26 = (var_12 <= var_5);
-    var_27 = var_24 && var_25 && var_26;
-    if (var_27) {
-        var_28 = wp::sub(var_9, var_23);
-        var_29 = wp::vec2(var_28, var_23);
-        goto label2;
-    }
-    var_30 = wp::where(var_27, var_29, var_18);
-    var_31 = wp::sub(var_p, var_c);
-    var_32 = wp::dot(var_0, var_31);
-    var_33 = wp::dot(var_1, var_31);
-    var_34 = (var_33 >= var_5);
-    var_35 = (var_32 <= var_33);
-    var_36 = var_34 && var_35;
-    if (var_36) {
-        var_37 = wp::vec2(var_5, var_5);
-        goto label3;
-    }
-    var_38 = wp::where(var_36, var_37, var_30);
-    var_39 = wp::mul(var_32, var_4);
-    var_40 = wp::mul(var_3, var_33);
-    var_41 = wp::sub(var_39, var_40);
-    var_42 = wp::sub(var_4, var_33);
-    var_43 = wp::div(var_4, var_42);
-    var_44 = (var_41 <= var_5);
-    var_45 = (var_4 >= var_5);
-    var_46 = (var_33 <= var_5);
-    var_47 = var_44 && var_45 && var_46;
-    if (var_47) {
-        var_48 = wp::sub(var_9, var_43);
-        var_49 = wp::vec2(var_48, var_5);
-        goto label4;
-    }
-    var_50 = wp::where(var_47, var_49, var_38);
-    var_51 = wp::mul(var_12, var_33);
-    var_52 = wp::mul(var_32, var_13);
-    var_53 = wp::sub(var_51, var_52);
-    var_54 = wp::sub(var_13, var_12);
-    var_55 = wp::sub(var_13, var_12);
-    var_56 = wp::sub(var_32, var_33);
-    var_57 = wp::add(var_55, var_56);
-    var_58 = wp::div(var_54, var_57);
-    var_59 = (var_53 <= var_5);
-    var_60 = wp::sub(var_13, var_12);
-    var_61 = (var_60 >= var_5);
-    var_62 = wp::sub(var_32, var_33);
-    var_63 = (var_62 >= var_5);
-    var_64 = var_59 && var_61 && var_63;
-    if (var_64) {
-        var_65 = wp::sub(var_9, var_58);
-        var_66 = wp::vec2(var_5, var_65);
-        goto label5;
-    }
-    // var_67 = wp::where(var_64, var_66, var_50);
-    var_68 = wp::add(var_53, var_41);
-    var_69 = wp::add(var_68, var_21);
-    var_70 = wp::div(var_9, var_69);
-    var_71 = wp::mul(var_41, var_70);
-    var_72 = wp::mul(var_21, var_70);
-    var_73 = wp::sub(var_9, var_71);
-    var_74 = wp::sub(var_73, var_72);
-    // var_75 = wp::vec2(var_74, var_71);
-    goto label6;
-//---------
-// reverse
-label6:;
-    adj_75 += adj_ret;
-    wp::adj_vec2(var_74, var_71, adj_74, adj_71, adj_75);
-    wp::adj_sub(var_73, var_72, adj_73, adj_72, adj_74);
-    wp::adj_sub(var_9, var_71, adj_9, adj_71, adj_73);
-    wp::adj_mul(var_21, var_70, adj_21, adj_70, adj_72);
-    wp::adj_mul(var_41, var_70, adj_41, adj_70, adj_71);
-    wp::adj_div(var_9, var_69, var_70, adj_9, adj_69, adj_70);
-    wp::adj_add(var_68, var_21, adj_68, adj_21, adj_69);
-    wp::adj_add(var_53, var_41, adj_53, adj_41, adj_68);
-    wp::adj_where(var_64, var_66, var_50, adj_64, adj_66, adj_50, adj_67);
-    if (var_64) {
-    label5:;
+    int _wp_exit = 6;  // early-return point of the forward pass (replaces the jump labels)
+    do {
+        var_0 = wp::sub(var_b, var_a);
+        var_1 = wp::sub(var_c, var_a);
+        var_2 = wp::sub(var_p, var_a);
+        var_3 = wp::dot(var_0, var_2);
+        var_4 = wp::dot(var_1, var_2);
+        var_6 = (var_3 <= var_5);
+        var_7 = (var_4 <= var_5);
+        var_8 = var_6 && var_7;
+        if (var_8) {
+            var_10 = wp::vec2(var_9, var_5);
+            _wp_exit = 0;
+            break;
+        }
+        var_11 = wp::sub(var_p, var_b);
+        var_12 = wp::dot(var_0, var_11);
+        var_13 = wp::dot(var_1, var_11);
+        var_14 = (var_12 >= var_5);
+        var_15 = (var_13 <= var_12);
+        var_16 = var_14 && var_15;
+        if (var_16) {
+            var_17 = wp::vec2(var_5, var_9);
+            _wp_exit = 1;
+            break;
+        }
+        var_18 = wp::where(var_16, var_17, var_10);
+        var_19 = wp::mul(var_3, var_13);
+        var_20 = wp::mul(var_12, var_4);
+        var_21 = wp::sub(var_19, var_20);
+        var_22 = wp::sub(var_3, var_12);
+        var_23 = wp::div(var_3, var_22);
+        var_24 = (var_21 <= var_5);
+        var_25 = (var_3 >= var_5);
+        var_26 = (var_12 <= var_5);
+        var_27 = var_24 && var_25 && var_26;
+        if (var_27) {
+            var_28 = wp::sub(var_9, var_23);
+            var_29 = wp::vec2(var_28, var_23);
+            _wp_exit = 2;
+            break;
+        }
+        var_30 = wp::where(var_27, var_29, var_18);
+        var_31 = wp::sub(var_p, var_c);
+        var_32 = wp::dot(var_0, var_31);
+        var_33 = wp::dot(var_1, var_31);
+        var_34 = (var_33 >= var_5);
+        var_35 = (var_32 <= var_33);
+        var_36 = var_34 && var_35;
+        if (var_36) {
+            var_37 = wp::vec2(var_5, var_5);
+            _wp_exit = 3;
+            break;
+        }
+        var_38 = wp::where(var_36, var_37, var_30);
+        var_39 = wp::mul(var_32, var_4);
+        var_40 = wp::mul(var_3, var_33);
+        var_41 = wp::sub(var_39, var_40);
+        var_42 = wp::sub(var_4, var_33);
+        var_43 = wp::div(var_4, var_42);
+        var_44 = (var_41 <= var_5);
+        var_45 = (var_4 >= var_5);
+        var_46 = (var_33 <= var_5);
+        var_47 = var_44 && var_45 && var_46;
+        if (var_47) {
+            var_48 = wp::sub(var_9, var_43);
+            var_49 = wp::vec2(var_48, var_5);
+            _wp_exit = 4;
+            break;
+        }
+        var_50 = wp::where(var_47, var_49, var_38);
+        var_51 = wp::mul(var_12, var_33);
+        var_52 = wp::mul(var_32, var_13);
+        var_53 = wp::sub(var_51, var_52);
+        var_54 = wp::sub(var_13, var_12);
+        var_55 = wp::sub(var_13, var_12);
+        var_56 = wp::sub(var_32, var_33);
+        var_57 = wp::add(var_55, var_56);
+        var_58 = wp::div(var_54, var_57);
+        var_59 = (var_53 <= var_5);
+        var_60 = wp::sub(var_13, var_12);
+        var_61 = (var_60 >= var_5);
+        var_62 = wp::sub(var_32, var_33);
+        var_63 = (var_62 >= var_5);
+        var_64 = var_59 && var_61 && var_63;
+        if (var_64) {
+            var_65 = wp::sub(var_9, var_58);
+            var_66 = wp::vec2(var_5, var_65);
+            _wp_exit = 5;
+            break;
+        }
+        // var_67 = wp::where(var_64, var_66, var_50);
+        var_68 = wp::add(var_53, var_41);
+        var_69 = wp::add(var_68, var_21);
+        var_70 = wp::div(var_9, var_69);
+        var_71 = wp::mul(var_41, var_70);
+        var_72 = wp::mul(var_21, var_70);
+        var_73 = wp::sub(var_9, var_71);
+        var_74 = wp::sub(var_73, var_72);
+        // var_75 = wp::vec2(var_74, var_71);
+        _wp_exit = 6;
+    } while (0);
+    //---------
+    // reverse
+    if (_wp_exit >= 6)
+        adj_75 += adj_ret;
+    if (_wp_exit >= 6)
+        wp::adj_vec2(var_74, var_71, adj_74, adj_71, adj_75);
+    if (_wp_exit >= 6)
+        wp::adj_sub(var_73, var_72, adj_73, adj_72, adj_74);
+    if (_wp_exit >= 6)
+        wp::adj_sub(var_9, var_71, adj_9, adj_71, adj_73);
+    if (_wp_exit >= 6)
+        wp::adj_mul(var_21, var_70, adj_21, adj_70, adj_72);
+    if (_wp_exit >= 6)
+        wp::adj_mul(var_41, var_70, adj_41, adj_70, adj_71);
+    if (_wp_exit >= 6)
+        wp::adj_div(var_9, var_69, var_70, adj_9, adj_69, adj_70);
+    if (_wp_exit >= 6)
+        wp::adj_add(var_68, var_21, adj_68, adj_21, adj_69);
+    if (_wp_exit >= 6)
+        wp::adj_add(var_53, var_41, adj_53, adj_41, adj_68);
+    if (_wp_exit >= 6)
+        wp::adj_where(var_64, var_66, var_50, adj_64, adj_66, adj_50, adj_67);
+    if (_wp_exit >= 5 && var_64) {
         adj_66 += adj_ret;
         wp::adj_vec2(var_5, var_65, adj_5, adj_65, adj_66);
         wp::adj_sub(var_9, var_58, adj_9, adj_58, adj_65);
     }
-    wp::adj_sub(var_32, var_33, adj_32, adj_33, adj_62);
-    wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_60);
-    wp::adj_div(var_54, var_57, var_58, adj_54, adj_57, adj_58);
-    wp::adj_add(var_55, var_56, adj_55, adj_56, adj_57);
-    wp::adj_sub(var_32, var_33, adj_32, adj_33, adj_56);
-    wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_55);
-    wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_54);
-    wp::adj_sub(var_51, var_52, adj_51, adj_52, adj_53);
-    wp::adj_mul(var_32, var_13, adj_32, adj_13, adj_52);
-    wp::adj_mul(var_12, var_33, adj_12, adj_33, adj_51);
-    wp::adj_where(var_47, var_49, var_38, adj_47, adj_49, adj_38, adj_50);
-    if (var_47) {
-    label4:;
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_32, var_33, adj_32, adj_33, adj_62);
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_60);
+    if (_wp_exit >= 5)
+        wp::adj_div(var_54, var_57, var_58, adj_54, adj_57, adj_58);
+    if (_wp_exit >= 5)
+        wp::adj_add(var_55, var_56, adj_55, adj_56, adj_57);
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_32, var_33, adj_32, adj_33, adj_56);
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_55);
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_13, var_12, adj_13, adj_12, adj_54);
+    if (_wp_exit >= 5)
+        wp::adj_sub(var_51, var_52, adj_51, adj_52, adj_53);
+    if (_wp_exit >= 5)
+        wp::adj_mul(var_32, var_13, adj_32, adj_13, adj_52);
+    if (_wp_exit >= 5)
+        wp::adj_mul(var_12, var_33, adj_12, adj_33, adj_51);
+    if (_wp_exit >= 5)
+        wp::adj_where(var_47, var_49, var_38, adj_47, adj_49, adj_38, adj_50);
+    if (_wp_exit >= 4 && var_47) {
         adj_49 += adj_ret;
         wp::adj_vec2(var_48, var_5, adj_48, adj_5, adj_49);
         wp::adj_sub(var_9, var_43, adj_9, adj_43, adj_48);
     }
-    wp::adj_div(var_4, var_42, var_43, adj_4, adj_42, adj_43);
-    wp::adj_sub(var_4, var_33, adj_4, adj_33, adj_42);
-    wp::adj_sub(var_39, var_40, adj_39, adj_40, adj_41);
-    wp::adj_mul(var_3, var_33, adj_3, adj_33, adj_40);
-    wp::adj_mul(var_32, var_4, adj_32, adj_4, adj_39);
-    wp::adj_where(var_36, var_37, var_30, adj_36, adj_37, adj_30, adj_38);
-    if (var_36) {
-    label3:;
+    if (_wp_exit >= 4)
+        wp::adj_div(var_4, var_42, var_43, adj_4, adj_42, adj_43);
+    if (_wp_exit >= 4)
+        wp::adj_sub(var_4, var_33, adj_4, adj_33, adj_42);
+    if (_wp_exit >= 4)
+        wp::adj_sub(var_39, var_40, adj_39, adj_40, adj_41);
+    if (_wp_exit >= 4)
+        wp::adj_mul(var_3, var_33, adj_3, adj_33, adj_40);
+    if (_wp_exit >= 4)
+        wp::adj_mul(var_32, var_4, adj_32, adj_4, adj_39);
+    if (_wp_exit >= 4)
+        wp::adj_where(var_36, var_37, var_30, adj_36, adj_37, adj_30, adj_38);
+    if (_wp_exit >= 3 && var_36) {
         adj_37 += adj_ret;
         wp::adj_vec2(var_5, var_5, adj_5, adj_5, adj_37);
     }
-    wp::adj_dot(var_1, var_31, adj_1, adj_31, adj_33);
-    wp::adj_dot(var_0, var_31, adj_0, adj_31, adj_32);
-    wp::adj_sub(var_p, var_c, adj_p, adj_c, adj_31);
-    wp::adj_where(var_27, var_29, var_18, adj_27, adj_29, adj_18, adj_30);
-    if (var_27) {
-    label2:;
+    if (_wp_exit >= 3)
+        wp::adj_dot(var_1, var_31, adj_1, adj_31, adj_33);
+    if (_wp_exit >= 3)
+        wp::adj_dot(var_0, var_31, adj_0, adj_31, adj_32);
+    if (_wp_exit >= 3)
+        wp::adj_sub(var_p, var_c, adj_p, adj_c, adj_31);
+    if (_wp_exit >= 3)
+        wp::adj_where(var_27, var_29, var_18, adj_27, adj_29, adj_18, adj_30);
+    if (_wp_exit >= 2 && var_27) {
         adj_29 += adj_ret;
         wp::adj_vec2(var_28, var_23, adj_28, adj_23, adj_29);
         wp::adj_sub(var_9, var_23, adj_9, adj_23, adj_28);
     }
-    wp::adj_div(var_3, var_22, var_23, adj_3, adj_22, adj_23);
-    wp::adj_sub(var_3, var_12, adj_3, adj_12, adj_22);
-    wp::adj_sub(var_19, var_20, adj_19, adj_20, adj_21);
-    wp::adj_mul(var_12, var_4, adj_12, adj_4, adj_20);
-    wp::adj_mul(var_3, var_13, adj_3, adj_13, adj_19);
-    wp::adj_where(var_16, var_17, var_10, adj_16, adj_17, adj_10, adj_18);
-    if (var_16) {
-    label1:;
+    if (_wp_exit >= 2)
+        wp::adj_div(var_3, var_22, var_23, adj_3, adj_22, adj_23);
+    if (_wp_exit >= 2)
+        wp::adj_sub(var_3, var_12, adj_3, adj_12, adj_22);
+    if (_wp_exit >= 2)
+        wp::adj_sub(var_19, var_20, adj_19, adj_20, adj_21);
+    if (_wp_exit >= 2)
+        wp::adj_mul(var_12, var_4, adj_12, adj_4, adj_20);
+    if (_wp_exit >= 2)
+        wp::adj_mul(var_3, var_13, adj_3, adj_13, adj_19);
+    if (_wp_exit >= 2)
+        wp::adj_where(var_16, var_17, var_10, adj_16, adj_17, adj_10, adj_18);
+    if (_wp_exit >= 1 && var_16) {
         adj_17 += adj_ret;
         wp::adj_vec2(var_5, var_9, adj_5, adj_9, adj_17);
     }
-    wp::adj_dot(var_1, var_11, adj_1, adj_11, adj_13);
-    wp::adj_dot(var_0, var_11, adj_0, adj_11, adj_12);
-    wp::adj_sub(var_p, var_b, adj_p, adj_b, adj_11);
-    if (var_8) {
-    label0:;
+    if (_wp_exit >= 1)
+        wp::adj_dot(var_1, var_11, adj_1, adj_11, adj_13);
+    if (_wp_exit >= 1)
+        wp::adj_dot(var_0, var_11, adj_0, adj_11, adj_12);
+    if (_wp_exit >= 1)
+        wp::adj_sub(var_p, var_b, adj_p, adj_b, adj_11);
+    if (_wp_exit >= 0 && var_8) {
         adj_10 += adj_ret;
         wp::adj_vec2(var_9, var_5, adj_9, adj_5, adj_10);
     }
@@ -1133,7 +1211,7 @@ def closest_point_edge_edge(
 // num/denom (otherwise 1/denom would amplify float32 noise into unbounded
 // gradients). denom / (a*e) = sin²θ, so this threshold corresponds to sinθ
 // ≈ 1e-3 (~0.06°).
-static constexpr float kClosestPointEdgeEdgeParallelTol = 1.0e-6f;
+static WP_CONSTANT constexpr float kClosestPointEdgeEdgeParallelTol = 1.0e-6f;
 
 static CUDA_CALLABLE vec3 closest_point_edge_edge(vec3 p1, vec3 q1, vec3 p2, vec3 q2, float32 epsilon)
 {
@@ -1223,12 +1301,12 @@ static CUDA_CALLABLE void adj_closest_point_edge_edge(
     vec3 p2,
     vec3 q2,
     float32 epsilon,
-    vec3& adj_p1,
-    vec3& adj_q1,
-    vec3& adj_p2,
-    vec3& adj_q2,
-    float32& adj_epsilon,
-    vec3& adj_ret
+    vec3 WP_THREAD& adj_p1,
+    vec3 WP_THREAD& adj_q1,
+    vec3 WP_THREAD& adj_p2,
+    vec3 WP_THREAD& adj_q2,
+    float32 WP_THREAD& adj_epsilon,
+    vec3 WP_THREAD& adj_ret
 )
 {
     (void)adj_epsilon;  // epsilon is a tolerance; not differentiable

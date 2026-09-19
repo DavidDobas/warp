@@ -9,7 +9,17 @@
 
 #define PNANOVDB_C
 #define PNANOVDB_MEMCPY_CUSTOM
+#if defined(__METAL_VERSION__)
+static inline void pnanovdb_memcpy(thread void* dst, const thread void* src, size_t n)
+{
+    thread char* d = (thread char*)dst;
+    const thread char* s = (const thread char*)src;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = s[i];
+}
+#else
 #define pnanovdb_memcpy memcpy
+#endif
 
 #if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__)))
 // PNanoVDB will try to include <stdint.h> unless __CUDACC_RTC__ is defined.
@@ -23,20 +33,31 @@
 #undef __CUDACC_RTC__
 #endif
 
+#if defined(__METAL_VERSION__)
+#define WP_VOLUME_REAL float
+#else
+#define WP_VOLUME_REAL double
+#endif
 namespace wp {
 namespace volume {
 
 // Need to kept in sync with constants in python-side Volume class
+#if defined(__METAL_VERSION__)
+constant constexpr int CLOSEST = 0;
+constant constexpr int LINEAR = 1;
+constant constexpr uint64_t MAX_INDEXABLE_VOXEL_COUNT = 2147483647ull;
+#else
 static constexpr int CLOSEST = 0;
 static constexpr int LINEAR = 1;
 static constexpr uint64_t MAX_INDEXABLE_VOXEL_COUNT = 2147483647ull;
+#endif
 
 // pnanovdb helper function
 
 CUDA_CALLABLE inline pnanovdb_buf_t id_to_buffer(uint64_t id)
 {
     pnanovdb_buf_t buf = {};  // Zero-initialize the entire struct
-    buf.data = (uint32_t*)id;
+    buf.data = (uint32_t WP_DEVICE*)id;
     return buf;
 }
 
@@ -63,59 +84,66 @@ template <typename T> struct pnano_traits { };
 // and update _volume_supported_value_types in builtins.py
 
 template <> struct pnano_traits<int32_t> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_INT32;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_INT32 };
 };
 
 template <> struct pnano_traits<int64_t> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_INT64;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_INT64 };
 };
 
 template <> struct pnano_traits<uint32_t> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_UINT32;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_UINT32 };
 };
 
 template <> struct pnano_traits<float> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_FLOAT;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_FLOAT };
 };
 
+#if !defined(__METAL_VERSION__)
 template <> struct pnano_traits<double> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_DOUBLE;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_DOUBLE };
 };
+#endif
 
 template <> struct pnano_traits<vec3f> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_VEC3F;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_VEC3F };
 };
 
+#if !defined(WP_NO_FLOAT64)
 template <> struct pnano_traits<vec3d> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_VEC3D;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_VEC3D };
 };
+#endif
 
 template <> struct pnano_traits<vec4f> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_VEC4F;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_VEC4F };
 };
 
+#if !defined(WP_NO_FLOAT64)
 template <> struct pnano_traits<vec4d> {
-    static constexpr int GRID_TYPE = PNANOVDB_GRID_TYPE_VEC4D;
+    enum { GRID_TYPE = PNANOVDB_GRID_TYPE_VEC4D };
 };
+#endif
 
 // common accessors over various grid types
 // WARNING: implementation below only for >=32b values, but that's the case for all types above
 // for smaller types add a specialization
 
-template <typename T> CUDA_CALLABLE inline void pnano_read(T& result, pnanovdb_buf_t buf, pnanovdb_address_t address)
+template <typename T>
+CUDA_CALLABLE inline void pnano_read(T WP_THREAD& result, pnanovdb_buf_t buf, pnanovdb_address_t address)
 {
-    result = *reinterpret_cast<const T*>(buf.data + (address.byte_offset >> 2));
+    result = *reinterpret_cast<const T WP_DEVICE*>(buf.data + (address.byte_offset >> 2));
 }
 
 template <typename T>
-CUDA_CALLABLE inline void pnano_write(const T& value, pnanovdb_buf_t buf, pnanovdb_address_t address)
+CUDA_CALLABLE inline void pnano_write(const T WP_THREAD& value, pnanovdb_buf_t buf, pnanovdb_address_t address)
 {
-    *reinterpret_cast<T*>(buf.data + (address.byte_offset >> 2)) = value;
+    *reinterpret_cast<T WP_DEVICE*>(buf.data + (address.byte_offset >> 2)) = value;
 }
 
 template <typename T>
 CUDA_CALLABLE inline void
-pnano_read(T& result, pnanovdb_buf_t buf, pnanovdb_root_handle_t root, PNANOVDB_IN(pnanovdb_coord_t) ijk)
+pnano_read(T WP_THREAD& result, pnanovdb_buf_t buf, pnanovdb_root_handle_t root, PNANOVDB_IN(pnanovdb_coord_t) ijk)
 {
     using traits = pnano_traits<T>;
     const pnanovdb_address_t address = pnanovdb_root_get_value_address(traits::GRID_TYPE, buf, root, ijk);
@@ -124,7 +152,10 @@ pnano_read(T& result, pnanovdb_buf_t buf, pnanovdb_root_handle_t root, PNANOVDB_
 
 template <typename T>
 CUDA_CALLABLE inline void pnano_read(
-    T& result, pnanovdb_buf_t buf, PNANOVDB_INOUT(pnanovdb_readaccessor_t) acc, PNANOVDB_IN(pnanovdb_coord_t) ijk
+    T WP_THREAD& result,
+    pnanovdb_buf_t buf,
+    PNANOVDB_INOUT(pnanovdb_readaccessor_t) acc,
+    PNANOVDB_IN(pnanovdb_coord_t) ijk
 )
 {
     using traits = pnano_traits<T>;
@@ -137,51 +168,55 @@ CUDA_CALLABLE inline void pnano_read(
 
 /// regular grid accessor (values stored in leaves)
 
+// Shared state of the value accessors. Metal has no derived classes, so the members are injected
+// with a macro and the base constructor becomes an initializer helper.
+#define WP_VOLUME_ACCESSOR_MEMBERS                                                                                     \
+    pnanovdb_buf_t buf;                                                                                                \
+    pnanovdb_root_handle_t root;                                                                                       \
+    pnanovdb_readaccessor_t accessor;                                                                                  \
+    CUDA_CALLABLE inline void init_cache() { pnanovdb_readaccessor_init(PNANOVDB_REF(accessor), root); }
+#define WP_VOLUME_ACCESSOR_INIT(buf_) buf(buf_), root(get_root(buf_)), accessor {}
+
 struct value_accessor_base {
-    pnanovdb_buf_t buf;
-    pnanovdb_root_handle_t root;
-    pnanovdb_readaccessor_t accessor;
+    WP_VOLUME_ACCESSOR_MEMBERS
 
     explicit inline CUDA_CALLABLE value_accessor_base(const pnanovdb_buf_t buf)
-        : buf(buf)
-        , root(get_root(buf))
+        : WP_VOLUME_ACCESSOR_INIT(buf)
     {
-        accessor = {};
     }
-
-    CUDA_CALLABLE inline void init_cache() { pnanovdb_readaccessor_init(PNANOVDB_REF(accessor), root); }
 };
 
-template <typename T> struct leaf_value_accessor : value_accessor_base {
+template <typename T> struct leaf_value_accessor {
+    WP_VOLUME_ACCESSOR_MEMBERS
     using ValueType = T;
 
     explicit inline CUDA_CALLABLE leaf_value_accessor(const pnanovdb_buf_t buf)
-        : value_accessor_base(buf)
+        : WP_VOLUME_ACCESSOR_INIT(buf)
     {
     }
 
     CUDA_CALLABLE inline bool is_valid() const { return get_grid_type(buf) == pnano_traits<T>::GRID_TYPE; }
 
-    CUDA_CALLABLE inline T read_single(const pnanovdb_coord_t& ijk) const
+    CUDA_CALLABLE inline T read_single(const pnanovdb_coord_t WP_THREAD& ijk) const
     {
         T val;
         pnano_read(val, buf, root, PNANOVDB_REF(ijk));
         return val;
     }
 
-    CUDA_CALLABLE inline T read_cache(const pnanovdb_coord_t& ijk)
+    CUDA_CALLABLE inline T read_cache(const pnanovdb_coord_t WP_THREAD& ijk)
     {
         T val;
         pnano_read(val, buf, PNANOVDB_REF(accessor), PNANOVDB_REF(ijk));
         return val;
     }
 
-    CUDA_CALLABLE inline void adj_read_single(const pnanovdb_coord_t& ijk, const T& adj_ret)
+    CUDA_CALLABLE inline void adj_read_single(const pnanovdb_coord_t WP_THREAD& ijk, const T WP_THREAD& adj_ret)
     {
         // NOP
     }
 
-    CUDA_CALLABLE inline void adj_read_cache(const pnanovdb_coord_t& ijk, const T& adj_ret)
+    CUDA_CALLABLE inline void adj_read_cache(const pnanovdb_coord_t WP_THREAD& ijk, const T WP_THREAD& adj_ret)
     {
         // NOP
     }
@@ -205,7 +240,10 @@ leaf_regular_get_voxel_index(pnanovdb_buf_t buf, pnanovdb_address_t value_addres
 }
 
 CUDA_CALLABLE inline pnanovdb_uint64_t get_grid_voxel_index(
-    pnanovdb_grid_type_t grid_type, pnanovdb_buf_t buf, pnanovdb_address_t value_address, const pnanovdb_coord_t& ijk
+    pnanovdb_grid_type_t grid_type,
+    pnanovdb_buf_t buf,
+    pnanovdb_address_t value_address,
+    const pnanovdb_coord_t WP_THREAD& ijk
 )
 {
     switch (grid_type) {
@@ -223,18 +261,22 @@ CUDA_CALLABLE inline pnanovdb_uint64_t get_grid_voxel_index(
 };
 
 /// index grid accessor
-template <typename T> struct index_value_accessor : value_accessor_base {
+template <typename T> struct index_value_accessor {
+    WP_VOLUME_ACCESSOR_MEMBERS
     using ValueType = T;
 
     pnanovdb_grid_type_t grid_type;
     array_t<T> data;
-    const T& background;
-    T* adj_background;
+    const T WP_THREAD& background;
+    T WP_THREAD* adj_background;
 
     explicit inline CUDA_CALLABLE index_value_accessor(
-        const pnanovdb_buf_t buf, const array_t<T>& data, const T& background, T* adj_background = nullptr
+        const pnanovdb_buf_t buf,
+        const array_t<T> WP_THREAD& data,
+        const T WP_THREAD& background,
+        T WP_THREAD* adj_background = nullptr
     )
-        : value_accessor_base(buf)
+        : WP_VOLUME_ACCESSOR_INIT(buf)
         , grid_type(get_grid_type(buf))
         , data(data)
         , background(background)
@@ -248,7 +290,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
         return true;
     }
 
-    CUDA_CALLABLE inline T read_single(const pnanovdb_coord_t& ijk) const
+    CUDA_CALLABLE inline T read_single(const pnanovdb_coord_t WP_THREAD& ijk) const
     {
         pnanovdb_uint32_t level;
         const pnanovdb_address_t address
@@ -256,7 +298,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
         return read_at(level, address, ijk);
     }
 
-    CUDA_CALLABLE inline T read_cache(const pnanovdb_coord_t& ijk)
+    CUDA_CALLABLE inline T read_cache(const pnanovdb_coord_t WP_THREAD& ijk)
     {
         pnanovdb_uint32_t level;
         const pnanovdb_address_t address = pnanovdb_readaccessor_get_value_address_and_level(
@@ -266,7 +308,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
     }
 
     CUDA_CALLABLE inline T
-    read_at(pnanovdb_uint32_t level, const pnanovdb_address_t address, const pnanovdb_coord_t& ijk) const
+    read_at(pnanovdb_uint32_t level, const pnanovdb_address_t address, const pnanovdb_coord_t WP_THREAD& ijk) const
     {
         if (level == 0) {
             pnanovdb_uint64_t voxel_index = get_grid_voxel_index(grid_type, buf, address, ijk);
@@ -279,7 +321,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
         return background;
     }
 
-    CUDA_CALLABLE inline void adj_read_single(const pnanovdb_coord_t& ijk, const T& adj_ret)
+    CUDA_CALLABLE inline void adj_read_single(const pnanovdb_coord_t WP_THREAD& ijk, const T WP_THREAD& adj_ret)
     {
         pnanovdb_uint32_t level;
         const pnanovdb_address_t address
@@ -287,7 +329,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
         adj_read_at(level, address, ijk, adj_ret);
     }
 
-    CUDA_CALLABLE inline void adj_read_cache(const pnanovdb_coord_t& ijk, const T& adj_ret)
+    CUDA_CALLABLE inline void adj_read_cache(const pnanovdb_coord_t WP_THREAD& ijk, const T WP_THREAD& adj_ret)
     {
         pnanovdb_uint32_t level;
         const pnanovdb_address_t address = pnanovdb_readaccessor_get_value_address_and_level(
@@ -297,7 +339,10 @@ template <typename T> struct index_value_accessor : value_accessor_base {
     }
 
     CUDA_CALLABLE inline void adj_read_at(
-        pnanovdb_uint32_t level, const pnanovdb_address_t address, const pnanovdb_coord_t& ijk, const T& adj_ret
+        pnanovdb_uint32_t level,
+        const pnanovdb_address_t address,
+        const pnanovdb_coord_t WP_THREAD& ijk,
+        const T WP_THREAD& adj_ret
     ) const
     {
         if (level == 0) {
@@ -327,14 +372,18 @@ template <typename T> struct val_traits {
 
     // multiplies the gradient on the right
     // needs to be specialized for scalar types as gradient is stored as column rather than row vector
-    static CUDA_CALLABLE inline T rmul(const grad_t& grad, const vec_t<3, scalar_t>& rhs) { return dot(grad, rhs); }
+    static CUDA_CALLABLE inline T rmul(const grad_t WP_THREAD& grad, const vec_t<3, scalar_t> WP_THREAD& rhs)
+    {
+        return dot(grad, rhs);
+    }
 };
 
 template <unsigned Length, typename T> struct val_traits<vec_t<Length, T>> {
     using grad_t = mat_t<3, Length, T>;
     using scalar_t = T;
 
-    static CUDA_CALLABLE inline vec_t<Length, T> rmul(const grad_t& grad, const vec_t<3, scalar_t>& rhs)
+    static CUDA_CALLABLE inline vec_t<Length, T>
+    rmul(const grad_t WP_THREAD& grad, const vec_t<3, scalar_t> WP_THREAD& rhs)
     {
         return mul(grad, rhs);
     }
@@ -342,7 +391,8 @@ template <unsigned Length, typename T> struct val_traits<vec_t<Length, T>> {
 
 // Sampling the volume at the given index-space coordinates, uvw can be fractional
 template <typename Accessor>
-CUDA_CALLABLE inline typename Accessor::ValueType volume_sample(Accessor& accessor, vec3 uvw, int sampling_mode)
+CUDA_CALLABLE inline typename Accessor::ValueType
+volume_sample(Accessor WP_THREAD& accessor, vec3 uvw, int sampling_mode)
 {
     using T = typename Accessor::ValueType;
     using w_t = typename val_traits<T>::scalar_t;
@@ -373,7 +423,7 @@ CUDA_CALLABLE inline typename Accessor::ValueType volume_sample(Accessor& access
         const float wy[2] { 1 - ijk_frac.y, ijk_frac.y };
         const float wz[2] { 1 - ijk_frac.z, ijk_frac.z };
         for (int idx = 0; idx < 8; ++idx) {
-            const pnanovdb_coord_t& offs = OFFSETS[idx];
+            const pnanovdb_coord_t WP_THREAD& offs = OFFSETS[idx];
             const pnanovdb_coord_t ijk_shifted = pnanovdb_coord_add(ijk, offs);
             const T v = accessor.read_cache(ijk_shifted);
 
@@ -387,7 +437,11 @@ CUDA_CALLABLE inline typename Accessor::ValueType volume_sample(Accessor& access
 
 template <typename Accessor>
 CUDA_CALLABLE inline void adj_volume_sample(
-    Accessor& accessor, vec3 uvw, int sampling_mode, vec3& adj_uvw, const typename Accessor::ValueType& adj_ret
+    Accessor WP_THREAD& accessor,
+    vec3 uvw,
+    int sampling_mode,
+    vec3 WP_THREAD& adj_uvw,
+    const typename Accessor::ValueType WP_THREAD& adj_ret
 )
 {
     // TODO: accessor data gradients
@@ -423,7 +477,7 @@ CUDA_CALLABLE inline void adj_volume_sample(
     const float wy[2] { 1 - ijk_frac.y, ijk_frac.y };
     const float wz[2] { 1 - ijk_frac.z, ijk_frac.z };
     for (int idx = 0; idx < 8; ++idx) {
-        const pnanovdb_coord_t& offs = OFFSETS[idx];
+        const pnanovdb_coord_t WP_THREAD& offs = OFFSETS[idx];
         const pnanovdb_coord_t ijk_shifted = pnanovdb_coord_add(ijk, offs);
         const T v = accessor.read_cache(ijk_shifted);
 
@@ -444,7 +498,10 @@ CUDA_CALLABLE inline void adj_volume_sample(
 // Sampling the volume at the given index-space coordinates, uvw can be fractional
 template <typename Accessor>
 CUDA_CALLABLE inline typename Accessor::ValueType volume_sample_grad(
-    Accessor& accessor, vec3 uvw, int sampling_mode, typename val_traits<typename Accessor::ValueType>::grad_t& grad
+    Accessor WP_THREAD& accessor,
+    vec3 uvw,
+    int sampling_mode,
+    typename val_traits<typename Accessor::ValueType>::grad_t WP_THREAD& grad
 )
 {
     using T = typename Accessor::ValueType;
@@ -480,7 +537,7 @@ CUDA_CALLABLE inline typename Accessor::ValueType volume_sample_grad(
         const float wy[2] { 1 - ijk_frac.y, ijk_frac.y };
         const float wz[2] { 1 - ijk_frac.z, ijk_frac.z };
         for (int idx = 0; idx < 8; ++idx) {
-            const pnanovdb_coord_t& offs = OFFSETS[idx];
+            const pnanovdb_coord_t WP_THREAD& offs = OFFSETS[idx];
             const pnanovdb_coord_t ijk_shifted = pnanovdb_coord_add(ijk, offs);
             const T v = accessor.read_cache(ijk_shifted);
 
@@ -502,13 +559,13 @@ CUDA_CALLABLE inline typename Accessor::ValueType volume_sample_grad(
 
 template <typename Accessor>
 CUDA_CALLABLE inline void adj_volume_sample_grad(
-    Accessor& accessor,
+    Accessor WP_THREAD& accessor,
     vec3 uvw,
     int sampling_mode,
-    typename val_traits<typename Accessor::ValueType>::grad_t& grad,
-    vec3& adj_uvw,
-    typename val_traits<typename Accessor::ValueType>::grad_t& adj_grad,
-    const typename Accessor::ValueType& adj_ret
+    typename val_traits<typename Accessor::ValueType>::grad_t WP_THREAD& grad,
+    vec3 WP_THREAD& adj_uvw,
+    typename val_traits<typename Accessor::ValueType>::grad_t WP_THREAD& adj_grad,
+    const typename Accessor::ValueType WP_THREAD& adj_ret
 )
 {
     // TODO: accessor data gradients
@@ -546,7 +603,7 @@ CUDA_CALLABLE inline void adj_volume_sample_grad(
     const float wy[2] { 1 - ijk_frac.y, ijk_frac.y };
     const float wz[2] { 1 - ijk_frac.z, ijk_frac.z };
     for (int idx = 0; idx < 8; ++idx) {
-        const pnanovdb_coord_t& offs = OFFSETS[idx];
+        const pnanovdb_coord_t WP_THREAD& offs = OFFSETS[idx];
         const pnanovdb_coord_t ijk_shifted = pnanovdb_coord_add(ijk, offs);
         const T v = accessor.read_cache(ijk_shifted);
 
@@ -585,7 +642,13 @@ template <typename T> CUDA_CALLABLE inline T volume_sample(uint64_t id, vec3 uvw
 
 template <typename T>
 CUDA_CALLABLE inline void adj_volume_sample(
-    uint64_t id, vec3 uvw, int sampling_mode, uint64_t& adj_id, vec3& adj_uvw, int& adj_sampling_mode, const T& adj_ret
+    uint64_t id,
+    vec3 uvw,
+    int sampling_mode,
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    const T WP_THREAD& adj_ret
 )
 {
     volume::leaf_value_accessor<T> accessor(volume::id_to_buffer(id));
@@ -594,7 +657,7 @@ CUDA_CALLABLE inline void adj_volume_sample(
 
 template <typename T>
 CUDA_CALLABLE inline T
-volume_sample_grad(uint64_t id, vec3 uvw, int sampling_mode, typename volume::val_traits<T>::grad_t& grad)
+volume_sample_grad(uint64_t id, vec3 uvw, int sampling_mode, typename volume::val_traits<T>::grad_t WP_THREAD& grad)
 {
     volume::leaf_value_accessor<T> accessor(volume::id_to_buffer(id));
     return volume::volume_sample_grad(accessor, uvw, sampling_mode, grad);
@@ -605,12 +668,12 @@ CUDA_CALLABLE inline void adj_volume_sample_grad(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    typename volume::val_traits<T>::grad_t& grad,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    typename volume::val_traits<T>::grad_t& adj_grad,
-    const T& adj_ret
+    typename volume::val_traits<T>::grad_t WP_THREAD& grad,
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    typename volume::val_traits<T>::grad_t WP_THREAD& adj_grad,
+    const T WP_THREAD& adj_ret
 )
 {
     volume::leaf_value_accessor<T> accessor(volume::id_to_buffer(id));
@@ -639,10 +702,10 @@ CUDA_CALLABLE inline void adj_volume_sample_f(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    const float& adj_ret
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    const float WP_THREAD& adj_ret
 )
 {
     adj_volume_sample(id, uvw, sampling_mode, adj_id, adj_uvw, adj_sampling_mode, adj_ret);
@@ -652,17 +715,17 @@ CUDA_CALLABLE inline void adj_volume_sample_v(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    const vec3& adj_ret
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    const vec3 WP_THREAD& adj_ret
 )
 {
     adj_volume_sample(id, uvw, sampling_mode, adj_id, adj_uvw, adj_sampling_mode, adj_ret);
 }
 
 // Sampling the volume at the given index-space coordinates, uvw can be fractional
-CUDA_CALLABLE inline float volume_sample_grad_f(uint64_t id, vec3 uvw, int sampling_mode, vec3& grad)
+CUDA_CALLABLE inline float volume_sample_grad_f(uint64_t id, vec3 uvw, int sampling_mode, vec3 WP_THREAD& grad)
 {
     return volume_sample_grad<float>(id, uvw, sampling_mode, grad);
 }
@@ -671,12 +734,12 @@ CUDA_CALLABLE inline void adj_volume_sample_grad_f(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    vec3& grad,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    vec3& adj_grad,
-    const float& adj_ret
+    vec3 WP_THREAD& grad,
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    vec3 WP_THREAD& adj_grad,
+    const float WP_THREAD& adj_ret
 )
 {
     adj_volume_sample_grad<float>(id, uvw, sampling_mode, grad, adj_id, adj_uvw, adj_sampling_mode, adj_grad, adj_ret);
@@ -685,8 +748,9 @@ CUDA_CALLABLE inline void adj_volume_sample_grad_f(
 // volume_sample_index
 
 template <typename T>
-CUDA_CALLABLE inline T
-volume_sample_index(uint64_t id, vec3 uvw, int sampling_mode, const array_t<T>& voxel_data, const T& background)
+CUDA_CALLABLE inline T volume_sample_index(
+    uint64_t id, vec3 uvw, int sampling_mode, const array_t<T> WP_THREAD& voxel_data, const T WP_THREAD& background
+)
 {
     volume::index_value_accessor<T> accessor(volume::id_to_buffer(id), voxel_data, background);
     return volume::volume_sample(accessor, uvw, sampling_mode);
@@ -697,14 +761,14 @@ CUDA_CALLABLE inline void adj_volume_sample_index(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    const array_t<T>& voxel_data,
-    const T& background,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    array_t<T>& adj_voxel_data,
-    T& adj_background,
-    const T& adj_ret
+    const array_t<T> WP_THREAD& voxel_data,
+    const T WP_THREAD& background,
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    array_t<T> WP_THREAD& adj_voxel_data,
+    T WP_THREAD& adj_background,
+    const T WP_THREAD& adj_ret
 )
 {
     volume::index_value_accessor<T> accessor(volume::id_to_buffer(id), voxel_data, background, &adj_background);
@@ -716,9 +780,9 @@ CUDA_CALLABLE inline T volume_sample_grad_index(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    const array_t<T>& voxel_data,
-    const T& background,
-    typename volume::val_traits<T>::grad_t& grad
+    const array_t<T> WP_THREAD& voxel_data,
+    const T WP_THREAD& background,
+    typename volume::val_traits<T>::grad_t WP_THREAD& grad
 )
 {
     volume::index_value_accessor<T> accessor(volume::id_to_buffer(id), voxel_data, background);
@@ -730,16 +794,16 @@ CUDA_CALLABLE inline void adj_volume_sample_grad_index(
     uint64_t id,
     vec3 uvw,
     int sampling_mode,
-    const array_t<T>& voxel_data,
-    const T& background,
-    typename volume::val_traits<T>::grad_t& grad,
-    uint64_t& adj_id,
-    vec3& adj_uvw,
-    int& adj_sampling_mode,
-    array_t<T>& adj_voxel_data,
-    T& adj_background,
-    typename volume::val_traits<T>::grad_t& adj_grad,
-    const T& adj_ret
+    const array_t<T> WP_THREAD& voxel_data,
+    const T WP_THREAD& background,
+    typename volume::val_traits<T>::grad_t WP_THREAD& grad,
+    uint64_t WP_THREAD& adj_id,
+    vec3 WP_THREAD& adj_uvw,
+    int WP_THREAD& adj_sampling_mode,
+    array_t<T> WP_THREAD& adj_voxel_data,
+    T WP_THREAD& adj_background,
+    typename volume::val_traits<T>::grad_t WP_THREAD& adj_grad,
+    const T WP_THREAD& adj_ret
 )
 {
     volume::index_value_accessor<T> accessor(volume::id_to_buffer(id), voxel_data, background, &adj_background);
@@ -822,7 +886,7 @@ CUDA_CALLABLE inline int32_t volume_voxel_count(uint64_t id)
 // volume_store
 
 template <typename T>
-CUDA_CALLABLE inline void volume_store(uint64_t id, int32_t i, int32_t j, int32_t k, const T& value)
+CUDA_CALLABLE inline void volume_store(uint64_t id, int32_t i, int32_t j, int32_t k, const T WP_THREAD& value)
 {
     using traits = volume::pnano_traits<T>;
 
@@ -845,17 +909,17 @@ CUDA_CALLABLE inline void volume_store(uint64_t id, int32_t i, int32_t j, int32_
     }
 }
 
-CUDA_CALLABLE inline void volume_store_f(uint64_t id, int32_t i, int32_t j, int32_t k, const float& value)
+CUDA_CALLABLE inline void volume_store_f(uint64_t id, int32_t i, int32_t j, int32_t k, const float WP_THREAD& value)
 {
     volume_store(id, i, j, k, value);
 }
 
-CUDA_CALLABLE inline void volume_store_v(uint64_t id, int32_t i, int32_t j, int32_t k, const vec3& value)
+CUDA_CALLABLE inline void volume_store_v(uint64_t id, int32_t i, int32_t j, int32_t k, const vec3 WP_THREAD& value)
 {
     volume_store(id, i, j, k, value);
 }
 
-CUDA_CALLABLE inline void volume_store_i(uint64_t id, int32_t i, int32_t j, int32_t k, const int32_t& value)
+CUDA_CALLABLE inline void volume_store_i(uint64_t id, int32_t i, int32_t j, int32_t k, const int32_t WP_THREAD& value)
 {
     volume_store(id, i, j, k, value);
 }
@@ -880,8 +944,9 @@ CUDA_CALLABLE inline vec3 volume_world_to_index(uint64_t id, vec3 xyz)
     return { uvw.x, uvw.y, uvw.z };
 }
 
-CUDA_CALLABLE inline void
-adj_volume_index_to_world(uint64_t id, vec3 uvw, uint64_t& adj_id, vec3& adj_uvw, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_volume_index_to_world(
+    uint64_t id, vec3 uvw, uint64_t WP_THREAD& adj_id, vec3 WP_THREAD& adj_uvw, const vec3 WP_THREAD& adj_ret
+)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
@@ -890,8 +955,9 @@ adj_volume_index_to_world(uint64_t id, vec3 uvw, uint64_t& adj_id, vec3& adj_uvw
     adj_uvw = add(adj_uvw, vec3 { xyz.x, xyz.y, xyz.z });
 }
 
-CUDA_CALLABLE inline void
-adj_volume_world_to_index(uint64_t id, vec3 xyz, uint64_t& adj_id, vec3& adj_xyz, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_volume_world_to_index(
+    uint64_t id, vec3 xyz, uint64_t WP_THREAD& adj_id, vec3 WP_THREAD& adj_xyz, const vec3 WP_THREAD& adj_ret
+)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
@@ -920,14 +986,16 @@ CUDA_CALLABLE inline vec3 volume_world_to_index_dir(uint64_t id, vec3 xyz)
     return { uvw.x, uvw.y, uvw.z };
 }
 
-CUDA_CALLABLE inline void
-adj_volume_index_to_world_dir(uint64_t id, vec3 uvw, uint64_t& adj_id, vec3& adj_uvw, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_volume_index_to_world_dir(
+    uint64_t id, vec3 uvw, uint64_t WP_THREAD& adj_id, vec3 WP_THREAD& adj_uvw, const vec3 WP_THREAD& adj_ret
+)
 {
     adj_volume_index_to_world(id, uvw, adj_id, adj_uvw, adj_ret);
 }
 
-CUDA_CALLABLE inline void
-adj_volume_world_to_index_dir(uint64_t id, vec3 xyz, uint64_t& adj_id, vec3& adj_xyz, const vec3& adj_ret)
+CUDA_CALLABLE inline void adj_volume_world_to_index_dir(
+    uint64_t id, vec3 xyz, uint64_t WP_THREAD& adj_id, vec3 WP_THREAD& adj_xyz, const vec3 WP_THREAD& adj_ret
+)
 {
     adj_volume_world_to_index(id, xyz, adj_id, adj_xyz, adj_ret);
 }
@@ -935,12 +1003,13 @@ adj_volume_world_to_index_dir(uint64_t id, vec3 xyz, uint64_t& adj_id, vec3& adj
 // fp64 overloads for volume transform functions
 
 // Transform position from index space to world space (fp64)
+#if !defined(WP_NO_FLOAT64)
 CUDA_CALLABLE inline vec3d volume_index_to_world(uint64_t id, vec3d uvw)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = uvw[0], sy = uvw[1], sz = uvw[2];
+    const WP_VOLUME_REAL sx = uvw[0], sy = uvw[1], sz = uvw[2];
     return { sx * pnanovdb_map_get_matd(buf, map, 0) + sy * pnanovdb_map_get_matd(buf, map, 1)
                  + sz * pnanovdb_map_get_matd(buf, map, 2) + pnanovdb_map_get_vecd(buf, map, 0),
              sx * pnanovdb_map_get_matd(buf, map, 3) + sy * pnanovdb_map_get_matd(buf, map, 4)
@@ -948,16 +1017,18 @@ CUDA_CALLABLE inline vec3d volume_index_to_world(uint64_t id, vec3d uvw)
              sx * pnanovdb_map_get_matd(buf, map, 6) + sy * pnanovdb_map_get_matd(buf, map, 7)
                  + sz * pnanovdb_map_get_matd(buf, map, 8) + pnanovdb_map_get_vecd(buf, map, 2) };
 }
+#endif
 
 // Transform position from world space to index space (fp64)
+#if !defined(WP_NO_FLOAT64)
 CUDA_CALLABLE inline vec3d volume_world_to_index(uint64_t id, vec3d xyz)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = xyz[0] - pnanovdb_map_get_vecd(buf, map, 0);
-    const double sy = xyz[1] - pnanovdb_map_get_vecd(buf, map, 1);
-    const double sz = xyz[2] - pnanovdb_map_get_vecd(buf, map, 2);
+    const WP_VOLUME_REAL sx = xyz[0] - pnanovdb_map_get_vecd(buf, map, 0);
+    const WP_VOLUME_REAL sy = xyz[1] - pnanovdb_map_get_vecd(buf, map, 1);
+    const WP_VOLUME_REAL sz = xyz[2] - pnanovdb_map_get_vecd(buf, map, 2);
     return { sx * pnanovdb_map_get_invmatd(buf, map, 0) + sy * pnanovdb_map_get_invmatd(buf, map, 1)
                  + sz * pnanovdb_map_get_invmatd(buf, map, 2),
              sx * pnanovdb_map_get_invmatd(buf, map, 3) + sy * pnanovdb_map_get_invmatd(buf, map, 4)
@@ -965,14 +1036,17 @@ CUDA_CALLABLE inline vec3d volume_world_to_index(uint64_t id, vec3d xyz)
              sx * pnanovdb_map_get_invmatd(buf, map, 6) + sy * pnanovdb_map_get_invmatd(buf, map, 7)
                  + sz * pnanovdb_map_get_invmatd(buf, map, 8) };
 }
+#endif
 
-CUDA_CALLABLE inline void
-adj_volume_index_to_world(uint64_t id, vec3d uvw, uint64_t& adj_id, vec3d& adj_uvw, const vec3d& adj_ret)
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline void adj_volume_index_to_world(
+    uint64_t id, vec3d uvw, uint64_t WP_THREAD& adj_id, vec3d WP_THREAD& adj_uvw, const vec3d WP_THREAD& adj_ret
+)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = adj_ret[0], sy = adj_ret[1], sz = adj_ret[2];
+    const WP_VOLUME_REAL sx = adj_ret[0], sy = adj_ret[1], sz = adj_ret[2];
     adj_uvw = add(
         adj_uvw,
         vec3d { sx * pnanovdb_map_get_matd(buf, map, 0) + sy * pnanovdb_map_get_matd(buf, map, 3)
@@ -983,14 +1057,17 @@ adj_volume_index_to_world(uint64_t id, vec3d uvw, uint64_t& adj_id, vec3d& adj_u
                     + sz * pnanovdb_map_get_matd(buf, map, 8) }
     );
 }
+#endif
 
-CUDA_CALLABLE inline void
-adj_volume_world_to_index(uint64_t id, vec3d xyz, uint64_t& adj_id, vec3d& adj_xyz, const vec3d& adj_ret)
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline void adj_volume_world_to_index(
+    uint64_t id, vec3d xyz, uint64_t WP_THREAD& adj_id, vec3d WP_THREAD& adj_xyz, const vec3d WP_THREAD& adj_ret
+)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = adj_ret[0], sy = adj_ret[1], sz = adj_ret[2];
+    const WP_VOLUME_REAL sx = adj_ret[0], sy = adj_ret[1], sz = adj_ret[2];
     adj_xyz = add(
         adj_xyz,
         vec3d { sx * pnanovdb_map_get_invmatd(buf, map, 0) + sy * pnanovdb_map_get_invmatd(buf, map, 3)
@@ -1001,14 +1078,16 @@ adj_volume_world_to_index(uint64_t id, vec3d xyz, uint64_t& adj_id, vec3d& adj_x
                     + sz * pnanovdb_map_get_invmatd(buf, map, 8) }
     );
 }
+#endif
 
 // Transform direction from index space to world space (fp64)
+#if !defined(WP_NO_FLOAT64)
 CUDA_CALLABLE inline vec3d volume_index_to_world_dir(uint64_t id, vec3d uvw)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = uvw[0], sy = uvw[1], sz = uvw[2];
+    const WP_VOLUME_REAL sx = uvw[0], sy = uvw[1], sz = uvw[2];
     return { sx * pnanovdb_map_get_matd(buf, map, 0) + sy * pnanovdb_map_get_matd(buf, map, 1)
                  + sz * pnanovdb_map_get_matd(buf, map, 2),
              sx * pnanovdb_map_get_matd(buf, map, 3) + sy * pnanovdb_map_get_matd(buf, map, 4)
@@ -1016,14 +1095,16 @@ CUDA_CALLABLE inline vec3d volume_index_to_world_dir(uint64_t id, vec3d uvw)
              sx * pnanovdb_map_get_matd(buf, map, 6) + sy * pnanovdb_map_get_matd(buf, map, 7)
                  + sz * pnanovdb_map_get_matd(buf, map, 8) };
 }
+#endif
 
 // Transform direction from world space to index space (fp64)
+#if !defined(WP_NO_FLOAT64)
 CUDA_CALLABLE inline vec3d volume_world_to_index_dir(uint64_t id, vec3d xyz)
 {
     const pnanovdb_buf_t buf = volume::id_to_buffer(id);
     const pnanovdb_grid_handle_t grid = { 0u };
     const pnanovdb_map_handle_t map = pnanovdb_grid_get_map(buf, grid);
-    const double sx = xyz[0], sy = xyz[1], sz = xyz[2];
+    const WP_VOLUME_REAL sx = xyz[0], sy = xyz[1], sz = xyz[2];
     return { sx * pnanovdb_map_get_invmatd(buf, map, 0) + sy * pnanovdb_map_get_invmatd(buf, map, 1)
                  + sz * pnanovdb_map_get_invmatd(buf, map, 2),
              sx * pnanovdb_map_get_invmatd(buf, map, 3) + sy * pnanovdb_map_get_invmatd(buf, map, 4)
@@ -1031,17 +1112,24 @@ CUDA_CALLABLE inline vec3d volume_world_to_index_dir(uint64_t id, vec3d xyz)
              sx * pnanovdb_map_get_invmatd(buf, map, 6) + sy * pnanovdb_map_get_invmatd(buf, map, 7)
                  + sz * pnanovdb_map_get_invmatd(buf, map, 8) };
 }
+#endif
 
-CUDA_CALLABLE inline void
-adj_volume_index_to_world_dir(uint64_t id, vec3d uvw, uint64_t& adj_id, vec3d& adj_uvw, const vec3d& adj_ret)
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline void adj_volume_index_to_world_dir(
+    uint64_t id, vec3d uvw, uint64_t WP_THREAD& adj_id, vec3d WP_THREAD& adj_uvw, const vec3d WP_THREAD& adj_ret
+)
 {
     adj_volume_index_to_world(id, uvw, adj_id, adj_uvw, adj_ret);
 }
+#endif
 
-CUDA_CALLABLE inline void
-adj_volume_world_to_index_dir(uint64_t id, vec3d xyz, uint64_t& adj_id, vec3d& adj_xyz, const vec3d& adj_ret)
+#if !defined(WP_NO_FLOAT64)
+CUDA_CALLABLE inline void adj_volume_world_to_index_dir(
+    uint64_t id, vec3d xyz, uint64_t WP_THREAD& adj_id, vec3d WP_THREAD& adj_xyz, const vec3d WP_THREAD& adj_ret
+)
 {
     adj_volume_world_to_index(id, xyz, adj_id, adj_xyz, adj_ret);
 }
+#endif
 
 }  // namespace wp

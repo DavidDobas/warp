@@ -7,6 +7,7 @@
 #include "builtin.h"
 
 #include "apic_types.h"
+#include "metal.h"
 
 #include <cstdint>
 
@@ -67,6 +68,10 @@ wp_alloc_device_async(void* context, size_t s, void* stream = WP_CURRENT_STREAM,
 WP_API void* wp_alloc_device_managed(void* context, size_t s, const char* tag = nullptr);
 
 WP_API void wp_free_host(void* ptr);
+// Routes wp_alloc_host()/wp_free_host() on the calling thread to Metal memory of the given device
+// (-1 restores host memory) and returns the previous setting. Host-side builders such as meshes and
+// BVHs then produce structures that Metal kernels can read, without threading an allocator through.
+WP_API int wp_host_alloc_redirect_metal(int ordinal);
 WP_API void wp_free_pinned(void* ptr);
 WP_API void wp_free_device(void* context, void* ptr);  // uses cudaFreeAsync() if supported, cudaFree() otherwise
 WP_API void wp_free_device_default(void* context, void* ptr);  // uses cudaFree()

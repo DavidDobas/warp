@@ -167,9 +167,11 @@ def test_function_builtin_parameter(test, device):
 
     wp.launch(function_builtin_parameter_kernel, dim=1, outputs=[out], device=device)
 
+    # 1 ulp tolerance: Metal's precise sin is not correctly rounded
     assert_np_equal(
         out.numpy(),
         np.array([np.sin(0.5), 3.0, 5.0, 4.0, np.sin(0.5), 1.0], dtype=np.float32),
+        tol=1e-7,
     )
 
 

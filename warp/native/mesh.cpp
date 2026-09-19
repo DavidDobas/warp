@@ -7,11 +7,13 @@
 #include "cuda_util.h"
 #include "error.h"
 #include "mesh.h"
+#include "metal_host.h"
 
 #include <new>
 
 using namespace wp;
 
+#include <functional>
 #include <map>
 
 namespace {
@@ -268,10 +270,120 @@ void wp_mesh_set_velocities_host(uint64_t id, wp::array_t<wp::vec3> velocities)
     m->velocities = velocities;
 }
 
-// stubs for non-CUDA platforms
-#if !WP_ENABLE_CUDA
+#if defined(__APPLE__)
 
+// On Apple platforms the device is a Metal GPU: the mesh and its BVH are built and refitted by the
+// host code above, in Metal memory, and kernels read a descriptor holding GPU addresses (see
+// metal_host.h). LBVH construction is CUDA-only, so it falls back to SAH.
+namespace {
+std::map<uint64_t, MetalMirror<Mesh>> g_metal_meshes;
 
+bool metal_mesh_update(const MetalMirror<Mesh>& m)
+{
+    MetalAddressTranslator gpu { m.ordinal };
+    *m.descriptor = metal_mesh_descriptor(gpu, *reinterpret_cast<Mesh*>(m.host_id));
+    return gpu.ok;
+}
+
+// Waits for GPU work that may still use the mesh before the host modifies it.
+MetalMirror<Mesh>* metal_mesh_acquire(uint64_t id)
+{
+    auto it = g_metal_meshes.find(id);
+    if (it == g_metal_meshes.end())
+        return nullptr;
+    wp_metal_synchronize(it->second.ordinal);
+    return &it->second;
+}
+}  // anonymous namespace
+
+uint64_t wp_mesh_create_device(
+    void* context,
+    wp::array_t<wp::vec3> points,
+    wp::array_t<wp::vec3> velocities,
+    wp::array_t<int> tris,
+    int num_points,
+    int num_tris,
+    int support_winding_number,
+    int constructor_type,
+    int* groups,
+    int bvh_leaf_size
+)
+{
+    const int ordinal = metal_context_ordinal(context);
+    if (wp_metal_synchronize(ordinal) != 0)  // the points may still be written by GPU kernels
+        return 0;
+    ScopedMetalHostAlloc scope(ordinal);
+    if (constructor_type == BVH_CONSTRUCTOR_LBVH)
+        constructor_type = BVH_CONSTRUCTOR_SAH;
+    MetalMirror<Mesh> m { ordinal,
+                          wp_mesh_create_host(
+                              points, velocities, tris, num_points, num_tris, support_winding_number, constructor_type,
+                              groups, bvh_leaf_size
+                          ),
+                          nullptr };
+    if (!m.host_id)
+        return 0;
+    m.descriptor = static_cast<Mesh*>(wp_alloc_host(sizeof(Mesh), "(native:mesh)"));
+    const uint64_t id = wp_metal_gpu_address(ordinal, m.descriptor);
+    if (!id || !metal_mesh_update(m)) {
+        wp_mesh_destroy_host(m.host_id);
+        wp_free_host(m.descriptor);
+        return 0;
+    }
+    g_metal_meshes[id] = m;
+    return id;
+}
+
+void wp_mesh_destroy_device(uint64_t id)
+{
+    auto it = g_metal_meshes.find(id);
+    if (it == g_metal_meshes.end())
+        return;
+    ScopedMetalHostAlloc scope(it->second.ordinal);
+    wp_mesh_destroy_host(it->second.host_id);
+    wp_free_host(it->second.descriptor);
+    g_metal_meshes.erase(it);
+}
+
+// Mesh updates during a capture are recorded as host operations replayed in order by the graph.
+static int metal_mesh_apply(uint64_t id, std::function<void(MetalMirror<Mesh>&)> update)
+{
+    auto it = g_metal_meshes.find(id);
+    if (it == g_metal_meshes.end())
+        return 0;
+    const int ordinal = it->second.ordinal;
+    auto apply = [=]() {
+        auto it = g_metal_meshes.find(id);
+        if (it == g_metal_meshes.end())
+            return false;
+        ScopedMetalHostAlloc scope(ordinal);
+        update(it->second);
+        return metal_mesh_update(it->second);
+    };
+    if (wp_metal_capture_host_op(ordinal, apply))
+        return 1;
+    wp_metal_synchronize(ordinal);  // GPU work may still use the mesh
+    return apply() ? 1 : 0;
+}
+
+int wp_mesh_refit_device(uint64_t id)
+{
+    return metal_mesh_apply(id, [](MetalMirror<Mesh>& m) { wp_mesh_refit_host(m.host_id); });
+}
+
+int wp_mesh_set_points_device(uint64_t id, wp::array_t<wp::vec3> points)
+{
+    return metal_mesh_apply(id, [points](MetalMirror<Mesh>& m) { wp_mesh_set_points_host(m.host_id, points); });
+}
+
+void wp_mesh_set_velocities_device(uint64_t id, wp::array_t<wp::vec3> velocities)
+{
+    metal_mesh_apply(id, [velocities](MetalMirror<Mesh>& m) { wp_mesh_set_velocities_host(m.host_id, velocities); });
+}
+
+#elif !WP_ENABLE_CUDA
+
+// stubs for platforms without a GPU backend
 WP_API uint64_t wp_mesh_create_device(
     void* context,
     wp::array_t<wp::vec3> points,

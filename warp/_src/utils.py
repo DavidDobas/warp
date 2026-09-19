@@ -45,6 +45,34 @@ def quat_between_vectors(a: wp.vec3, b: wp.vec3) -> wp.quat:
     return wp.normalize(q)
 
 
+def _runs_on_host(device, unrecorded: str | None = None) -> bool:
+    """Whether an array on ``device`` is processed by the host implementation of a utility.
+
+    Metal arrays live in unified memory, so they use the host code paths once outstanding
+    GPU work has completed. Callers whose host call cannot be recorded into a Metal graph (see
+    ``_host_call``) name the operation in ``unrecorded`` so that using it inside a capture raises.
+    """
+    if device.is_metal:
+        if not device.is_capturing:
+            device.metal_synchronize()
+        elif unrecorded:
+            # the host call would run once at capture time, on inputs whose kernels were only recorded
+            raise RuntimeError(f"{unrecorded} are not supported on Metal inside a graph capture")
+    return not device.is_cuda
+
+
+def _host_call(device, fn, *args):
+    """Run a native host utility now, or record it into the Metal graph being captured.
+
+    Metal arrays are host memory, so the utilities keep their host implementations; inside a capture
+    the call replays in order with the graph's kernel dispatches instead of running immediately.
+    """
+    if device.is_metal and device.is_capturing:
+        device.metal_record_host_call(fn, *args)
+        return True
+    return fn(*args)
+
+
 def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) -> None:
     """Perform a scan (prefix sum) operation on an array.
 
@@ -115,7 +143,7 @@ def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) 
         apic_capture.track_array(in_array)
         apic_capture.track_array(out_array)
 
-    if in_array.device.is_cpu:
+    if _runs_on_host(in_array.device):
         if scalar_type == wp.int32:
             native_func = runtime.core.wp_array_scan_int_host
         elif scalar_type == wp.int64:
@@ -138,7 +166,17 @@ def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) 
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
 
-    native_func(in_array.ptr, out_array.ptr, in_array.size, in_stride, out_stride, type_length, inclusive)
+    _host_call(
+        in_array.device,
+        native_func,
+        in_array.ptr,
+        out_array.ptr,
+        in_array.size,
+        in_stride,
+        out_stride,
+        type_length,
+        inclusive,
+    )
 
 
 def radix_sort_pairs(
@@ -218,19 +256,73 @@ def radix_sort_pairs(
         apic_capture.track_array(keys)
         apic_capture.track_array(values)
 
-    if keys.device.is_cpu:
+    if _runs_on_host(keys.device):
         if keys.dtype == wp.int32:
-            runtime.core.wp_radix_sort_pairs_int_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_int_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.uint32:
-            runtime.core.wp_radix_sort_pairs_uint_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_uint_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.float32:
-            runtime.core.wp_radix_sort_pairs_float_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_float_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.float64:
-            runtime.core.wp_radix_sort_pairs_double_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_double_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.int64:
-            runtime.core.wp_radix_sort_pairs_int64_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_int64_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         elif keys.dtype == wp.uint64:
-            runtime.core.wp_radix_sort_pairs_uint64_host(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
+            _host_call(
+                keys.device,
+                runtime.core.wp_radix_sort_pairs_uint64_host,
+                keys.ptr,
+                values.ptr,
+                count,
+                begin_bit,
+                end_bit,
+                value_size,
+            )
         else:
             raise RuntimeError(
                 f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
@@ -324,9 +416,22 @@ def segmented_sort_pairs(
         apic_capture.track_array(segment_start_indices)
         apic_capture.track_array(segment_end_indices)
 
-    if keys.device.is_cpu:
+    if _runs_on_host(keys.device):
+        if keys.device.is_metal:
+            # GPU semantics: malformed segment ranges are skipped instead of rejected (the CUDA path
+            # cannot validate them without a synchronous copy); filter them out before the host sort
+            starts = segment_start_indices.numpy().astype(np.int32, copy=False)[:num_segments]
+            ends = segment_end_indices.numpy().astype(np.int32, copy=False)[:num_segments]
+            valid = (starts >= 0) & (starts <= ends) & (ends <= count)
+            if not valid.all():
+                starts = np.ascontiguousarray(starts[valid])
+                ends = np.ascontiguousarray(ends[valid])
+                segment_start_indices_ptr, segment_end_indices_ptr = starts.ctypes.data, ends.ctypes.data
+                num_segments = int(valid.sum())
         if keys.dtype == wp.int32 and values.dtype == wp.int32:
-            runtime.core.wp_segmented_sort_pairs_int_host(
+            _host_call(
+                keys.device,
+                runtime.core.wp_segmented_sort_pairs_int_host,
                 keys.ptr,
                 values.ptr,
                 count,
@@ -335,7 +440,9 @@ def segmented_sort_pairs(
                 num_segments,
             )
         elif keys.dtype == wp.float32 and values.dtype == wp.int32:
-            runtime.core.wp_segmented_sort_pairs_float_host(
+            _host_call(
+                keys.device,
+                runtime.core.wp_segmented_sort_pairs_float_host,
                 keys.ptr,
                 values.ptr,
                 count,
@@ -457,10 +564,16 @@ def runlength_encode(
         apic_capture.track_array(run_lengths)
         apic_capture.track_array(run_count)
 
-    if values.device.is_cpu:
+    if _runs_on_host(values.device):
         if values.dtype == wp.int32:
-            runtime.core.wp_runlength_encode_int_host(
-                values.ptr, run_values.ptr, run_lengths.ptr, run_count.ptr, value_count
+            _host_call(
+                values.device,
+                runtime.core.wp_runlength_encode_int_host,
+                values.ptr,
+                run_values.ptr,
+                run_lengths.ptr,
+                run_count.ptr,
+                value_count,
             )
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
@@ -614,7 +727,7 @@ def array_sum(
             return out.numpy()[0]
         return out
 
-    if values.device.is_cpu:
+    if _runs_on_host(values.device):
         if scalar_type == wp.float32:
             native_func = context.runtime.core.wp_array_sum_float_host
         elif scalar_type == wp.float64:
@@ -631,7 +744,7 @@ def array_sum(
 
     if axis is None:
         stride = wp._src.types.type_size_in_bytes(values.dtype)
-        native_func(values.ptr, out.ptr, value_count, stride, type_size)
+        _host_call(values.device, native_func, values.ptr, out.ptr, value_count, stride, type_size)
 
         if host_return:
             return out.numpy()[0]
@@ -642,7 +755,9 @@ def array_sum(
         out_offset = sum(i * s for i, s in zip(idx, out.strides, strict=True))
         val_offset = sum(i * s for i, s in zip(idx, values.strides, strict=True))
 
-        native_func(
+        _host_call(
+            values.device,
+            native_func,
             values.ptr + val_offset,
             out.ptr + out_offset,
             value_count,
@@ -758,7 +873,7 @@ def array_inner(
         out.zero_()
         return out
 
-    if a.device.is_cpu:
+    if _runs_on_host(a.device):
         if scalar_type == wp.float32:
             native_func = context.runtime.core.wp_array_inner_float_host
         elif scalar_type == wp.float64:
@@ -776,7 +891,7 @@ def array_inner(
     if axis is None:
         stride_a = wp._src.types.type_size_in_bytes(a.dtype)
         stride_b = wp._src.types.type_size_in_bytes(b.dtype)
-        native_func(a.ptr, b.ptr, out.ptr, count, stride_a, stride_b, type_size)
+        _host_call(a.device, native_func, a.ptr, b.ptr, out.ptr, count, stride_a, stride_b, type_size)
 
         if host_return:
             return out.numpy()[0]
@@ -790,7 +905,9 @@ def array_inner(
         a_offset = sum(i * s for i, s in zip(idx, a.strides, strict=True))
         b_offset = sum(i * s for i, s in zip(idx, b.strides, strict=True))
 
-        native_func(
+        _host_call(
+            a.device,
+            native_func,
             a.ptr + a_offset,
             b.ptr + b_offset,
             out.ptr + out_offset,

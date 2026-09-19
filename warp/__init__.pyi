@@ -90,6 +90,7 @@ from warp._src.context import init as init
 from warp._src.context import is_cpu_available as is_cpu_available
 from warp._src.context import is_cubql_available as is_cubql_available
 from warp._src.context import is_cuda_available as is_cuda_available
+from warp._src.context import is_metal_available as is_metal_available
 from warp._src.build import clear_kernel_cache as clear_kernel_cache
 from warp._src.build import clear_lto_cache as clear_lto_cache
 from warp._src.context import print_diagnostics as print_diagnostics
@@ -3957,12 +3958,6 @@ def tile_reduce(op: Callable, a: Tile[Scalar, tuple[int, ...]], axis: int32) -> 
 
     Returns:
         A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
-
-    On a partial CPU block, a slice with no active values returns the operation's identity for
-    ``wp.add``, ``wp.mul``, ``wp.min``, and ``wp.max``. Other operators have no declared
-    identity, so an empty slice triggers an assertion instead of returning an arbitrary value.
-    See :ref:`CPU Tile Semantics <cpu_tile_semantics>` for definitions of partial
-    CPU blocks and active lanes.
 
     Example:
 

@@ -18,10 +18,8 @@ from warp._src.context import (
     CudaMemcpyKind,
     _build_kernel_launch_bounds,
     _raise_cuda_launch_error,
-    _resolve_launch_block_dim,
     _validate_cluster_launch,
     invoke,
-    invoke_cpu_blocks,
 )
 from warp._src.jax import get_jax_device
 from warp._src.logger import log_warning
@@ -145,7 +143,10 @@ ModulePreloadMode = JaxModulePreloadMode
 
 def _get_ffi_block_dim(device, block_dim=None):
     """Resolve the FFI block dimension for ``device``."""
-    return _resolve_launch_block_dim(device, block_dim)
+    if device.is_cpu:
+        # Remove this override if CPU launches gain configurable block dimensions.
+        return 1
+    return 256 if block_dim is None else block_dim
 
 
 def _load_ffi_module(module, device, block_dim=None):
@@ -562,11 +563,7 @@ class FfiKernel:
                     hooks = module_exec.get_kernel_hooks(self.kernel)
                     if hooks.forward is None:
                         raise RuntimeError("Failed to find CPU kernel entry point")
-                    params = [launch_bounds, *arg_refs]
-                    if block_dim > 1:
-                        invoke_cpu_blocks(self.kernel, hooks, params, adjoint=False)
-                    else:
-                        invoke(self.kernel, hooks, params, adjoint=False)
+                    invoke(self.kernel, hooks, [launch_bounds, *arg_refs], adjoint=False)
                     return None
 
                 kernel_params = (ctypes.c_void_p * (1 + self.num_kernel_args))(
@@ -1352,12 +1349,11 @@ def jax_kernel(
         enable_backward: Enable automatic differentiation for this kernel.
         has_side_effect: Whether the custom call has side effects. When True,
             the FFI call will be executed even when the outputs are not used.
-        block_dim: Specify the number of threads per block. When ``None``, CUDA
-            uses 256 threads per block and CPU uses one. Explicit CPU block
-            dimensions greater than one are honored when
-            ``warp.config.enable_cpu_blocks`` is ``True``. The value is fixed
-            when the wrapper is constructed and is shared by forward and
-            adjoint launches when ``enable_backward=True``.
+        block_dim: Specify the number of threads per block for CUDA execution.
+            When ``None``, CUDA uses 256 threads per block. CPU execution always
+            uses one thread per block. The value is fixed when the wrapper is
+            constructed and is shared by forward and adjoint launches when
+            ``enable_backward=True``.
 
     Limitations:
         - All kernel arguments must be contiguous arrays or scalars.
@@ -1464,7 +1460,7 @@ def jax_kernel(
     # Reuse `hashable_launch_dims` (computed above for the cache key path)
     # so 1-D integer and sequence forms are normalized identically.
     _user_launch_dims = hashable_launch_dims if launch_dims is not None else None
-    _launch_block_dim = block_dim
+    _launch_block_dim = 256 if block_dim is None else block_dim
 
     def _resolve_launch_dims(call_args):
         if _user_launch_dims is not None:

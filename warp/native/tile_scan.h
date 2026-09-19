@@ -15,13 +15,13 @@ namespace wp {
 
 // Operation structs for different scan types (shared between CPU and GPU)
 template <typename T> struct OpAdd {
-    inline CUDA_CALLABLE T operator()(const T& a, const T& b) const { return a + b; }
+    inline CUDA_CALLABLE T operator()(T a, T b) const { return a + b; }
 
     inline CUDA_CALLABLE T identity() const { return T(0); }
 };
 
 template <typename T> struct OpMax {
-    inline CUDA_CALLABLE T operator()(const T& a, const T& b) const { return max(a, b); }
+    inline CUDA_CALLABLE T operator()(T a, T b) const { return max(a, b); }
 
     inline CUDA_CALLABLE T identity() const;
 };
@@ -33,10 +33,12 @@ template <> inline CUDA_CALLABLE int OpMax<int>::identity() const
 
 template <> inline CUDA_CALLABLE float OpMax<float>::identity() const { return -1e38f; }
 
+#if !defined(WP_NO_FLOAT64)
 template <> inline CUDA_CALLABLE double OpMax<double>::identity() const { return -1e308; }
+#endif  // !WP_NO_FLOAT64
 
 template <typename T> struct OpMin {
-    inline CUDA_CALLABLE T operator()(const T& a, const T& b) const { return min(a, b); }
+    inline CUDA_CALLABLE T operator()(T a, T b) const { return min(a, b); }
 
     inline CUDA_CALLABLE T identity() const;
 };
@@ -48,7 +50,9 @@ template <> inline CUDA_CALLABLE int OpMin<int>::identity() const
 
 template <> inline CUDA_CALLABLE float OpMin<float>::identity() const { return 1e38f; }
 
+#if !defined(WP_NO_FLOAT64)
 template <> inline CUDA_CALLABLE double OpMin<double>::identity() const { return 1e308; }
+#endif  // !WP_NO_FLOAT64
 
 #if defined(__CUDA_ARCH__)
 
@@ -163,7 +167,7 @@ inline CUDA_CALLABLE void thread_block_scan(T* values, int num_elements)
 }
 
 template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
-inline CUDA_CALLABLE auto tile_scan_inclusive_impl(Tile& t)
+inline CUDA_CALLABLE auto tile_scan_inclusive_impl(WP_TILE_ARENA_PARAM Tile& t)
 {
     using T = typename Tile::Type;
     constexpr int num_elements_to_scan = Tile::Layout::Shape::size();
@@ -186,7 +190,7 @@ inline CUDA_CALLABLE auto tile_scan_inclusive_impl(Tile& t)
 }
 
 template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
-inline CUDA_CALLABLE auto tile_scan_exclusive_impl(Tile& t)
+inline CUDA_CALLABLE auto tile_scan_exclusive_impl(WP_TILE_ARENA_PARAM Tile& t)
 {
     using T = typename Tile::Type;
     constexpr int num_elements_to_scan = Tile::Layout::Shape::size();
@@ -221,7 +225,8 @@ inline CUDA_CALLABLE auto tile_scan_exclusive_impl(Tile& t)
 // per fiber — comparable to the GPU warp-level shuffle path for moderate
 // block_dim. (See plan A8 step 4: a more efficient port is a follow-up.)
 
-template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto tile_scan_inclusive_impl(Tile& t)
+template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
+inline auto tile_scan_inclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
     using T = typename Tile::Type;
     constexpr int N = Tile::Layout::Shape::size();
@@ -241,8 +246,8 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
         return output;
     } else {
         // Cross-fiber scan via shared scratch.
-        T* scratch = (T*)tile_shared_storage_t::alloc(int(sizeof(T) * N));
-        bool* active = (bool*)tile_shared_storage_t::alloc(int(sizeof(bool) * WP_TILE_BLOCK_DIM));
+        T WP_TILE_SHARED* scratch = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * N));
+        bool WP_TILE_SHARED* active = (bool WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(bool) * WP_TILE_BLOCK_DIM));
         const int tid = WP_TILE_THREAD_IDX;
 
         // Inactive tail fibers in a partial CPU block never enter the kernel,
@@ -275,13 +280,14 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
         }
         WP_TILE_SYNC();
 
-        tile_shared_storage_t::alloc(-(int)(sizeof(bool) * WP_TILE_BLOCK_DIM));
-        tile_shared_storage_t::alloc(-(int)(sizeof(T) * N));
+        WP_TILE_ALLOC(-(int)(sizeof(bool) * WP_TILE_BLOCK_DIM));
+        WP_TILE_ALLOC(-(int)(sizeof(T) * N));
         return output;
     }
 }
 
-template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto tile_scan_exclusive_impl(Tile& t)
+template <typename Tile, typename Op = OpAdd<typename Tile::Type>>
+inline auto tile_scan_exclusive_impl(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
     using T = typename Tile::Type;
     constexpr int N = Tile::Layout::Shape::size();
@@ -299,8 +305,8 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
         }
         return output;
     } else {
-        T* scratch = (T*)tile_shared_storage_t::alloc(int(sizeof(T) * N));
-        bool* active = (bool*)tile_shared_storage_t::alloc(int(sizeof(bool) * WP_TILE_BLOCK_DIM));
+        T WP_TILE_SHARED* scratch = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * N));
+        bool WP_TILE_SHARED* active = (bool WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(bool) * WP_TILE_BLOCK_DIM));
         const int tid = WP_TILE_THREAD_IDX;
 
         for (int i = 0; i < WP_TILE_BLOCK_DIM; ++i)
@@ -328,47 +334,57 @@ template <typename Tile, typename Op = OpAdd<typename Tile::Type>> inline auto t
         }
         WP_TILE_SYNC();
 
-        tile_shared_storage_t::alloc(-(int)(sizeof(bool) * WP_TILE_BLOCK_DIM));
-        tile_shared_storage_t::alloc(-(int)(sizeof(T) * N));
+        WP_TILE_ALLOC(-(int)(sizeof(bool) * WP_TILE_BLOCK_DIM));
+        WP_TILE_ALLOC(-(int)(sizeof(T) * N));
         return output;
     }
 }
 
 #endif  // !defined(__CUDA_ARCH__)
 
-template <typename Tile> auto tile_scan_inclusive(Tile& t) { return tile_scan_inclusive_impl(t); }
+template <typename Tile> auto tile_scan_inclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+{
+    return tile_scan_inclusive_impl(WP_TILE_ARENA_ARG t);
+}
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: adjoint of inclusive prefix sum is reverse-suffix sum of adj_ret
 }
 
-template <typename Tile> auto tile_scan_exclusive(Tile& t) { return tile_scan_exclusive_impl(t); }
+template <typename Tile> auto tile_scan_exclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
+{
+    return tile_scan_exclusive_impl(WP_TILE_ARENA_ARG t);
+}
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_exclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_exclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: adjoint of exclusive prefix sum is reverse-suffix sum of adj_ret
     // shifted by one
 }
 
 // Max scan operations
-template <typename Tile> auto tile_scan_max_inclusive(Tile& t)
+template <typename Tile> auto tile_scan_max_inclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
-    return tile_scan_inclusive_impl<Tile, OpMax<typename Tile::Type>>(t);
+    return tile_scan_inclusive_impl<Tile, OpMax<typename Tile::Type>>(WP_TILE_ARENA_ARG t);
 }
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_max_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_max_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmax over [0, i]
 }
 
 // Min scan operations
-template <typename Tile> auto tile_scan_min_inclusive(Tile& t)
+template <typename Tile> auto tile_scan_min_inclusive(WP_TILE_ARENA_PARAM Tile WP_THREAD& t)
 {
-    return tile_scan_inclusive_impl<Tile, OpMin<typename Tile::Type>>(t);
+    return tile_scan_inclusive_impl<Tile, OpMin<typename Tile::Type>>(WP_TILE_ARENA_ARG t);
 }
 
-template <typename Tile, typename AdjTile> void adj_tile_scan_min_inclusive(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile>
+void adj_tile_scan_min_inclusive(Tile WP_THREAD& t, Tile WP_THREAD& adj_t, AdjTile WP_THREAD& adj_ret)
 {
     // MISSINGADJOINT: subgradient: route each adj_ret[i] to argmin over [0, i]
 }

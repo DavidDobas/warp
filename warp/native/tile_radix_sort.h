@@ -989,15 +989,24 @@ CUDA_CALLABLE_DEVICE void tile_sort(TileK& t, TileV& t2, int start, int length)
 
 // CPU implementation
 
-template <typename K> void swap_elements(K& a, K& b)
+template <typename K> void swap_elements(K WP_THREAD& a, K WP_THREAD& b)
 {
     K tmp = a;
     a = b;
     b = tmp;
 }
+#if defined(__METAL_VERSION__)
+template <typename K> void swap_elements(threadgroup K& a, threadgroup K& b)
+{
+    K tmp = a;
+    a = b;
+    b = tmp;
+}
+#endif
 
 // length must be a power of two
-template <typename K, typename V> void bitonic_sort_pairs_pow2_length_cpu(K* keys, V* values, int length)
+template <typename K, typename V>
+void bitonic_sort_pairs_pow2_length_cpu(K WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length)
 {
     for (int k = 2; k <= length; k *= 2) {
         for (int stride = k / 2; stride > 0; stride /= 2) {
@@ -1016,17 +1025,23 @@ template <typename K, typename V> void bitonic_sort_pairs_pow2_length_cpu(K* key
 }
 
 template <typename K, typename V, int max_size, typename KeyToUint>
-void bitonic_sort_pairs_general_size_cpu(K* keys, V* values, int length)
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM K WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
     constexpr int pow2_size = next_higher_pow2(max_size);
 
+#if defined(__METAL_VERSION__)
+    K WP_TILE_SHARED* keys_tmp = (K WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(K) * pow2_size));
+    V WP_TILE_SHARED* values_tmp = (V WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(V) * pow2_size));
+#else
     K keys_local[WP_TILE_BLOCK_DIM == 1 ? pow2_size : 1];
     V values_local[WP_TILE_BLOCK_DIM == 1 ? pow2_size : 1];
-    K* keys_tmp = keys_local;
-    V* values_tmp = values_local;
+    K WP_THREAD* keys_tmp = keys_local;
+    V WP_THREAD* values_tmp = values_local;
     if constexpr (WP_TILE_BLOCK_DIM > 1) {
-        keys_tmp = (K*)malloc(sizeof(K) * pow2_size);
-        values_tmp = (V*)malloc(sizeof(V) * pow2_size);
+        keys_tmp = (K WP_THREAD*)malloc(sizeof(K) * pow2_size);
+        values_tmp = (V WP_THREAD*)malloc(sizeof(V) * pow2_size);
         if (!keys_tmp || !values_tmp) {
             free(keys_tmp);
             free(values_tmp);
@@ -1034,6 +1049,7 @@ void bitonic_sort_pairs_general_size_cpu(K* keys, V* values, int length)
             return;
         }
     }
+#endif
 
     KeyToUint converter;
     K max_key = converter.max_possible_key_value();
@@ -1050,47 +1066,71 @@ void bitonic_sort_pairs_general_size_cpu(K* keys, V* values, int length)
         values[i] = values_tmp[i];
     }
 
+#if defined(__METAL_VERSION__)
+    WP_TILE_ALLOC(-int(sizeof(V) * pow2_size));
+    WP_TILE_ALLOC(-int(sizeof(K) * pow2_size));
+#else
     if constexpr (WP_TILE_BLOCK_DIM > 1) {
         free(values_tmp);
         free(keys_tmp);
     }
+#endif
 }
 
-template <typename V, int max_size> void bitonic_sort_pairs_general_size_cpu(unsigned int* keys, V* values, int length)
+template <typename V, int max_size>
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM unsigned int WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
-    bitonic_sort_pairs_general_size_cpu<unsigned int, V, max_size, UintKeyToUint>(keys, values, length);
+    bitonic_sort_pairs_general_size_cpu<unsigned int, V, max_size, UintKeyToUint>(
+        WP_TILE_ARENA_ARG keys, values, length
+    );
 }
 
-template <typename V, int max_size> void bitonic_sort_pairs_general_size_cpu(int* keys, V* values, int length)
+template <typename V, int max_size>
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM int WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
-    bitonic_sort_pairs_general_size_cpu<int, V, max_size, IntKeyToUint>(keys, values, length);
+    bitonic_sort_pairs_general_size_cpu<int, V, max_size, IntKeyToUint>(WP_TILE_ARENA_ARG keys, values, length);
 }
 
-template <typename V, int max_size> void bitonic_sort_pairs_general_size_cpu(float* keys, V* values, int length)
+template <typename V, int max_size>
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM float WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
-    bitonic_sort_pairs_general_size_cpu<float, V, max_size, FloatKeyToUint>(keys, values, length);
+    bitonic_sort_pairs_general_size_cpu<float, V, max_size, FloatKeyToUint>(WP_TILE_ARENA_ARG keys, values, length);
 }
 
-template <typename V, int max_size> void bitonic_sort_pairs_general_size_cpu(int64_t* keys, V* values, int length)
+template <typename V, int max_size>
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM int64_t WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
-    bitonic_sort_pairs_general_size_cpu<int64_t, V, max_size, Int64KeyToUint>(keys, values, length);
+    bitonic_sort_pairs_general_size_cpu<int64_t, V, max_size, Int64KeyToUint>(WP_TILE_ARENA_ARG keys, values, length);
 }
 
-template <typename V, int max_size> void bitonic_sort_pairs_general_size_cpu(uint64_t* keys, V* values, int length)
+template <typename V, int max_size>
+void bitonic_sort_pairs_general_size_cpu(
+    WP_TILE_ARENA_PARAM uint64_t WP_TILE_SHARED* keys, V WP_TILE_SHARED* values, int length
+)
 {
-    bitonic_sort_pairs_general_size_cpu<uint64_t, V, max_size, Uint64KeyToUint>(keys, values, length);
+    bitonic_sort_pairs_general_size_cpu<uint64_t, V, max_size, Uint64KeyToUint>(WP_TILE_ARENA_ARG keys, values, length);
 }
 
 
 template <typename K, typename V, typename KeyToUint>
-void radix_sort_pairs_cpu_core(K* keys, K* aux_keys, V* values, V* aux_values, int n)
+void radix_sort_pairs_cpu_core(
+    K WP_TILE_SHARED* keys, K WP_TILE_SHARED* aux_keys, V WP_TILE_SHARED* values, V WP_TILE_SHARED* aux_values, int n
+)
 {
     KeyToUint converter;
     constexpr size_t table_size = sizeof(unsigned int) * 2 * (1 << 16);
     unsigned int tables_local[WP_TILE_BLOCK_DIM == 1 ? 2 * (1 << 16) : 1];
-    auto tables = (unsigned int (*)[1 << 16]) tables_local;
+    auto tables = (WP_THREAD unsigned int (*)[1 << 16]) tables_local;
     if constexpr (WP_TILE_BLOCK_DIM > 1) {
-        tables = (unsigned int (*)[1 << 16]) malloc(table_size);
+        tables = (WP_THREAD unsigned int (*)[1 << 16]) malloc(table_size);
         if (!tables) {
             _wp_assert("Warp CPU tile radix-sort table allocation failed", __FILE__, (unsigned int)__LINE__);
             return;
@@ -1158,8 +1198,13 @@ void radix_sort_pairs_cpu_core(K* keys, K* aux_keys, V* values, V* aux_values, i
 }
 
 template <typename V>
-inline void
-radix_sort_pairs_cpu(int* keys_input, int* keys_aux, V* values_input, V* values_aux, int num_elements_to_sort)
+inline void radix_sort_pairs_cpu(
+    int WP_THREAD* keys_input,
+    int WP_THREAD* keys_aux,
+    V WP_TILE_SHARED* values_input,
+    V WP_TILE_SHARED* values_aux,
+    int num_elements_to_sort
+)
 {
     radix_sort_pairs_cpu_core<int, V, IntKeyToUint>(
         keys_input, keys_aux, values_input, values_aux, num_elements_to_sort
@@ -1168,7 +1213,11 @@ radix_sort_pairs_cpu(int* keys_input, int* keys_aux, V* values_input, V* values_
 
 template <typename V>
 inline void radix_sort_pairs_cpu(
-    unsigned int* keys_input, unsigned int* keys_aux, V* values_input, V* values_aux, int num_elements_to_sort
+    unsigned int WP_TILE_SHARED* keys_input,
+    unsigned int WP_TILE_SHARED* keys_aux,
+    V WP_TILE_SHARED* values_input,
+    V WP_TILE_SHARED* values_aux,
+    int num_elements_to_sort
 )
 {
     radix_sort_pairs_cpu_core<unsigned int, V, UintKeyToUint>(
@@ -1177,8 +1226,13 @@ inline void radix_sort_pairs_cpu(
 }
 
 template <typename V>
-inline void
-radix_sort_pairs_cpu(float* keys_input, float* keys_aux, V* values_input, V* values_aux, int num_elements_to_sort)
+inline void radix_sort_pairs_cpu(
+    float WP_TILE_SHARED* keys_input,
+    float WP_TILE_SHARED* keys_aux,
+    V WP_TILE_SHARED* values_input,
+    V WP_TILE_SHARED* values_aux,
+    int num_elements_to_sort
+)
 {
     radix_sort_pairs_cpu_core<float, V, FloatKeyToUint>(
         keys_input, keys_aux, values_input, values_aux, num_elements_to_sort
@@ -1186,14 +1240,14 @@ radix_sort_pairs_cpu(float* keys_input, float* keys_aux, V* values_input, V* val
 }
 
 
-template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2)
+template <typename TileK, typename TileV> void tile_sort(WP_TILE_ARENA_PARAM TileK WP_THREAD& t, TileV WP_THREAD& t2)
 {
     using T = typename TileK::Type;
     using V = typename TileV::Type;
 
     constexpr int num_elements_to_sort = TileK::Layout::Shape::size();
-    T* keys = &t.data(0);
-    V* values = &t2.data(0);
+    T WP_TILE_SHARED* keys = &t.data(0);
+    V WP_TILE_SHARED* values = &t2.data(0);
 
     // Shared input tiles must be fully populated before the serial phase.
     WP_TILE_SYNC();
@@ -1205,14 +1259,31 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2)
             if constexpr (is_power_of_two(num_elements_to_sort))
                 bitonic_sort_pairs_pow2_length_cpu<T, V>(keys, values, num_elements_to_sort);
             else
-                bitonic_sort_pairs_general_size_cpu<V, num_elements_to_sort>(keys, values, num_elements_to_sort);
+                bitonic_sort_pairs_general_size_cpu<V, num_elements_to_sort>(
+                    WP_TILE_ARENA_ARG keys, values, num_elements_to_sort
+                );
         } else if constexpr (WP_TILE_BLOCK_DIM == 1) {
+#if defined(__METAL_VERSION__)
+            T WP_TILE_SHARED* keys_tmp = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * num_elements_to_sort));
+            V WP_TILE_SHARED* values_tmp = (V WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(V) * num_elements_to_sort));
+            radix_sort_pairs_cpu<V>(keys, keys_tmp, values, values_tmp, num_elements_to_sort);
+            WP_TILE_ALLOC(-int(sizeof(V) * num_elements_to_sort));
+            WP_TILE_ALLOC(-int(sizeof(T) * num_elements_to_sort));
+#else
             T keys_tmp[num_elements_to_sort];
             V values_tmp[num_elements_to_sort];
             radix_sort_pairs_cpu<V>(keys, keys_tmp, values, values_tmp, num_elements_to_sort);
+#endif
         } else {
-            T* keys_tmp = (T*)malloc(sizeof(T) * num_elements_to_sort);
-            V* values_tmp = (V*)malloc(sizeof(V) * num_elements_to_sort);
+#if defined(__METAL_VERSION__)
+            T WP_TILE_SHARED* keys_tmp = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * num_elements_to_sort));
+            V WP_TILE_SHARED* values_tmp = (V WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(V) * num_elements_to_sort));
+            radix_sort_pairs_cpu<V>(keys, keys_tmp, values, values_tmp, num_elements_to_sort);
+            WP_TILE_ALLOC(-int(sizeof(V) * num_elements_to_sort));
+            WP_TILE_ALLOC(-int(sizeof(T) * num_elements_to_sort));
+#else
+            T WP_THREAD* keys_tmp = (T WP_THREAD*)malloc(sizeof(T) * num_elements_to_sort);
+            V WP_THREAD* values_tmp = (V WP_THREAD*)malloc(sizeof(V) * num_elements_to_sort);
             if (!keys_tmp || !values_tmp) {
                 free(keys_tmp);
                 free(values_tmp);
@@ -1222,21 +1293,23 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2)
                 free(values_tmp);
                 free(keys_tmp);
             }
+#endif
         }
     }
 
     WP_TILE_SYNC();
 }
 
-template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, int start, int length)
+template <typename TileK, typename TileV>
+void tile_sort(WP_TILE_ARENA_PARAM TileK WP_THREAD& t, TileV WP_THREAD& t2, int start, int length)
 {
     using T = typename TileK::Type;
     using V = typename TileV::Type;
 
     constexpr int max_elements_to_sort = TileK::Layout::Shape::size();
     const int num_elements_to_sort = length;
-    T* keys = &t.data(start);
-    V* values = &t2.data(start);
+    T WP_TILE_SHARED* keys = &t.data(start);
+    V WP_TILE_SHARED* values = &t2.data(start);
 
     WP_TILE_SYNC();
     int first_active_lane = 0;
@@ -1247,15 +1320,26 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, in
             if (is_power_of_two(num_elements_to_sort))
                 bitonic_sort_pairs_pow2_length_cpu<T, V>(keys, values, num_elements_to_sort);
             else
-                bitonic_sort_pairs_general_size_cpu<V, max_elements_to_sort>(keys, values, num_elements_to_sort);
+                bitonic_sort_pairs_general_size_cpu<V, max_elements_to_sort>(
+                    WP_TILE_ARENA_ARG keys, values, num_elements_to_sort
+                );
         } else if constexpr (max_elements_to_sort > BITONIC_SORT_THRESHOLD) {
+#if defined(__METAL_VERSION__)
+            {
+                T WP_TILE_SHARED* keys_tmp = (T WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(T) * max_elements_to_sort));
+                V WP_TILE_SHARED* values_tmp = (V WP_TILE_SHARED*)WP_TILE_ALLOC(int(sizeof(V) * max_elements_to_sort));
+                radix_sort_pairs_cpu<V>(keys, keys_tmp, values, values_tmp, num_elements_to_sort);
+                WP_TILE_ALLOC(-int(sizeof(V) * max_elements_to_sort));
+                WP_TILE_ALLOC(-int(sizeof(T) * max_elements_to_sort));
+            }
+#else
             if constexpr (WP_TILE_BLOCK_DIM == 1) {
                 T keys_tmp[max_elements_to_sort];
                 V values_tmp[max_elements_to_sort];
                 radix_sort_pairs_cpu<V>(keys, keys_tmp, values, values_tmp, num_elements_to_sort);
             } else {
-                T* keys_tmp = (T*)malloc(sizeof(T) * max_elements_to_sort);
-                V* values_tmp = (V*)malloc(sizeof(V) * max_elements_to_sort);
+                T WP_THREAD* keys_tmp = (T WP_THREAD*)malloc(sizeof(T) * max_elements_to_sort);
+                V WP_THREAD* values_tmp = (V WP_THREAD*)malloc(sizeof(V) * max_elements_to_sort);
                 if (!keys_tmp || !values_tmp) {
                     free(keys_tmp);
                     free(values_tmp);
@@ -1268,6 +1352,7 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, in
                     free(keys_tmp);
                 }
             }
+#endif
         }
     }
 
@@ -1278,15 +1363,24 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, in
 #endif  // !defined(__CUDA_ARCH__)
 
 
-template <typename TileK, typename TileV> inline void adj_tile_sort(TileK& t, TileV& t2, TileK& adj_t1, TileV& adj_t2)
+template <typename TileK, typename TileV>
+inline void adj_tile_sort(TileK WP_THREAD& t, TileV WP_THREAD& t2, TileK WP_THREAD& adj_t1, TileV WP_THREAD& adj_t2)
 {
     // MISSINGADJOINT: track permutation indices in forward pass, apply inverse permutation to
     // adj outputs
 }
 
 template <typename TileK, typename TileV>
-inline void
-adj_tile_sort(TileK& t, TileV& t2, int start, int length, TileK& adj_t1, TileV& adj_t2, int adj_start, int adj_length)
+inline void adj_tile_sort(
+    TileK WP_THREAD& t,
+    TileV WP_THREAD& t2,
+    int start,
+    int length,
+    TileK WP_THREAD& adj_t1,
+    TileV WP_THREAD& adj_t2,
+    int adj_start,
+    int adj_length
+)
 {
     // MISSINGADJOINT: track permutation indices in forward pass, apply inverse
     // permutation to adj outputs within [start, start+length)

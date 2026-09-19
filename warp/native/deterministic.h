@@ -3,6 +3,9 @@
 
 #pragma once
 
+// Deterministic reductions are a CUDA feature; the header is not used by Metal kernels.
+#if !defined(__METAL_VERSION__)
+
 // Note: this header is included in NVRTC-compiled code, so we cannot use
 // standard library headers like <cstdint>.  The int64_t type is provided
 // by the Warp builtin headers.
@@ -358,3 +361,5 @@ inline CUDA_CALLABLE void array_store_if_active(det_ctx& ctx, const A<T>& buf, i
         __VA_ARGS__ \
     } while (0)
 #endif
+
+#endif  // !__METAL_VERSION__
